@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+venv/
+
+# Build
+dist/
+src-tauri/target/
+
+# Data (user files)
+data/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.*
+
+# Temp
+*.tmp

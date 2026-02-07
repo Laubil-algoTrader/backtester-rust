@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rustc:*)",
+      "Bash(cargo:*)",
+      "Bash(node:*)",
+      "Bash(npm --version:*)",
+      "Bash(where:*)",
+      "Bash(powershell -Command:*)",
+      "Bash(export PATH=\"$PATH:/c/Users/Lautaro/.cargo/bin\")",
+      "Bash(npm create:*)"
+    ]
+  }
+}

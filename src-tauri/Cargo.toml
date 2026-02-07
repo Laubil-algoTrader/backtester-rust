@@ -1,0 +1,70 @@
+[package]
+name = "backtester"
+version = "0.1.0"
+description = "High-speed backtesting application"
+authors = ["Lautaro"]
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "backtester_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Tauri
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-shell = "2"
+
+# Data processing
+polars = { version = "0.46", features = ["lazy", "parquet", "temporal", "dtype-datetime", "csv", "strings", "dynamic_group_by", "regex"] }
+
+# Database
+rusqlite = { version = "0.33", features = ["bundled"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async
+tokio = { version = "1", features = ["full"] }
+
+# Dates
+chrono = { version = "0.4", features = ["serde"] }
+
+# IDs
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Errors
+thiserror = "2"
+anyhow = "1"
+
+# Parallelization
+rayon = "1"
+
+# Random (for genetic algorithm)
+rand = "0.8"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CSV
+csv = "1"
+
+# Math/Statistics
+statrs = "0.18"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
