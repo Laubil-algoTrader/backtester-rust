@@ -342,6 +342,7 @@ export interface OptimizationConfig {
   method: OptimizationMethod;
   parameter_ranges: ParameterRange[];
   objective: ObjectiveFunction;
+  backtest_config: BacktestConfig;
   ga_config?: GeneticAlgorithmConfig;
 }
 

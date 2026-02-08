@@ -91,6 +91,8 @@ pub fn run() {
             commands::save_strategy,
             commands::load_strategies,
             commands::delete_strategy,
+            commands::run_optimization,
+            commands::cancel_optimization,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

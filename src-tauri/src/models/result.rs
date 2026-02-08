@@ -1,5 +1,8 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
+use super::strategy::BacktestConfig;
 use super::trade::TradeResult;
 
 /// A point on the equity curve.
@@ -83,4 +86,67 @@ pub struct BacktestResults {
     pub drawdown_curve: Vec<DrawdownPoint>,
     pub returns: Vec<f64>,
     pub metrics: BacktestMetrics,
+}
+
+// ══════════════════════════════════════════════════════════════
+// Optimization types
+// ══════════════════════════════════════════════════════════════
+
+/// Optimization method.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum OptimizationMethod {
+    GridSearch,
+    GeneticAlgorithm,
+}
+
+/// Objective function to maximize during optimization.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ObjectiveFunction {
+    TotalProfit,
+    SharpeRatio,
+    ProfitFactor,
+    WinRate,
+}
+
+/// A parameter range to optimize over.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParameterRange {
+    pub rule_index: usize,
+    pub param_name: String,
+    pub display_name: String,
+    pub min: f64,
+    pub max: f64,
+    pub step: f64,
+}
+
+/// Configuration for the genetic algorithm.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GeneticAlgorithmConfig {
+    pub population_size: usize,
+    pub generations: usize,
+    pub mutation_rate: f64,
+    pub crossover_rate: f64,
+}
+
+/// Full optimization configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OptimizationConfig {
+    pub method: OptimizationMethod,
+    pub parameter_ranges: Vec<ParameterRange>,
+    pub objective: ObjectiveFunction,
+    pub backtest_config: BacktestConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ga_config: Option<GeneticAlgorithmConfig>,
+}
+
+/// A single result from an optimization run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OptimizationResult {
+    pub params: HashMap<String, f64>,
+    pub objective_value: f64,
+    pub total_return_pct: f64,
+    pub sharpe_ratio: f64,
+    pub max_drawdown_pct: f64,
+    pub total_trades: usize,
+    pub profit_factor: f64,
 }

@@ -6,10 +6,10 @@ use tauri::{AppHandle, Emitter};
 use tracing::info;
 
 use crate::data::{converter, loader, storage, validator};
-use crate::engine::executor;
+use crate::engine::{executor, optimizer};
 use crate::errors::AppError;
 use crate::models::config::{DataFormat, InstrumentConfig, Timeframe};
-use crate::models::result::BacktestResults;
+use crate::models::result::{BacktestResults, OptimizationConfig, OptimizationMethod, OptimizationResult};
 use crate::models::strategy::{BacktestConfig, Strategy};
 use crate::models::symbol::Symbol;
 use crate::AppState;
@@ -287,6 +287,125 @@ pub async fn delete_strategy(
 ) -> Result<(), AppError> {
     let db = state.db.lock().await;
     storage::delete_strategy_by_id(&db, &strategy_id)
+}
+
+// ── Optimization Commands ──
+
+/// Run optimization (Grid Search or Genetic Algorithm).
+#[tauri::command]
+pub async fn run_optimization(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    strategy: Strategy,
+    optimization_config: OptimizationConfig,
+) -> Result<Vec<OptimizationResult>, AppError> {
+    info!(
+        "Running {:?} optimization: {} parameter ranges",
+        optimization_config.method,
+        optimization_config.parameter_ranges.len()
+    );
+
+    // Reset cancel flag
+    state.cancel_flag.store(false, Ordering::Relaxed);
+
+    // Load symbol to get instrument config and parquet path
+    let bt_config = &optimization_config.backtest_config;
+    let db = state.db.lock().await;
+    let symbol = storage::get_symbol_by_id(&db, &bt_config.symbol_id)?;
+    drop(db);
+
+    let timeframe_key = bt_config.timeframe.as_str().to_string();
+    let parquet_path = symbol
+        .timeframe_paths
+        .get(&timeframe_key)
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "Timeframe {} not available for {}",
+                timeframe_key, symbol.name
+            ))
+        })?;
+
+    // Load and filter candles
+    let df = loader::load_parquet(&PathBuf::from(parquet_path))?;
+    let all_candles = executor::candles_from_dataframe(&df)?;
+    let candles = executor::filter_candles_by_date(
+        &all_candles,
+        &bt_config.start_date,
+        &bt_config.end_date,
+    );
+    if candles.is_empty() {
+        return Err(AppError::NoDataInRange);
+    }
+
+    info!("Optimization data: {} candles after date filter", candles.len());
+
+    let cancel_flag = state.cancel_flag.clone();
+    let instrument = symbol.instrument_config.clone();
+
+    let result = tokio::task::spawn_blocking(move || {
+        let bt_config = &optimization_config.backtest_config;
+        let ranges = &optimization_config.parameter_ranges;
+        let objective = &optimization_config.objective;
+
+        let progress_cb = |pct: u8, current: usize, total: usize, best: f64| {
+            let _ = app.emit(
+                "optimization-progress",
+                serde_json::json!({
+                    "percent": pct,
+                    "current": current,
+                    "total": total,
+                    "best_so_far": best,
+                    "eta_seconds": 0,
+                }),
+            );
+        };
+
+        match optimization_config.method {
+            OptimizationMethod::GridSearch => optimizer::run_grid_search(
+                &candles,
+                &strategy,
+                bt_config,
+                &instrument,
+                ranges,
+                objective,
+                &cancel_flag,
+                progress_cb,
+            ),
+            OptimizationMethod::GeneticAlgorithm => {
+                let ga_config = optimization_config.ga_config.as_ref().ok_or_else(|| {
+                    AppError::OptimizationError(
+                        "Genetic Algorithm config required".into(),
+                    )
+                })?;
+                optimizer::run_genetic_algorithm(
+                    &candles,
+                    &strategy,
+                    bt_config,
+                    &instrument,
+                    ranges,
+                    objective,
+                    ga_config,
+                    &cancel_flag,
+                    progress_cb,
+                )
+            }
+        }
+    })
+    .await
+    .map_err(|e| AppError::OptimizationError(format!("Task join error: {}", e)))??;
+
+    info!("Optimization complete: {} results", result.len());
+    Ok(result)
+}
+
+/// Cancel a running optimization.
+#[tauri::command]
+pub async fn cancel_optimization(
+    state: tauri::State<'_, AppState>,
+) -> Result<(), AppError> {
+    info!("Cancelling optimization");
+    state.cancel_flag.store(true, Ordering::Relaxed);
+    Ok(())
 }
 
 // ── Helpers ──
