@@ -4,11 +4,16 @@ import { DataPage } from "@/components/data/DataPage";
 import { StrategyPage } from "@/components/strategy/StrategyPage";
 import { BacktestPage } from "@/components/backtest/BacktestPage";
 import { OptimizationPage } from "@/components/optimization/OptimizationPage";
+import { ExportPage } from "@/components/export/ExportPage";
+import { TooltipProvider } from "@/components/ui/Tooltip";
+import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { useAppStore } from "@/stores/useAppStore";
 
 function App() {
   const activeSection = useAppStore((s) => s.activeSection);
   const darkMode = useAppStore((s) => s.darkMode);
+
+  useKeyboardShortcuts();
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", darkMode);
@@ -24,10 +29,16 @@ function App() {
         return <BacktestPage />;
       case "optimization":
         return <OptimizationPage />;
+      case "export":
+        return <ExportPage />;
     }
   };
 
-  return <AppLayout>{renderSection()}</AppLayout>;
+  return (
+    <TooltipProvider delayDuration={300}>
+      <AppLayout>{renderSection()}</AppLayout>
+    </TooltipProvider>
+  );
 }
 
 export default App;

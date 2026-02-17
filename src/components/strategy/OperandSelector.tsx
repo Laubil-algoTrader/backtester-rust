@@ -54,7 +54,7 @@ export function OperandSelector({ value, onChange }: OperandSelectorProps) {
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       <Select value={value.operand_type} onValueChange={handleTypeChange}>
-        <SelectTrigger className="h-8 w-[100px] text-xs">
+        <SelectTrigger className="h-8 w-[120px] text-xs">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>

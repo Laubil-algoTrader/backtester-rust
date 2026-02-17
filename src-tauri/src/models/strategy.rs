@@ -252,17 +252,46 @@ pub enum TradeDirection {
     Both,
 }
 
+// ── Trading Hours ──
+
+/// Time window during which the strategy is allowed to open new trades.
+/// Supports ranges that cross midnight (e.g. 22:00 → 06:00).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TradingHours {
+    pub start_hour: u8,
+    pub start_minute: u8,
+    pub end_hour: u8,
+    pub end_minute: u8,
+}
+
+// ── Close Trades At ──
+
+/// Force-close any open position at a specific time each day.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CloseTradesAt {
+    pub hour: u8,
+    pub minute: u8,
+}
+
 // ── Strategy ──
 
-/// A complete trading strategy with entry/exit rules and configuration.
+/// A complete trading strategy with direction-specific entry/exit rules and configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Strategy {
     pub id: String,
     pub name: String,
     pub created_at: String,
     pub updated_at: String,
-    pub entry_rules: Vec<Rule>,
-    pub exit_rules: Vec<Rule>,
+    /// Entry rules for long positions. Alias "entry_rules" for backward compat.
+    #[serde(alias = "entry_rules")]
+    pub long_entry_rules: Vec<Rule>,
+    #[serde(default)]
+    pub short_entry_rules: Vec<Rule>,
+    /// Exit rules for long positions. Alias "exit_rules" for backward compat.
+    #[serde(alias = "exit_rules")]
+    pub long_exit_rules: Vec<Rule>,
+    #[serde(default)]
+    pub short_exit_rules: Vec<Rule>,
     pub position_sizing: PositionSizing,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_loss: Option<StopLoss>,
@@ -272,6 +301,37 @@ pub struct Strategy {
     pub trailing_stop: Option<TrailingStop>,
     pub trading_costs: TradingCosts,
     pub trade_direction: TradeDirection,
+    /// Optional time window for trading. No new trades open outside this range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trading_hours: Option<TradingHours>,
+    /// Optional daily trade limit. No more than this many trades per day.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_daily_trades: Option<u32>,
+    /// Optional time to force-close all open positions each day.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close_trades_at: Option<CloseTradesAt>,
+}
+
+// ── Backtest Precision ──
+
+/// Precision mode for backtest execution.
+/// Controls how SL/TP/trailing stop are resolved within each bar.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BacktestPrecision {
+    /// Check SL/TP only against the selected timeframe's OHLC (fastest).
+    SelectedTfOnly,
+    /// Use M1 sub-bars to resolve SL/TP hit order within each TF bar.
+    M1TickSimulation,
+    /// Use raw tick data with custom spread for SL/TP resolution.
+    RealTickCustomSpread,
+    /// Use raw tick data with real bid/ask spread for SL/TP resolution.
+    RealTickRealSpread,
+}
+
+impl Default for BacktestPrecision {
+    fn default() -> Self {
+        Self::SelectedTfOnly
+    }
 }
 
 // ── Backtest Config ──
@@ -285,4 +345,7 @@ pub struct BacktestConfig {
     pub end_date: String,
     pub initial_capital: f64,
     pub leverage: f64,
+    /// Precision mode for SL/TP resolution. Defaults to SelectedTfOnly.
+    #[serde(default)]
+    pub precision: BacktestPrecision,
 }

@@ -20,8 +20,11 @@ pub fn pre_compute_indicators(
     let mut cache = IndicatorCache::new();
     let mut seen = std::collections::HashSet::new();
 
-    // Collect all indicator configs from entry and exit rules
-    let all_rules = strategy.entry_rules.iter().chain(strategy.exit_rules.iter());
+    // Collect all indicator configs from all 4 rule lists
+    let all_rules = strategy.long_entry_rules.iter()
+        .chain(strategy.short_entry_rules.iter())
+        .chain(strategy.long_exit_rules.iter())
+        .chain(strategy.short_exit_rules.iter());
     for rule in all_rules {
         collect_indicator_from_operand(&rule.left_operand, &mut seen, &mut cache, candles)?;
         collect_indicator_from_operand(&rule.right_operand, &mut seen, &mut cache, candles)?;
@@ -223,7 +226,10 @@ fn get_indicator_value(
 /// Calculate the maximum lookback period needed for a strategy's indicators.
 pub fn max_lookback(strategy: &Strategy) -> usize {
     let mut max = 0usize;
-    let all_rules = strategy.entry_rules.iter().chain(strategy.exit_rules.iter());
+    let all_rules = strategy.long_entry_rules.iter()
+        .chain(strategy.short_entry_rules.iter())
+        .chain(strategy.long_exit_rules.iter())
+        .chain(strategy.short_exit_rules.iter());
     for rule in all_rules {
         max = max.max(operand_lookback(&rule.left_operand));
         max = max.max(operand_lookback(&rule.right_operand));
@@ -284,6 +290,7 @@ mod tests {
                 low: p - 1.0,
                 close: p,
                 volume: 1000.0,
+                ..Default::default()
             })
             .collect()
     }
@@ -350,14 +357,16 @@ mod tests {
             name: "test".to_string(),
             created_at: String::new(),
             updated_at: String::new(),
-            entry_rules: vec![Rule {
+            long_entry_rules: vec![Rule {
                 id: "r1".to_string(),
                 left_operand: indicator_operand(IndicatorType::SMA, 3),
                 comparator: Comparator::CrossAbove,
                 right_operand: constant_operand(13.0),
                 logical_operator: None,
             }],
-            exit_rules: vec![],
+            short_entry_rules: vec![],
+            long_exit_rules: vec![],
+            short_exit_rules: vec![],
             position_sizing: PositionSizing {
                 sizing_type: PositionSizingType::FixedLots,
                 value: 1.0,
@@ -373,14 +382,17 @@ mod tests {
                 slippage_random: false,
             },
             trade_direction: TradeDirection::Both,
+            trading_hours: None,
+            max_daily_trades: None,
+            close_trades_at: None,
         };
 
         let cache = pre_compute_indicators(&strategy, &candles).unwrap();
         // SMA(3): NaN, NaN, 12.0, 14.0, 16.0
         // CrossAbove 13.0: at idx 3 → prev=12.0 <= 13.0 AND curr=14.0 > 13.0 → true
-        assert!(evaluate_rules(&strategy.entry_rules, 3, &cache, &candles));
+        assert!(evaluate_rules(&strategy.long_entry_rules, 3, &cache, &candles));
         // At idx 4 → prev=14.0 > 13.0, so no cross
-        assert!(!evaluate_rules(&strategy.entry_rules, 4, &cache, &candles));
+        assert!(!evaluate_rules(&strategy.long_entry_rules, 4, &cache, &candles));
     }
 
     #[test]

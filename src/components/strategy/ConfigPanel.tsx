@@ -10,6 +10,8 @@ import type {
   TradingCosts,
   CommissionType,
   TradeDirection,
+  TradingHours,
+  CloseTradesAt,
 } from "@/lib/types";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
 import {
@@ -29,12 +31,18 @@ interface ConfigPanelProps {
   trailingStop?: TrailingStop;
   tradingCosts: TradingCosts;
   tradeDirection: TradeDirection;
+  tradingHours?: TradingHours;
+  maxDailyTrades?: number;
+  closeTradesAt?: CloseTradesAt;
   onPositionSizingChange: (ps: PositionSizing) => void;
   onStopLossChange: (sl: StopLoss | undefined) => void;
   onTakeProfitChange: (tp: TakeProfit | undefined) => void;
   onTrailingStopChange: (ts: TrailingStop | undefined) => void;
   onTradingCostsChange: (costs: TradingCosts) => void;
   onTradeDirectionChange: (dir: TradeDirection) => void;
+  onTradingHoursChange: (hours: TradingHours | undefined) => void;
+  onMaxDailyTradesChange: (max: number | undefined) => void;
+  onCloseTradesAtChange: (ct: CloseTradesAt | undefined) => void;
 }
 
 const SIZING_TYPE_OPTIONS: { value: PositionSizingType; label: string }[] = [
@@ -86,16 +94,20 @@ function LabeledInput({
   min?: number;
   step?: string;
 }) {
+  const floor = min ?? 0;
   return (
     <div className="space-y-1">
       <label className="text-xs text-muted-foreground">{label}</label>
       <Input
         type="number"
         className="h-8 text-xs"
-        min={min ?? 0}
+        min={floor}
         step={step ?? "any"}
         value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
+        onChange={(e) => {
+          const v = Number(e.target.value);
+          onChange(Number.isNaN(v) ? floor : Math.max(floor, v));
+        }}
       />
     </div>
   );
@@ -130,12 +142,18 @@ export function ConfigPanel({
   trailingStop,
   tradingCosts,
   tradeDirection,
+  tradingHours,
+  maxDailyTrades,
+  closeTradesAt,
   onPositionSizingChange,
   onStopLossChange,
   onTakeProfitChange,
   onTrailingStopChange,
   onTradingCostsChange,
   onTradeDirectionChange,
+  onTradingHoursChange,
+  onMaxDailyTradesChange,
+  onCloseTradesAtChange,
 }: ConfigPanelProps) {
   return (
     <Tabs defaultValue="sizing" className="w-full">
@@ -145,7 +163,7 @@ export function ConfigPanel({
         <TabsTrigger value="tp" className="text-xs">TP</TabsTrigger>
         <TabsTrigger value="trail" className="text-xs">Trail</TabsTrigger>
         <TabsTrigger value="costs" className="text-xs">Costs</TabsTrigger>
-        <TabsTrigger value="dir" className="text-xs">Dir</TabsTrigger>
+        <TabsTrigger value="filters" className="text-xs">Filters</TabsTrigger>
       </TabsList>
 
       {/* Position Sizing */}
@@ -405,20 +423,162 @@ export function ConfigPanel({
         />
       </TabsContent>
 
-      {/* Direction */}
-      <TabsContent value="dir" className="space-y-3 pt-2">
-        <div className="flex gap-1">
-          {(["Long", "Short", "Both"] as TradeDirection[]).map((dir) => (
-            <Button
-              key={dir}
-              variant={tradeDirection === dir ? "default" : "outline"}
-              size="sm"
-              className="flex-1 text-xs"
-              onClick={() => onTradeDirectionChange(dir)}
-            >
-              {dir === "Both" ? "Both" : `${dir} Only`}
-            </Button>
-          ))}
+      {/* Filters: Direction + Trading Hours + Daily Limit */}
+      <TabsContent value="filters" className="space-y-4 pt-2">
+        {/* Direction */}
+        <div className="space-y-1">
+          <label className="text-xs text-muted-foreground">Direction</label>
+          <div className="flex gap-1">
+            {(["Long", "Short", "Both"] as TradeDirection[]).map((dir) => (
+              <Button
+                key={dir}
+                variant={tradeDirection === dir ? "default" : "outline"}
+                size="sm"
+                className="flex-1 text-xs"
+                onClick={() => onTradeDirectionChange(dir)}
+              >
+                {dir === "Both" ? "Both" : `${dir} Only`}
+              </Button>
+            ))}
+          </div>
+        </div>
+
+        {/* Trading Hours */}
+        <div className="space-y-2">
+          <ToggleCheckbox
+            label="Limit Trading Hours"
+            checked={!!tradingHours}
+            onChange={(checked) =>
+              onTradingHoursChange(
+                checked
+                  ? { start_hour: 8, start_minute: 0, end_hour: 16, end_minute: 0 }
+                  : undefined
+              )
+            }
+          />
+          {tradingHours && (
+            <div className="grid grid-cols-2 gap-2">
+              <div className="space-y-1">
+                <label className="text-xs text-muted-foreground">Start</label>
+                <div className="flex items-center gap-1">
+                  <Input
+                    type="number"
+                    className="h-8 w-14 text-xs"
+                    min={0}
+                    max={23}
+                    value={tradingHours.start_hour}
+                    onChange={(e) => {
+                      const v = Math.min(23, Math.max(0, Number(e.target.value) || 0));
+                      onTradingHoursChange({ ...tradingHours, start_hour: v });
+                    }}
+                  />
+                  <span className="text-xs text-muted-foreground">:</span>
+                  <Input
+                    type="number"
+                    className="h-8 w-14 text-xs"
+                    min={0}
+                    max={59}
+                    value={tradingHours.start_minute}
+                    onChange={(e) => {
+                      const v = Math.min(59, Math.max(0, Number(e.target.value) || 0));
+                      onTradingHoursChange({ ...tradingHours, start_minute: v });
+                    }}
+                  />
+                </div>
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs text-muted-foreground">End</label>
+                <div className="flex items-center gap-1">
+                  <Input
+                    type="number"
+                    className="h-8 w-14 text-xs"
+                    min={0}
+                    max={23}
+                    value={tradingHours.end_hour}
+                    onChange={(e) => {
+                      const v = Math.min(23, Math.max(0, Number(e.target.value) || 0));
+                      onTradingHoursChange({ ...tradingHours, end_hour: v });
+                    }}
+                  />
+                  <span className="text-xs text-muted-foreground">:</span>
+                  <Input
+                    type="number"
+                    className="h-8 w-14 text-xs"
+                    min={0}
+                    max={59}
+                    value={tradingHours.end_minute}
+                    onChange={(e) => {
+                      const v = Math.min(59, Math.max(0, Number(e.target.value) || 0));
+                      onTradingHoursChange({ ...tradingHours, end_minute: v });
+                    }}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Max Daily Trades */}
+        <div className="space-y-2">
+          <ToggleCheckbox
+            label="Limit Daily Trades"
+            checked={maxDailyTrades !== undefined}
+            onChange={(checked) =>
+              onMaxDailyTradesChange(checked ? 5 : undefined)
+            }
+          />
+          {maxDailyTrades !== undefined && (
+            <LabeledInput
+              label="Max trades per day"
+              value={maxDailyTrades}
+              onChange={(v) => onMaxDailyTradesChange(Math.max(1, Math.round(v)))}
+              min={1}
+              step="1"
+            />
+          )}
+        </div>
+
+        {/* Close Trades At */}
+        <div className="space-y-2">
+          <ToggleCheckbox
+            label="Close Trades At"
+            checked={!!closeTradesAt}
+            onChange={(checked) =>
+              onCloseTradesAtChange(
+                checked ? { hour: 16, minute: 0 } : undefined
+              )
+            }
+          />
+          {closeTradesAt && (
+            <div className="space-y-1">
+              <label className="text-xs text-muted-foreground">Close time</label>
+              <div className="flex items-center gap-1">
+                <Input
+                  type="number"
+                  className="h-8 w-14 text-xs"
+                  min={0}
+                  max={23}
+                  value={closeTradesAt.hour}
+                  onChange={(e) => {
+                    const v = Math.min(23, Math.max(0, Number(e.target.value) || 0));
+                    onCloseTradesAtChange({ ...closeTradesAt, hour: v });
+                  }}
+                />
+                <span className="text-xs text-muted-foreground">:</span>
+                <Input
+                  type="number"
+                  className="h-8 w-14 text-xs"
+                  min={0}
+                  max={59}
+                  value={closeTradesAt.minute}
+                  onChange={(e) => {
+                    const v = Math.min(59, Math.max(0, Number(e.target.value) || 0));
+                    onCloseTradesAtChange({ ...closeTradesAt, minute: v });
+                  }}
+                />
+              </div>
+            </div>
+          )}
         </div>
       </TabsContent>
     </Tabs>

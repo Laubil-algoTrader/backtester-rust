@@ -27,26 +27,29 @@ export function DrawdownChart({ data }: DrawdownChartProps) {
     .map((p) => ({ ...p, drawdown_pct: -p.drawdown_pct }));
 
   return (
-    <ResponsiveContainer width="100%" height={200}>
+    <ResponsiveContainer width="100%" height={160}>
       <AreaChart data={sampled} margin={{ top: 5, right: 20, bottom: 5, left: 10 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+        <CartesianGrid strokeDasharray="3 3" stroke="hsl(220 10% 14%)" />
         <XAxis
           dataKey="timestamp"
           tickFormatter={formatTimestamp}
-          tick={{ fontSize: 11, fill: "hsl(var(--muted-foreground))" }}
+          tick={{ fontSize: 10, fill: "hsl(45 5% 40%)" }}
+          stroke="hsl(220 10% 14%)"
           interval="preserveStartEnd"
         />
         <YAxis
           tickFormatter={(v: number) => `${v.toFixed(1)}%`}
-          tick={{ fontSize: 11, fill: "hsl(var(--muted-foreground))" }}
+          tick={{ fontSize: 10, fill: "hsl(45 5% 40%)" }}
+          stroke="hsl(220 10% 14%)"
           width={60}
         />
         <Tooltip
           contentStyle={{
-            backgroundColor: "hsl(var(--card))",
-            border: "1px solid hsl(var(--border))",
-            borderRadius: 6,
-            fontSize: 12,
+            backgroundColor: "hsl(220 15% 7%)",
+            border: "1px solid hsl(43 20% 18%)",
+            borderRadius: 4,
+            fontSize: 11,
+            color: "hsl(45 10% 85%)",
           }}
           labelFormatter={(label: string) => label}
           formatter={(value: number) => [`${value.toFixed(2)}%`, "Drawdown"]}
@@ -54,9 +57,9 @@ export function DrawdownChart({ data }: DrawdownChartProps) {
         <Area
           type="monotone"
           dataKey="drawdown_pct"
-          stroke="hsl(0 84% 60%)"
-          fill="hsl(0 84% 60%)"
-          fillOpacity={0.2}
+          stroke="hsl(0 72% 50%)"
+          fill="hsl(0 72% 50%)"
+          fillOpacity={0.15}
           strokeWidth={1.5}
           animationDuration={500}
         />

@@ -17,17 +17,17 @@ interface HeatmapChartProps {
 }
 
 function interpolateColor(value: number, min: number, max: number): string {
-  if (max === min) return "hsl(142 71% 45%)";
+  if (max === min) return "hsl(152 60% 42%)";
   const t = (value - min) / (max - min);
   // Red (0) → Yellow (0.5) → Green (1)
   if (t < 0.5) {
-    const r = 220;
-    const g = Math.round(50 + t * 2 * 170);
+    const r = 200;
+    const g = Math.round(50 + t * 2 * 150);
     const b = 50;
     return `rgb(${r},${g},${b})`;
   } else {
-    const r = Math.round(220 - (t - 0.5) * 2 * 180);
-    const g = 200;
+    const r = Math.round(200 - (t - 0.5) * 2 * 160);
+    const g = 180;
     const b = Math.round(50 + (t - 0.5) * 2 * 50);
     return `rgb(${r},${g},${b})`;
   }
@@ -52,44 +52,47 @@ export function HeatmapChart({ results, parameterRanges }: HeatmapChartProps) {
 
   return (
     <div>
-      <h3 className="mb-2 text-sm font-medium">
+      <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-[0.15em] text-muted-foreground">
         Heatmap: {xName} vs {yName}
       </h3>
       <ResponsiveContainer width="100%" height={300}>
         <ScatterChart margin={{ top: 10, right: 20, bottom: 30, left: 20 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+          <CartesianGrid strokeDasharray="3 3" stroke="hsl(220 10% 14%)" />
           <XAxis
             type="number"
             dataKey="x"
             name={xName}
-            tick={{ fontSize: 11, fill: "hsl(var(--muted-foreground))" }}
+            tick={{ fontSize: 10, fill: "hsl(45 5% 40%)" }}
+            stroke="hsl(220 10% 14%)"
             label={{
               value: xName.length > 30 ? xName.slice(0, 30) + "..." : xName,
               position: "bottom",
               offset: 10,
-              style: { fontSize: 11, fill: "hsl(var(--muted-foreground))" },
+              style: { fontSize: 10, fill: "hsl(45 5% 40%)" },
             }}
           />
           <YAxis
             type="number"
             dataKey="y"
             name={yName}
-            tick={{ fontSize: 11, fill: "hsl(var(--muted-foreground))" }}
+            tick={{ fontSize: 10, fill: "hsl(45 5% 40%)" }}
+            stroke="hsl(220 10% 14%)"
             label={{
               value: yName.length > 30 ? yName.slice(0, 30) + "..." : yName,
               angle: -90,
               position: "insideLeft",
               offset: -5,
-              style: { fontSize: 11, fill: "hsl(var(--muted-foreground))" },
+              style: { fontSize: 10, fill: "hsl(45 5% 40%)" },
             }}
             width={60}
           />
           <Tooltip
             contentStyle={{
-              backgroundColor: "hsl(var(--card))",
-              border: "1px solid hsl(var(--border))",
-              borderRadius: 6,
-              fontSize: 12,
+              backgroundColor: "hsl(220 15% 7%)",
+              border: "1px solid hsl(43 20% 18%)",
+              borderRadius: 4,
+              fontSize: 11,
+              color: "hsl(45 10% 85%)",
             }}
             formatter={(value: number, name: string) => [
               value.toFixed(2),

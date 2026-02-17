@@ -38,16 +38,31 @@ pub fn calculate_lots(
     let raw = match sizing.sizing_type {
         PositionSizingType::FixedLots => sizing.value,
         PositionSizingType::FixedAmount => {
-            if entry_price == 0.0 || instrument.lot_size == 0.0 {
-                return instrument.min_lot;
+            // Fixed Amount = risk exactly $X per trade based on SL distance
+            // lots = risk_amount / (sl_distance_pips * pip_value)
+            if let Some(sl) = sl_price {
+                let sl_distance_pips = (entry_price - sl).abs() / instrument.pip_size;
+                if sl_distance_pips == 0.0 || instrument.pip_value == 0.0 {
+                    return instrument.min_lot;
+                }
+                sizing.value / (sl_distance_pips * instrument.pip_value)
+            } else {
+                // No SL → can't calculate risk-based sizing, use min lot
+                instrument.min_lot
             }
-            sizing.value / (entry_price * instrument.lot_size)
         }
         PositionSizingType::PercentEquity => {
-            if entry_price == 0.0 || instrument.lot_size == 0.0 {
-                return instrument.min_lot;
+            // Same as FixedAmount but amount = equity * percent / 100
+            if let Some(sl) = sl_price {
+                let sl_distance_pips = (entry_price - sl).abs() / instrument.pip_size;
+                if sl_distance_pips == 0.0 || instrument.pip_value == 0.0 {
+                    return instrument.min_lot;
+                }
+                let risk_amount = equity * sizing.value / 100.0;
+                risk_amount / (sl_distance_pips * instrument.pip_value)
+            } else {
+                instrument.min_lot
             }
-            (equity * sizing.value / 100.0) / (entry_price * instrument.lot_size)
         }
         PositionSizingType::RiskBased => {
             // Risk-based: lots = (equity * risk%) / (SL distance in pips * pip_value)
@@ -182,40 +197,232 @@ pub fn update_trailing_stop(position: &mut OpenPosition, candle: &Candle) {
 
 /// Check if SL or TP was hit on the current candle.
 /// Returns (exit_price, CloseReason) if triggered.
+///
+/// Handles three realistic scenarios:
+/// 1. **Gap-through SL**: SL is a stop-market order. If price opens beyond
+///    the SL level, fill is at the open (worse for the trader, realistic slippage).
+/// 2. **TP fill**: TP is a limit order. Fills at the TP level (conservative).
+/// 3. **Both hit on same candle**: The level closer to the open was hit first.
 pub fn check_sl_tp_hit(
     position: &OpenPosition,
     candle: &Candle,
 ) -> Option<(f64, CloseReason)> {
-    match position.direction {
-        TradeDirection::Long | TradeDirection::Both => {
-            // For long: SL hit if low <= SL, TP hit if high >= TP
-            if let Some(sl) = position.stop_loss {
-                if candle.low <= sl {
-                    return Some((sl, CloseReason::StopLoss));
-                }
+    let sl_result = check_stop_loss(position, candle);
+    let tp_result = check_take_profit(position, candle);
+
+    match (sl_result, tp_result) {
+        (None, None) => None,
+        (Some(sl), None) => Some(sl),
+        (None, Some(tp)) => Some(tp),
+        (Some((sl_fill, _)), Some((tp_fill, _))) => {
+            // Both triggered on same candle — closer level to open was hit first
+            let dist_sl = (candle.open - sl_fill).abs();
+            let dist_tp = (candle.open - tp_fill).abs();
+            if dist_sl <= dist_tp {
+                Some((sl_fill, CloseReason::StopLoss))
+            } else {
+                Some((tp_fill, CloseReason::TakeProfit))
             }
-            if let Some(tp) = position.take_profit {
-                if candle.high >= tp {
-                    return Some((tp, CloseReason::TakeProfit));
-                }
+        }
+    }
+}
+
+/// Check if stop loss was triggered. SL is a stop-market order:
+/// gap-through fills at open (worse price for the trader).
+fn check_stop_loss(pos: &OpenPosition, candle: &Candle) -> Option<(f64, CloseReason)> {
+    let sl = pos.stop_loss?;
+    match pos.direction {
+        TradeDirection::Long | TradeDirection::Both => {
+            if candle.low <= sl {
+                // Gap-through: open already below SL → fill at open (worse)
+                let fill = if candle.open <= sl { candle.open } else { sl };
+                Some((fill, CloseReason::StopLoss))
+            } else {
+                None
             }
         }
         TradeDirection::Short => {
-            // For short: SL hit if high >= SL, TP hit if low <= TP
-            if let Some(sl) = position.stop_loss {
-                if candle.high >= sl {
-                    return Some((sl, CloseReason::StopLoss));
+            if candle.high >= sl {
+                // Gap-through: open already above SL → fill at open (worse)
+                let fill = if candle.open >= sl { candle.open } else { sl };
+                Some((fill, CloseReason::StopLoss))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Check if take profit was triggered. TP is a limit order:
+/// always fills at the TP level (conservative, standard behavior).
+fn check_take_profit(pos: &OpenPosition, candle: &Candle) -> Option<(f64, CloseReason)> {
+    let tp = pos.take_profit?;
+    match pos.direction {
+        TradeDirection::Long | TradeDirection::Both => {
+            if candle.high >= tp {
+                Some((tp, CloseReason::TakeProfit))
+            } else {
+                None
+            }
+        }
+        TradeDirection::Short => {
+            if candle.low <= tp {
+                Some((tp, CloseReason::TakeProfit))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════
+// Tick-level functions (for RealTick precision modes)
+// NOTE: These are kept for reference/testing but the executor now uses
+// an optimized inlined loop in process_subbars_tick_columnar() instead.
+// ══════════════════════════════════════════════════════════════
+
+/// Check SL/TP hit at tick level (single bid/ask price point, no OHLC range).
+/// For Long positions: exit at bid. For Short: exit at ask.
+#[allow(dead_code)]
+pub fn check_tick_sl_tp(
+    pos: &OpenPosition,
+    bid: f64,
+    ask: f64,
+) -> Option<(f64, CloseReason)> {
+    let sl_result = check_tick_stop_loss(pos, bid, ask);
+    let tp_result = check_tick_take_profit(pos, bid, ask);
+
+    match (sl_result, tp_result) {
+        (None, None) => None,
+        (Some(sl), None) => Some(sl),
+        (None, Some(tp)) => Some(tp),
+        (Some(sl), Some(_tp)) => {
+            // Both hit on same tick — SL (stop order) takes priority
+            Some(sl)
+        }
+    }
+}
+
+/// Check stop loss at tick level. SL is a stop-market order.
+#[allow(dead_code)]
+fn check_tick_stop_loss(pos: &OpenPosition, bid: f64, ask: f64) -> Option<(f64, CloseReason)> {
+    let sl = pos.stop_loss?;
+    match pos.direction {
+        TradeDirection::Long | TradeDirection::Both => {
+            // Long exits at bid
+            if bid <= sl {
+                Some((bid, CloseReason::StopLoss))
+            } else {
+                None
+            }
+        }
+        TradeDirection::Short => {
+            // Short exits at ask
+            if ask >= sl {
+                Some((ask, CloseReason::StopLoss))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Check take profit at tick level. TP is a limit order — fills at TP level.
+#[allow(dead_code)]
+fn check_tick_take_profit(pos: &OpenPosition, bid: f64, ask: f64) -> Option<(f64, CloseReason)> {
+    let tp = pos.take_profit?;
+    match pos.direction {
+        TradeDirection::Long | TradeDirection::Both => {
+            // Long exits at bid; TP limit fill at TP level
+            if bid >= tp {
+                Some((tp, CloseReason::TakeProfit))
+            } else {
+                None
+            }
+        }
+        TradeDirection::Short => {
+            // Short exits at ask; TP limit fill at TP level
+            if ask <= tp {
+                Some((tp, CloseReason::TakeProfit))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Update trailing stop based on tick bid/ask prices.
+#[allow(dead_code)]
+pub fn update_trailing_stop_tick(pos: &mut OpenPosition, bid: f64, ask: f64) {
+    if let Some(distance) = pos.trailing_stop_distance {
+        match pos.direction {
+            TradeDirection::Long | TradeDirection::Both => {
+                // Track highest bid (selling price)
+                if bid > pos.highest_since_entry {
+                    pos.highest_since_entry = bid;
+                    let new_sl = bid - distance;
+                    if let Some(ref mut sl) = pos.stop_loss {
+                        if new_sl > *sl {
+                            *sl = new_sl;
+                        }
+                    } else {
+                        pos.stop_loss = Some(new_sl);
+                    }
                 }
             }
-            if let Some(tp) = position.take_profit {
-                if candle.low <= tp {
-                    return Some((tp, CloseReason::TakeProfit));
+            TradeDirection::Short => {
+                // Track lowest ask (buying price)
+                if ask < pos.lowest_since_entry {
+                    pos.lowest_since_entry = ask;
+                    let new_sl = ask + distance;
+                    if let Some(ref mut sl) = pos.stop_loss {
+                        if new_sl < *sl {
+                            *sl = new_sl;
+                        }
+                    } else {
+                        pos.stop_loss = Some(new_sl);
+                    }
                 }
             }
         }
     }
-    None
 }
+
+/// Update MAE/MFE based on tick bid/ask prices.
+#[allow(dead_code)]
+pub fn update_mae_mfe_tick(
+    pos: &mut OpenPosition,
+    bid: f64,
+    ask: f64,
+    instrument: &InstrumentConfig,
+) {
+    match pos.direction {
+        TradeDirection::Long | TradeDirection::Both => {
+            let adverse = (pos.entry_price - bid) / instrument.pip_size;
+            let favorable = (bid - pos.entry_price) / instrument.pip_size;
+            if adverse > pos.mae_pips {
+                pos.mae_pips = adverse;
+            }
+            if favorable > pos.mfe_pips {
+                pos.mfe_pips = favorable;
+            }
+        }
+        TradeDirection::Short => {
+            let adverse = (ask - pos.entry_price) / instrument.pip_size;
+            let favorable = (pos.entry_price - ask) / instrument.pip_size;
+            if adverse > pos.mae_pips {
+                pos.mae_pips = adverse;
+            }
+            if favorable > pos.mfe_pips {
+                pos.mfe_pips = favorable;
+            }
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════
+// Candle-level MAE/MFE
+// ══════════════════════════════════════════════════════════════
 
 /// Update MAE/MFE tracking for an open position.
 pub fn update_mae_mfe(

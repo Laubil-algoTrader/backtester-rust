@@ -24,6 +24,30 @@ pub fn apply_entry_costs(
     }
 }
 
+/// Apply trading costs (slippage) to the exit price.
+/// For long: sell at bid (price - slippage), for short: buy at ask (price + slippage).
+/// Note: spread is already paid on entry, only slippage affects exit.
+pub fn apply_exit_costs(
+    price: f64,
+    direction: TradeDirection,
+    costs: &TradingCosts,
+    instrument: &InstrumentConfig,
+) -> f64 {
+    let slippage = if costs.slippage_random {
+        let random_factor = rand::random::<f64>();
+        costs.slippage_pips * instrument.pip_size * random_factor
+    } else {
+        costs.slippage_pips * instrument.pip_size
+    };
+
+    match direction {
+        // Long exit = selling → price moves against us (lower)
+        TradeDirection::Long | TradeDirection::Both => price - slippage,
+        // Short exit = buying → price moves against us (higher)
+        TradeDirection::Short => price + slippage,
+    }
+}
+
 /// Calculate monetary P&L for a closed position.
 pub fn calculate_pnl(
     direction: TradeDirection,

@@ -30,6 +30,14 @@ export const INSTRUMENT_PRESETS: Record<string, InstrumentConfig> = {
     tick_size: 0.001,
     digits: 3,
   },
+  "Gold (XAUUSD)": {
+    pip_size: 0.01,
+    pip_value: 1,
+    lot_size: 100,
+    min_lot: 0.01,
+    tick_size: 0.01,
+    digits: 2,
+  },
   Crypto: {
     pip_size: 0.01,
     pip_value: 0.01,
@@ -48,9 +56,97 @@ export const INSTRUMENT_PRESETS: Record<string, InstrumentConfig> = {
   },
 };
 
+// ── Dukascopy Download ──
+
+export type DukascopyCategory = "Forex" | "Indices" | "Commodities" | "Crypto";
+
+export interface DukascopyInstrument {
+  name: string;
+  symbol: string;
+  category: DukascopyCategory;
+  point_value: number;
+  preset: string;
+}
+
+export const DUKASCOPY_INSTRUMENTS: DukascopyInstrument[] = [
+  // ── Forex Major ──
+  { name: "EUR/USD", symbol: "EURUSD", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "GBP/USD", symbol: "GBPUSD", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "USD/CHF", symbol: "USDCHF", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "AUD/USD", symbol: "AUDUSD", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "USD/CAD", symbol: "USDCAD", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "NZD/USD", symbol: "NZDUSD", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "EUR/GBP", symbol: "EURGBP", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "EUR/CHF", symbol: "EURCHF", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "GBP/CHF", symbol: "GBPCHF", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "AUD/CAD", symbol: "AUDCAD", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "AUD/CHF", symbol: "AUDCHF", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "AUD/NZD", symbol: "AUDNZD", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "EUR/AUD", symbol: "EURAUD", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "EUR/NZD", symbol: "EURNZD", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "EUR/CAD", symbol: "EURCAD", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "GBP/AUD", symbol: "GBPAUD", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "GBP/NZD", symbol: "GBPNZD", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "GBP/CAD", symbol: "GBPCAD", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "NZD/CAD", symbol: "NZDCAD", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "NZD/CHF", symbol: "NZDCHF", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  // ── Forex JPY pairs ──
+  { name: "USD/JPY", symbol: "USDJPY", category: "Forex", point_value: 1000, preset: "Forex JPY" },
+  { name: "EUR/JPY", symbol: "EURJPY", category: "Forex", point_value: 1000, preset: "Forex JPY" },
+  { name: "GBP/JPY", symbol: "GBPJPY", category: "Forex", point_value: 1000, preset: "Forex JPY" },
+  { name: "AUD/JPY", symbol: "AUDJPY", category: "Forex", point_value: 1000, preset: "Forex JPY" },
+  { name: "CAD/JPY", symbol: "CADJPY", category: "Forex", point_value: 1000, preset: "Forex JPY" },
+  { name: "CHF/JPY", symbol: "CHFJPY", category: "Forex", point_value: 1000, preset: "Forex JPY" },
+  { name: "NZD/JPY", symbol: "NZDJPY", category: "Forex", point_value: 1000, preset: "Forex JPY" },
+  // ── Forex Exotic ──
+  { name: "USD/ZAR", symbol: "USDZAR", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "USD/MXN", symbol: "USDMXN", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "USD/TRY", symbol: "USDTRY", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "USD/SEK", symbol: "USDSEK", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "USD/NOK", symbol: "USDNOK", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "USD/SGD", symbol: "USDSGD", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "USD/HKD", symbol: "USDHKD", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "USD/PLN", symbol: "USDPLN", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "USD/CZK", symbol: "USDCZK", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "USD/HUF", symbol: "USDHUF", category: "Forex", point_value: 1000, preset: "Forex JPY" },
+  // ── Indices ──
+  { name: "S&P 500", symbol: "USA500IDXUSD", category: "Indices", point_value: 1, preset: "Indices" },
+  { name: "Dow Jones 30", symbol: "USA30IDXUSD", category: "Indices", point_value: 1, preset: "Indices" },
+  { name: "Nasdaq 100", symbol: "USATECHIDXUSD", category: "Indices", point_value: 1, preset: "Indices" },
+  { name: "DAX 40", symbol: "DEUIDXEUR", category: "Indices", point_value: 1, preset: "Indices" },
+  { name: "FTSE 100", symbol: "GBRIDXGBP", category: "Indices", point_value: 1, preset: "Indices" },
+  { name: "Nikkei 225", symbol: "JPNIDXJPY", category: "Indices", point_value: 1, preset: "Indices" },
+  { name: "CAC 40", symbol: "FRAIDXEUR", category: "Indices", point_value: 1, preset: "Indices" },
+  { name: "ASX 200", symbol: "AUSIDXAUD", category: "Indices", point_value: 1, preset: "Indices" },
+  { name: "Euro Stoxx 50", symbol: "EABORIDXEUR", category: "Indices", point_value: 1, preset: "Indices" },
+  { name: "Hang Seng", symbol: "HKGIDXHKD", category: "Indices", point_value: 1, preset: "Indices" },
+  // ── Commodities ──
+  { name: "Gold (XAU/USD)", symbol: "XAUUSD", category: "Commodities", point_value: 10, preset: "Gold (XAUUSD)" },
+  { name: "Silver (XAG/USD)", symbol: "XAGUSD", category: "Commodities", point_value: 1000, preset: "Forex Major" },
+  { name: "Brent Crude Oil", symbol: "BCOUSD", category: "Commodities", point_value: 1000, preset: "Forex Major" },
+  { name: "WTI Crude Oil", symbol: "WTIUSD", category: "Commodities", point_value: 1000, preset: "Forex Major" },
+  { name: "Natural Gas", symbol: "NGUSD", category: "Commodities", point_value: 10000, preset: "Forex Major" },
+  { name: "Platinum", symbol: "XPTUSD", category: "Commodities", point_value: 10, preset: "Gold (XAUUSD)" },
+  { name: "Palladium", symbol: "XPDUSD", category: "Commodities", point_value: 10, preset: "Gold (XAUUSD)" },
+  { name: "Copper", symbol: "XCUUSD", category: "Commodities", point_value: 10000, preset: "Forex Major" },
+  // ── Crypto ──
+  { name: "BTC/USD", symbol: "BTCUSD", category: "Crypto", point_value: 1, preset: "Crypto" },
+  { name: "ETH/USD", symbol: "ETHUSD", category: "Crypto", point_value: 1, preset: "Crypto" },
+  { name: "LTC/USD", symbol: "LTCUSD", category: "Crypto", point_value: 1, preset: "Crypto" },
+  { name: "XRP/USD", symbol: "XRPUSD", category: "Crypto", point_value: 100000, preset: "Crypto" },
+];
+
 // ── Symbol ──
 
 export type Timeframe = "tick" | "m1" | "m5" | "m15" | "m30" | "h1" | "h4" | "d1";
+
+export const TIMEFRAME_ORDER: Timeframe[] = ["tick", "m1", "m5", "m15", "m30", "h1", "h4", "d1"];
+
+export function sortTimeframes(timeframes: string[]): string[] {
+  return [...timeframes].sort(
+    (a, b) => TIMEFRAME_ORDER.indexOf(a as Timeframe) - TIMEFRAME_ORDER.indexOf(b as Timeframe)
+  );
+}
 
 export interface Symbol {
   id: string;
@@ -187,20 +283,52 @@ export interface TradingCosts {
 
 export type TradeDirection = "Long" | "Short" | "Both";
 
+export interface TradingHours {
+  start_hour: number;
+  start_minute: number;
+  end_hour: number;
+  end_minute: number;
+}
+
+export interface CloseTradesAt {
+  hour: number;
+  minute: number;
+}
+
 export interface Strategy {
   id: string;
   name: string;
   created_at: string;
   updated_at: string;
-  entry_rules: Rule[];
-  exit_rules: Rule[];
+  long_entry_rules: Rule[];
+  short_entry_rules: Rule[];
+  long_exit_rules: Rule[];
+  short_exit_rules: Rule[];
   position_sizing: PositionSizing;
   stop_loss?: StopLoss;
   take_profit?: TakeProfit;
   trailing_stop?: TrailingStop;
   trading_costs: TradingCosts;
   trade_direction: TradeDirection;
+  trading_hours?: TradingHours;
+  max_daily_trades?: number;
+  close_trades_at?: CloseTradesAt;
 }
+
+// ── Backtest Precision ──
+
+export type BacktestPrecision =
+  | "SelectedTfOnly"
+  | "M1TickSimulation"
+  | "RealTickCustomSpread"
+  | "RealTickRealSpread";
+
+export const PRECISION_LABELS: Record<BacktestPrecision, string> = {
+  SelectedTfOnly: "Selected TF only (fastest)",
+  M1TickSimulation: "M1 tick simulation (slow)",
+  RealTickCustomSpread: "Real Tick - custom spread (slowest)",
+  RealTickRealSpread: "Real Tick - real spread (slowest)",
+};
 
 // ── Backtest Config ──
 
@@ -211,11 +339,12 @@ export interface BacktestConfig {
   end_date: string;
   initial_capital: number;
   leverage: number;
+  precision: BacktestPrecision;
 }
 
 // ── Trade Result ──
 
-export type TradeCloseReason = "Signal" | "StopLoss" | "TakeProfit" | "TrailingStop" | "EndOfData";
+export type TradeCloseReason = "Signal" | "StopLoss" | "TakeProfit" | "TrailingStop" | "EndOfData" | "TimeClose";
 
 export interface TradeResult {
   id: string;
@@ -292,6 +421,14 @@ export interface BacktestMetrics {
   mae_max: number;
   mfe_avg: number;
   mfe_max: number;
+
+  // Stagnation & Ulcer
+  stagnation_bars: number;
+  stagnation_time: string;
+  ulcer_index_pct: number;
+
+  // Return / Drawdown ratio
+  return_dd_ratio: number;
 }
 
 // ── Equity/Drawdown points ──
@@ -320,7 +457,9 @@ export interface BacktestResults {
 
 export type OptimizationMethod = "GridSearch" | "GeneticAlgorithm";
 
-export type ObjectiveFunction = "TotalProfit" | "SharpeRatio" | "ProfitFactor" | "WinRate";
+export type ObjectiveFunction = "TotalProfit" | "SharpeRatio" | "ProfitFactor" | "WinRate" | "ReturnDdRatio" | "MinStagnation" | "MinUlcerIndex";
+
+export type ParamSource = "long_entry" | "short_entry" | "long_exit" | "short_exit" | "stop_loss" | "take_profit" | "trailing_stop" | "trading_hours" | "close_trades_at";
 
 export interface ParameterRange {
   rule_index: number;
@@ -329,6 +468,8 @@ export interface ParameterRange {
   min: number;
   max: number;
   step: number;
+  operand_side: "left" | "right";
+  param_source: ParamSource;
 }
 
 export interface GeneticAlgorithmConfig {
@@ -338,22 +479,43 @@ export interface GeneticAlgorithmConfig {
   crossover_rate: number;
 }
 
+export interface OosPeriod {
+  label: string;
+  start_date: string;
+  end_date: string;
+}
+
+export interface OosResult {
+  label: string;
+  total_return_pct: number;
+  sharpe_ratio: number;
+  max_drawdown_pct: number;
+  profit_factor: number;
+  total_trades: number;
+}
+
 export interface OptimizationConfig {
   method: OptimizationMethod;
   parameter_ranges: ParameterRange[];
-  objective: ObjectiveFunction;
+  objectives: ObjectiveFunction[];
   backtest_config: BacktestConfig;
   ga_config?: GeneticAlgorithmConfig;
+  oos_periods: OosPeriod[];
 }
 
 export interface OptimizationResult {
   params: Record<string, number>;
   objective_value: number;
+  composite_score: number;
   total_return_pct: number;
   sharpe_ratio: number;
   max_drawdown_pct: number;
   total_trades: number;
   profit_factor: number;
+  return_dd_ratio: number;
+  stagnation_bars: number;
+  ulcer_index_pct: number;
+  oos_results: OosResult[];
 }
 
 // ── Progress Events ──
@@ -384,6 +546,18 @@ export interface ErrorResponse {
   message: string;
 }
 
+// ── Code Generation ──
+
+export interface CodeFile {
+  filename: string;
+  code: string;
+  is_main: boolean;
+}
+
+export interface CodeGenerationResult {
+  files: CodeFile[];
+}
+
 // ── App Section ──
 
-export type AppSection = "data" | "strategy" | "backtest" | "optimization";
+export type AppSection = "data" | "strategy" | "backtest" | "optimization" | "export";

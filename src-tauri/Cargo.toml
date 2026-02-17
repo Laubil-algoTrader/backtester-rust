@@ -59,6 +59,15 @@ csv = "1"
 # Math/Statistics
 statrs = "0.18"
 
+# HTTP client for Dukascopy downloads
+reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
+
+# LZMA decompression for Dukascopy .bi5 files (raw LZMA format, NOT XZ)
+lzma-rs = "0.3"
+
+# Binary parsing (big-endian)
+byteorder = "1"
+
 [dev-dependencies]
 tempfile = "3"
 

@@ -28,6 +28,9 @@ pub enum AppError {
     #[error("Timeframe conversion failed: {0}")]
     TimeframeConversion(String),
 
+    #[error("CSV parse error at row {row}: {message}")]
+    CsvParseError { row: usize, message: String },
+
     // ── Database ──
     #[error("Database error: {0}")]
     Database(String),
@@ -69,6 +72,13 @@ pub enum AppError {
     #[error("Optimization cancelled")]
     OptimizationCancelled,
 
+    // ── Download ──
+    #[error("Download failed: {0}")]
+    DownloadError(String),
+
+    #[error("Download cancelled")]
+    DownloadCancelled,
+
     #[error("Too many combinations: {count} exceeds limit of {limit}")]
     TooManyCombinations { count: usize, limit: usize },
 
@@ -103,6 +113,7 @@ impl From<&AppError> for ErrorResponse {
             AppError::FileWrite(_) => "FILE_WRITE",
             AppError::ParquetConversion(_) => "PARQUET_CONVERSION",
             AppError::TimeframeConversion(_) => "TIMEFRAME_CONVERSION",
+            AppError::CsvParseError { .. } => "CSV_PARSE_ERROR",
             AppError::Database(_) => "DATABASE",
             AppError::NotFound(_) => "NOT_FOUND",
             AppError::InvalidStrategy(_) => "INVALID_STRATEGY",
@@ -116,6 +127,8 @@ impl From<&AppError> for ErrorResponse {
             AppError::OptimizationError(_) => "OPTIMIZATION_ERROR",
             AppError::OptimizationCancelled => "OPTIMIZATION_CANCELLED",
             AppError::TooManyCombinations { .. } => "TOO_MANY_COMBINATIONS",
+            AppError::DownloadError(_) => "DOWNLOAD_ERROR",
+            AppError::DownloadCancelled => "DOWNLOAD_CANCELLED",
             AppError::InvalidConfig(_) => "INVALID_CONFIG",
             AppError::Serialization(_) => "SERIALIZATION",
             AppError::Internal(_) => "INTERNAL",

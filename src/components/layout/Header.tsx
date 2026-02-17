@@ -19,17 +19,19 @@ export function Header() {
   const selectedSymbol = symbols.find((s) => s.id === selectedSymbolId);
 
   return (
-    <header className="flex h-12 items-center justify-between border-b bg-card px-4">
+    <header className="flex h-11 items-center justify-between border-b border-border/60 bg-card px-4">
       <div className="flex items-center gap-3">
-        <h1 className="text-sm font-bold tracking-tight">Backtester</h1>
-        <span className="text-muted-foreground">|</span>
-        <span className="text-sm text-muted-foreground">
+        <h1 className="text-xs font-bold uppercase tracking-widest text-primary">
+          Backtester
+        </h1>
+        <span className="text-border">|</span>
+        <span className="text-[11px] uppercase tracking-wider text-muted-foreground">
           {sectionTitles[activeSection]}
         </span>
         {selectedSymbol && (
           <>
-            <span className="text-muted-foreground">|</span>
-            <span className="text-sm font-medium text-primary">
+            <span className="text-border">|</span>
+            <span className="rounded border border-primary/40 px-2 py-0.5 text-[11px] font-medium text-primary">
               {selectedSymbol.name}
             </span>
           </>
@@ -39,12 +41,12 @@ export function Header() {
         variant="ghost"
         size="icon"
         onClick={toggleDarkMode}
-        className="h-8 w-8"
+        className="h-7 w-7"
       >
         {darkMode ? (
-          <Sun className="h-4 w-4" />
+          <Sun className="h-3.5 w-3.5" />
         ) : (
-          <Moon className="h-4 w-4" />
+          <Moon className="h-3.5 w-3.5" />
         )}
       </Button>
     </header>

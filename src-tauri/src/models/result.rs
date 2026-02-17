@@ -76,6 +76,14 @@ pub struct BacktestMetrics {
     pub mae_max: f64,
     pub mfe_avg: f64,
     pub mfe_max: f64,
+
+    // Stagnation & Ulcer
+    pub stagnation_bars: usize,
+    pub stagnation_time: String,
+    pub ulcer_index_pct: f64,
+
+    // Return / Drawdown ratio
+    pub return_dd_ratio: f64,
 }
 
 /// Complete results of a backtest run.
@@ -99,24 +107,38 @@ pub enum OptimizationMethod {
     GeneticAlgorithm,
 }
 
-/// Objective function to maximize during optimization.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+/// Objective function for optimization.
+/// "Maximize" objectives: higher is better.
+/// "Minimize" objectives (MinStagnation, MinUlcerIndex): lower is better — internally negated.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum ObjectiveFunction {
     TotalProfit,
     SharpeRatio,
     ProfitFactor,
     WinRate,
+    ReturnDdRatio,
+    MinStagnation,
+    MinUlcerIndex,
 }
 
 /// A parameter range to optimize over.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParameterRange {
-    pub rule_index: usize,
+    pub rule_index: i32,
     pub param_name: String,
     pub display_name: String,
     pub min: f64,
     pub max: f64,
     pub step: f64,
+    /// Which operand of the rule contains the indicator: "left" or "right".
+    pub operand_side: String,
+    /// Source of the parameter: "indicator", "stop_loss", "take_profit", "trailing_stop".
+    #[serde(default = "default_param_source")]
+    pub param_source: String,
+}
+
+fn default_param_source() -> String {
+    "indicator".into()
 }
 
 /// Configuration for the genetic algorithm.
@@ -128,25 +150,57 @@ pub struct GeneticAlgorithmConfig {
     pub crossover_rate: f64,
 }
 
+/// A date range for Out-of-Sample testing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OosPeriod {
+    pub label: String,
+    pub start_date: String,
+    pub end_date: String,
+}
+
+/// Results of evaluating a parameter set on an OOS period.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OosResult {
+    pub label: String,
+    pub total_return_pct: f64,
+    pub sharpe_ratio: f64,
+    pub max_drawdown_pct: f64,
+    pub profit_factor: f64,
+    pub total_trades: usize,
+}
+
 /// Full optimization configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OptimizationConfig {
     pub method: OptimizationMethod,
     pub parameter_ranges: Vec<ParameterRange>,
-    pub objective: ObjectiveFunction,
+    /// One or more objectives. First is primary (used for GA fitness).
+    pub objectives: Vec<ObjectiveFunction>,
     pub backtest_config: BacktestConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ga_config: Option<GeneticAlgorithmConfig>,
+    /// Out-of-Sample periods for validation (optional).
+    #[serde(default)]
+    pub oos_periods: Vec<OosPeriod>,
 }
 
 /// A single result from an optimization run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OptimizationResult {
     pub params: HashMap<String, f64>,
+    /// Primary objective value (first objective).
     pub objective_value: f64,
+    /// Composite score when multiple objectives are used (normalized average).
+    pub composite_score: f64,
     pub total_return_pct: f64,
     pub sharpe_ratio: f64,
     pub max_drawdown_pct: f64,
     pub total_trades: usize,
     pub profit_factor: f64,
+    pub return_dd_ratio: f64,
+    pub stagnation_bars: usize,
+    pub ulcer_index_pct: f64,
+    /// Out-of-Sample results for each OOS period (empty if no OOS configured).
+    #[serde(default)]
+    pub oos_results: Vec<OosResult>,
 }

@@ -63,23 +63,26 @@ export function ReturnsHistogram({ returns }: ReturnsHistogramProps) {
   return (
     <ResponsiveContainer width="100%" height={250}>
       <BarChart data={bins} margin={{ top: 5, right: 20, bottom: 5, left: 10 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+        <CartesianGrid strokeDasharray="3 3" stroke="hsl(220 10% 14%)" />
         <XAxis
           dataKey="label"
-          tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }}
+          tick={{ fontSize: 10, fill: "hsl(45 5% 40%)" }}
+          stroke="hsl(220 10% 14%)"
           interval="preserveStartEnd"
         />
         <YAxis
-          tick={{ fontSize: 11, fill: "hsl(var(--muted-foreground))" }}
+          tick={{ fontSize: 10, fill: "hsl(45 5% 40%)" }}
+          stroke="hsl(220 10% 14%)"
           allowDecimals={false}
           width={40}
         />
         <Tooltip
           contentStyle={{
-            backgroundColor: "hsl(var(--card))",
-            border: "1px solid hsl(var(--border))",
-            borderRadius: 6,
-            fontSize: 12,
+            backgroundColor: "hsl(220 15% 7%)",
+            border: "1px solid hsl(43 20% 18%)",
+            borderRadius: 4,
+            fontSize: 11,
+            color: "hsl(45 10% 85%)",
           }}
           formatter={(value: number) => [value, "Trades"]}
           labelFormatter={(label: string) => `P&L: ${label}`}
@@ -90,9 +93,10 @@ export function ReturnsHistogram({ returns }: ReturnsHistogramProps) {
               key={i}
               fill={
                 bin.midpoint >= 0
-                  ? "hsl(142 71% 45%)"
-                  : "hsl(0 84% 60%)"
+                  ? "hsl(152 60% 42%)"
+                  : "hsl(0 72% 50%)"
               }
+              fillOpacity={0.8}
             />
           ))}
         </Bar>

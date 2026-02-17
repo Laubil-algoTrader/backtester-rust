@@ -5,6 +5,7 @@ pub mod errors;
 pub mod models;
 pub mod utils;
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -21,6 +22,8 @@ pub struct AppState {
     pub data_dir: PathBuf,
     /// Cancellation flag for long-running operations (backtest, optimization).
     pub cancel_flag: Arc<AtomicBool>,
+    /// Per-download cancellation flags, keyed by symbol name.
+    pub download_cancel_flags: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
 }
 
 /// Resolve the application data directory and ensure it exists.
@@ -73,6 +76,7 @@ pub fn run() {
         db: Mutex::new(conn),
         data_dir,
         cancel_flag: Arc::new(AtomicBool::new(false)),
+        download_cancel_flags: Arc::new(Mutex::new(HashMap::new())),
     };
 
     tauri::Builder::default()
@@ -93,6 +97,12 @@ pub fn run() {
             commands::delete_strategy,
             commands::run_optimization,
             commands::cancel_optimization,
+            commands::export_trades_csv,
+            commands::export_metrics_csv,
+            commands::export_report_html,
+            commands::generate_strategy_code,
+            commands::download_dukascopy,
+            commands::cancel_download,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

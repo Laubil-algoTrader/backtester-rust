@@ -41,7 +41,7 @@ export function StrategyList({
             <div className="min-w-0 flex-1">
               <p className="truncate text-sm font-medium">{s.name}</p>
               <p className="text-xs text-muted-foreground">
-                {s.entry_rules.length} entry / {s.exit_rules.length} exit rules
+                {s.long_entry_rules.length + s.short_entry_rules.length} entry / {s.long_exit_rules.length + s.short_exit_rules.length} exit rules
                 {s.updated_at ? ` \u00b7 ${s.updated_at.slice(0, 10)}` : ""}
               </p>
             </div>

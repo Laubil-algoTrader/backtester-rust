@@ -8,6 +8,7 @@ import type {
   OptimizationResult,
   OptimizationConfig,
   Timeframe,
+  CodeGenerationResult,
 } from "./types";
 
 /// Upload a CSV file and create a new symbol.
@@ -96,6 +97,56 @@ export async function exportTradesCsv(
   filePath: string
 ): Promise<void> {
   return invoke<void>("export_trades_csv", { trades, filePath });
+}
+
+/// Export metrics report to CSV.
+export async function exportMetricsCsv(
+  metrics: unknown,
+  filePath: string
+): Promise<void> {
+  return invoke<void>("export_metrics_csv", { metrics, filePath });
+}
+
+/// Export full backtest report as HTML.
+export async function exportReportHtml(
+  results: BacktestResults,
+  filePath: string
+): Promise<void> {
+  return invoke<void>("export_report_html", { results, filePath });
+}
+
+/// Generate strategy code for MQL5 or PineScript.
+export async function generateStrategyCode(
+  language: "mql5" | "pinescript",
+  strategy: Strategy
+): Promise<CodeGenerationResult> {
+  return invoke<CodeGenerationResult>("generate_strategy_code", { language, strategy });
+}
+
+/// Download historical tick data from Dukascopy servers.
+export async function downloadDukascopy(
+  symbolName: string,
+  dukaSymbol: string,
+  pointValue: number,
+  startDate: string,
+  endDate: string,
+  baseTimeframe: "tick" | "m1",
+  instrumentConfig: InstrumentConfig
+): Promise<Symbol> {
+  return invoke<Symbol>("download_dukascopy", {
+    symbolName,
+    dukaSymbol,
+    pointValue,
+    startDate,
+    endDate,
+    baseTimeframe,
+    instrumentConfig,
+  });
+}
+
+/// Cancel an ongoing download by symbol name.
+export async function cancelDownload(symbolName: string): Promise<void> {
+  return invoke<void>("cancel_download", { symbolName });
 }
 
 /// Placeholder greet command (for testing communication).

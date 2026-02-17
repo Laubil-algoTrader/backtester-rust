@@ -5,6 +5,7 @@ import type { Strategy } from "@/lib/types";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
 import {
   Dialog,
   DialogContent,
@@ -23,14 +24,19 @@ export function StrategyPage() {
     currentStrategy,
     savedStrategies,
     updateStrategyName,
-    setEntryRules,
-    setExitRules,
+    setLongEntryRules,
+    setShortEntryRules,
+    setLongExitRules,
+    setShortExitRules,
     setPositionSizing,
     setStopLoss,
     setTakeProfit,
     setTrailingStop,
     setTradingCosts,
     setTradeDirection,
+    setTradingHours,
+    setMaxDailyTrades,
+    setCloseTradesAt,
     setCurrentStrategy,
     setSavedStrategies,
     resetStrategy,
@@ -46,20 +52,32 @@ export function StrategyPage() {
       .catch((err) => console.error("Failed to load strategies:", err));
   }, [setSavedStrategies]);
 
+  // Ctrl+S shortcut listener
+  useEffect(() => {
+    const handler = () => setShowSaveDialog(true);
+    document.addEventListener("shortcut:save-strategy", handler);
+    return () => document.removeEventListener("shortcut:save-strategy", handler);
+  }, []);
+
   const handleSave = async (name: string) => {
     const strategyToSave: Strategy = {
       id: currentStrategy.id ?? "",
       name,
       created_at: currentStrategy.created_at ?? "",
       updated_at: currentStrategy.updated_at ?? "",
-      entry_rules: currentStrategy.entry_rules,
-      exit_rules: currentStrategy.exit_rules,
+      long_entry_rules: currentStrategy.long_entry_rules,
+      short_entry_rules: currentStrategy.short_entry_rules,
+      long_exit_rules: currentStrategy.long_exit_rules,
+      short_exit_rules: currentStrategy.short_exit_rules,
       position_sizing: currentStrategy.position_sizing,
       stop_loss: currentStrategy.stop_loss,
       take_profit: currentStrategy.take_profit,
       trailing_stop: currentStrategy.trailing_stop,
       trading_costs: currentStrategy.trading_costs,
       trade_direction: currentStrategy.trade_direction,
+      trading_hours: currentStrategy.trading_hours,
+      max_daily_trades: currentStrategy.max_daily_trades,
+      close_trades_at: currentStrategy.close_trades_at,
     };
 
     const id = await saveStrategy(strategyToSave);
@@ -103,21 +121,23 @@ export function StrategyPage() {
           <Button
             variant="outline"
             size="sm"
+            className="text-[10px] uppercase tracking-wider"
             onClick={() => setShowLoadDialog(true)}
           >
-            <FolderOpen className="mr-1.5 h-4 w-4" />
+            <FolderOpen className="mr-1.5 h-3.5 w-3.5" />
             Load
           </Button>
           <Button
             variant="outline"
             size="sm"
+            className="text-[10px] uppercase tracking-wider"
             onClick={() => setShowSaveDialog(true)}
           >
-            <Save className="mr-1.5 h-4 w-4" />
+            <Save className="mr-1.5 h-3.5 w-3.5" />
             Save
           </Button>
-          <Button variant="outline" size="sm" onClick={resetStrategy}>
-            <FilePlus className="mr-1.5 h-4 w-4" />
+          <Button variant="outline" size="sm" className="text-[10px] uppercase tracking-wider" onClick={resetStrategy}>
+            <FilePlus className="mr-1.5 h-3.5 w-3.5" />
             New
           </Button>
         </div>
@@ -129,27 +149,57 @@ export function StrategyPage() {
         <div className="space-y-4 lg:col-span-2">
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="text-base">Entry Rules</CardTitle>
+              <CardTitle className="text-[11px] uppercase tracking-[0.15em]">Entry Rules</CardTitle>
             </CardHeader>
             <CardContent>
-              <RulesList
-                title=""
-                rules={currentStrategy.entry_rules}
-                onChange={setEntryRules}
-              />
+              <Tabs defaultValue="long">
+                <TabsList className="mb-3 grid w-full grid-cols-2">
+                  <TabsTrigger value="long" className="text-xs">Long</TabsTrigger>
+                  <TabsTrigger value="short" className="text-xs">Short</TabsTrigger>
+                </TabsList>
+                <TabsContent value="long">
+                  <RulesList
+                    title=""
+                    rules={currentStrategy.long_entry_rules}
+                    onChange={setLongEntryRules}
+                  />
+                </TabsContent>
+                <TabsContent value="short">
+                  <RulesList
+                    title=""
+                    rules={currentStrategy.short_entry_rules}
+                    onChange={setShortEntryRules}
+                  />
+                </TabsContent>
+              </Tabs>
             </CardContent>
           </Card>
 
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="text-base">Exit Rules</CardTitle>
+              <CardTitle className="text-[11px] uppercase tracking-[0.15em]">Exit Rules</CardTitle>
             </CardHeader>
             <CardContent>
-              <RulesList
-                title=""
-                rules={currentStrategy.exit_rules}
-                onChange={setExitRules}
-              />
+              <Tabs defaultValue="long">
+                <TabsList className="mb-3 grid w-full grid-cols-2">
+                  <TabsTrigger value="long" className="text-xs">Long</TabsTrigger>
+                  <TabsTrigger value="short" className="text-xs">Short</TabsTrigger>
+                </TabsList>
+                <TabsContent value="long">
+                  <RulesList
+                    title=""
+                    rules={currentStrategy.long_exit_rules}
+                    onChange={setLongExitRules}
+                  />
+                </TabsContent>
+                <TabsContent value="short">
+                  <RulesList
+                    title=""
+                    rules={currentStrategy.short_exit_rules}
+                    onChange={setShortExitRules}
+                  />
+                </TabsContent>
+              </Tabs>
             </CardContent>
           </Card>
         </div>
@@ -158,7 +208,7 @@ export function StrategyPage() {
         <div>
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="text-base">Configuration</CardTitle>
+              <CardTitle className="text-[11px] uppercase tracking-[0.15em]">Configuration</CardTitle>
             </CardHeader>
             <CardContent>
               <ConfigPanel
@@ -168,12 +218,18 @@ export function StrategyPage() {
                 trailingStop={currentStrategy.trailing_stop}
                 tradingCosts={currentStrategy.trading_costs}
                 tradeDirection={currentStrategy.trade_direction}
+                tradingHours={currentStrategy.trading_hours}
+                maxDailyTrades={currentStrategy.max_daily_trades}
                 onPositionSizingChange={setPositionSizing}
                 onStopLossChange={setStopLoss}
                 onTakeProfitChange={setTakeProfit}
                 onTrailingStopChange={setTrailingStop}
                 onTradingCostsChange={setTradingCosts}
                 onTradeDirectionChange={setTradeDirection}
+                onTradingHoursChange={setTradingHours}
+                onMaxDailyTradesChange={setMaxDailyTrades}
+                closeTradesAt={currentStrategy.close_trades_at}
+                onCloseTradesAtChange={setCloseTradesAt}
               />
             </CardContent>
           </Card>

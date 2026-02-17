@@ -14,12 +14,14 @@ use crate::models::result::{
     BacktestMetrics, GeneticAlgorithmConfig, ObjectiveFunction, OptimizationResult,
     ParameterRange,
 };
-use crate::models::strategy::{BacktestConfig, IndicatorParams, Strategy};
+use crate::models::strategy::{
+    BacktestConfig, CloseTradesAt, IndicatorParams, Strategy, TradingHours,
+};
 
-use super::executor;
+use super::executor::{self, SubBarData};
 
 /// Maximum allowed combinations for Grid Search.
-const MAX_COMBINATIONS: usize = 50_000;
+const MAX_COMBINATIONS: usize = 500_000;
 
 /// Maximum results to return from optimization.
 const MAX_RESULTS: usize = 50;
@@ -30,31 +32,115 @@ const MAX_RESULTS: usize = 50;
 
 /// Apply parameter values to a strategy, returning a modified clone.
 ///
-/// Each `ParameterRange` specifies a `rule_index` (0-based across entry_rules first,
-/// then exit_rules) and a `param_name` matching an `IndicatorParams` field.
-/// The function finds the indicator operand in that rule and updates the parameter.
-fn apply_params(strategy: &Strategy, ranges: &[ParameterRange], values: &[f64]) -> Strategy {
+/// Each `ParameterRange` specifies a `param_source` to identify which rule group:
+/// - `"long_entry"`, `"short_entry"`, `"long_exit"`, `"short_exit"` for indicator params
+/// - `"indicator"` for backward compat (uses long_entry + long_exit concatenation)
+/// - `"stop_loss"`, `"take_profit"`, `"trailing_stop"` for risk management params
+/// - `"trading_hours"` for start/end hour/minute
+/// - `"close_trades_at"` for force-close hour/minute
+///
+/// `rule_index` is 0-based within the specified rule group.
+pub fn apply_params(strategy: &Strategy, ranges: &[ParameterRange], values: &[f64]) -> Strategy {
     let mut s = strategy.clone();
-    let entry_len = s.entry_rules.len();
 
     for (range, &val) in ranges.iter().zip(values.iter()) {
-        let rule = if range.rule_index < entry_len {
-            &mut s.entry_rules[range.rule_index]
-        } else {
-            let exit_idx = range.rule_index - entry_len;
-            &mut s.exit_rules[exit_idx]
-        };
+        match range.param_source.as_str() {
+            "stop_loss" => {
+                if let Some(ref mut sl) = s.stop_loss {
+                    match range.param_name.as_str() {
+                        "value" => sl.value = val,
+                        "atr_period" => sl.atr_period = Some(val.round() as usize),
+                        _ => {}
+                    }
+                }
+            }
+            "take_profit" => {
+                if let Some(ref mut tp) = s.take_profit {
+                    match range.param_name.as_str() {
+                        "value" => tp.value = val,
+                        "atr_period" => tp.atr_period = Some(val.round() as usize),
+                        _ => {}
+                    }
+                }
+            }
+            "trailing_stop" => {
+                if let Some(ref mut ts) = s.trailing_stop {
+                    match range.param_name.as_str() {
+                        "value" => ts.value = val,
+                        "atr_period" => ts.atr_period = Some(val.round() as usize),
+                        _ => {}
+                    }
+                }
+            }
+            "trading_hours" => {
+                let th = s.trading_hours.get_or_insert(TradingHours {
+                    start_hour: 0, start_minute: 0, end_hour: 23, end_minute: 59,
+                });
+                let v = val.round() as u8;
+                match range.param_name.as_str() {
+                    "start_hour" => th.start_hour = v.min(23),
+                    "start_minute" => th.start_minute = v.min(59),
+                    "end_hour" => th.end_hour = v.min(23),
+                    "end_minute" => th.end_minute = v.min(59),
+                    _ => {}
+                }
+            }
+            "close_trades_at" => {
+                let ct = s.close_trades_at.get_or_insert(CloseTradesAt {
+                    hour: 16, minute: 0,
+                });
+                let v = val.round() as u8;
+                match range.param_name.as_str() {
+                    "hour" => ct.hour = v.min(23),
+                    "minute" => ct.minute = v.min(59),
+                    _ => {}
+                }
+            }
+            source => {
+                // Indicator parameter — find the rule in the correct group
+                let idx = range.rule_index as usize;
+                let rule = match source {
+                    "long_entry" => s.long_entry_rules.get_mut(idx),
+                    "short_entry" => s.short_entry_rules.get_mut(idx),
+                    "long_exit" => s.long_exit_rules.get_mut(idx),
+                    "short_exit" => s.short_exit_rules.get_mut(idx),
+                    _ => {
+                        // Backward compat: "indicator" uses long_entry + long_exit
+                        let le_len = s.long_entry_rules.len();
+                        if idx < le_len {
+                            s.long_entry_rules.get_mut(idx)
+                        } else {
+                            s.long_exit_rules.get_mut(idx - le_len)
+                        }
+                    }
+                };
 
-        // Try to update the indicator in left_operand, then right_operand
-        let updated = set_indicator_param(&mut rule.left_operand.indicator, &range.param_name, val)
-            || set_indicator_param(&mut rule.right_operand.indicator, &range.param_name, val);
+                if let Some(rule) = rule {
+                    let updated = match range.operand_side.as_str() {
+                        "left" => set_indicator_param(&mut rule.left_operand.indicator, &range.param_name, val),
+                        "right" => set_indicator_param(&mut rule.right_operand.indicator, &range.param_name, val),
+                        _ => {
+                            set_indicator_param(&mut rule.left_operand.indicator, &range.param_name, val)
+                                || set_indicator_param(&mut rule.right_operand.indicator, &range.param_name, val)
+                        }
+                    };
 
-        if !updated {
-            tracing::warn!(
-                "Could not apply param '{}' to rule index {}",
-                range.param_name,
-                range.rule_index
-            );
+                    if !updated {
+                        tracing::warn!(
+                            "Could not apply param '{}' to rule index {} in group '{}'",
+                            range.param_name,
+                            range.rule_index,
+                            source
+                        );
+                    }
+                } else {
+                    tracing::warn!(
+                        "Rule index {} out of bounds for group '{}'",
+                        range.rule_index,
+                        source
+                    );
+                }
+            }
         }
     }
 
@@ -117,34 +203,45 @@ fn set_param(params: &mut IndicatorParams, name: &str, value: f64) -> bool {
 }
 
 /// Extract the objective value from backtest metrics.
+/// For "minimize" objectives, the value is negated so that higher = better universally.
 fn extract_objective(metrics: &BacktestMetrics, objective: &ObjectiveFunction) -> f64 {
     match objective {
         ObjectiveFunction::TotalProfit => metrics.net_profit,
         ObjectiveFunction::SharpeRatio => metrics.sharpe_ratio,
         ObjectiveFunction::ProfitFactor => metrics.profit_factor,
         ObjectiveFunction::WinRate => metrics.win_rate_pct,
+        ObjectiveFunction::ReturnDdRatio => metrics.return_dd_ratio,
+        ObjectiveFunction::MinStagnation => -(metrics.stagnation_bars as f64),
+        ObjectiveFunction::MinUlcerIndex => -metrics.ulcer_index_pct,
     }
 }
 
 /// Build an OptimizationResult from backtest metrics and parameter values.
+/// Uses the first objective as the primary `objective_value`.
 fn build_result(
     ranges: &[ParameterRange],
     values: &[f64],
     metrics: &BacktestMetrics,
-    objective: &ObjectiveFunction,
+    objectives: &[ObjectiveFunction],
 ) -> OptimizationResult {
     let mut params = HashMap::new();
     for (range, &val) in ranges.iter().zip(values.iter()) {
         params.insert(range.display_name.clone(), val);
     }
+    let primary = objectives.first().copied().unwrap_or(ObjectiveFunction::SharpeRatio);
     OptimizationResult {
         params,
-        objective_value: extract_objective(metrics, objective),
+        objective_value: extract_objective(metrics, &primary),
+        composite_score: 0.0, // computed after all results are collected
         total_return_pct: metrics.total_return_pct,
         sharpe_ratio: metrics.sharpe_ratio,
         max_drawdown_pct: metrics.max_drawdown_pct,
         total_trades: metrics.total_trades,
         profit_factor: metrics.profit_factor,
+        return_dd_ratio: metrics.return_dd_ratio,
+        stagnation_bars: metrics.stagnation_bars,
+        ulcer_index_pct: metrics.ulcer_index_pct,
+        oos_results: Vec::new(),
     }
 }
 
@@ -214,11 +311,12 @@ fn generate_grid(ranges: &[ParameterRange]) -> Result<Vec<Vec<f64>>, AppError> {
 /// The `progress_callback` receives `(percent, current, total, best_so_far)`.
 pub fn run_grid_search(
     candles: &[Candle],
+    sub_bars: &SubBarData,
     strategy: &Strategy,
     config: &BacktestConfig,
     instrument: &InstrumentConfig,
     ranges: &[ParameterRange],
-    objective: &ObjectiveFunction,
+    objectives: &[ObjectiveFunction],
     cancel_flag: &AtomicBool,
     progress_callback: impl Fn(u8, usize, usize, f64) + Send + Sync,
 ) -> Result<Vec<OptimizationResult>, AppError> {
@@ -243,6 +341,7 @@ pub fn run_grid_search(
             // Run backtest with no-op progress callback
             let result = executor::run_backtest(
                 candles,
+                sub_bars,
                 &modified,
                 config,
                 instrument,
@@ -254,7 +353,7 @@ pub fn run_grid_search(
 
             match result {
                 Ok(bt) => {
-                    let opt_result = build_result(ranges, values, &bt.metrics, objective);
+                    let opt_result = build_result(ranges, values, &bt.metrics, objectives);
 
                     // Update best
                     {
@@ -288,7 +387,16 @@ pub fn run_grid_search(
 
     let elapsed = start.elapsed();
     let mut valid: Vec<OptimizationResult> = results.into_iter().flatten().collect();
-    valid.sort_by(|a, b| b.objective_value.partial_cmp(&a.objective_value).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Compute composite scores for multi-objective
+    compute_composite_scores(&mut valid, objectives);
+
+    // Sort by composite_score if multi-objective, otherwise by objective_value
+    if objectives.len() > 1 {
+        valid.sort_by(|a, b| b.composite_score.partial_cmp(&a.composite_score).unwrap_or(std::cmp::Ordering::Equal));
+    } else {
+        valid.sort_by(|a, b| b.objective_value.partial_cmp(&a.objective_value).unwrap_or(std::cmp::Ordering::Equal));
+    }
     valid.truncate(MAX_RESULTS);
 
     info!(
@@ -317,11 +425,12 @@ struct Individual {
 /// Evaluates each generation in parallel with rayon.
 pub fn run_genetic_algorithm(
     candles: &[Candle],
+    sub_bars: &SubBarData,
     strategy: &Strategy,
     config: &BacktestConfig,
     instrument: &InstrumentConfig,
     ranges: &[ParameterRange],
-    objective: &ObjectiveFunction,
+    objectives: &[ObjectiveFunction],
     ga_config: &GeneticAlgorithmConfig,
     cancel_flag: &AtomicBool,
     progress_callback: impl Fn(u8, usize, usize, f64) + Send + Sync,
@@ -381,6 +490,7 @@ pub fn run_genetic_algorithm(
                 let modified = apply_params(strategy, ranges, &ind.genes);
                 let result = executor::run_backtest(
                     candles,
+                    sub_bars,
                     &modified,
                     config,
                     instrument,
@@ -390,7 +500,7 @@ pub fn run_genetic_algorithm(
 
                 match result {
                     Ok(bt) => {
-                        let opt_result = build_result(ranges, &ind.genes, &bt.metrics, objective);
+                        let opt_result = build_result(ranges, &ind.genes, &bt.metrics, objectives);
                         let fitness = opt_result.objective_value;
                         Some((fitness, opt_result))
                     }
@@ -482,11 +592,15 @@ pub fn run_genetic_algorithm(
         Ok(mutex) => mutex.into_inner().unwrap(),
         Err(arc) => arc.lock().unwrap().clone(),
     };
-    results.sort_by(|a, b| {
-        b.objective_value
-            .partial_cmp(&a.objective_value)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+
+    // Compute composite scores for multi-objective
+    compute_composite_scores(&mut results, objectives);
+
+    if objectives.len() > 1 {
+        results.sort_by(|a, b| b.composite_score.partial_cmp(&a.composite_score).unwrap_or(std::cmp::Ordering::Equal));
+    } else {
+        results.sort_by(|a, b| b.objective_value.partial_cmp(&a.objective_value).unwrap_or(std::cmp::Ordering::Equal));
+    }
     results.dedup_by(|a, b| a.params == b.params);
     results.truncate(MAX_RESULTS);
 
@@ -550,11 +664,78 @@ fn build_failed_result(ranges: &[ParameterRange], values: &[f64]) -> Optimizatio
     OptimizationResult {
         params,
         objective_value: f64::NEG_INFINITY,
+        composite_score: f64::NEG_INFINITY,
         total_return_pct: 0.0,
         sharpe_ratio: 0.0,
         max_drawdown_pct: 0.0,
         total_trades: 0,
         profit_factor: 0.0,
+        return_dd_ratio: 0.0,
+        stagnation_bars: 0,
+        ulcer_index_pct: 0.0,
+        oos_results: Vec::new(),
+    }
+}
+
+/// Compute composite scores for multi-objective optimization.
+/// Normalizes each objective to [0, 1] using min-max across all results, then averages.
+/// For single-objective, composite_score == objective_value (normalized to [0, 1]).
+fn compute_composite_scores(results: &mut [OptimizationResult], objectives: &[ObjectiveFunction]) {
+    if results.is_empty() || objectives.is_empty() {
+        return;
+    }
+
+    // For single objective, just copy objective_value as composite
+    if objectives.len() == 1 {
+        for r in results.iter_mut() {
+            r.composite_score = r.objective_value;
+        }
+        return;
+    }
+
+    // Extract raw objective values for each objective
+    let num_objectives = objectives.len();
+    let num_results = results.len();
+
+    // Collect raw values: raw_values[obj_idx][result_idx]
+    let mut raw_values: Vec<Vec<f64>> = Vec::with_capacity(num_objectives);
+    for obj in objectives {
+        let vals: Vec<f64> = results.iter().map(|r| {
+            extract_objective_from_result(r, obj)
+        }).collect();
+        raw_values.push(vals);
+    }
+
+    // Normalize each objective to [0, 1] and compute average
+    for i in 0..num_results {
+        let mut score_sum = 0.0;
+        for (j, _obj) in objectives.iter().enumerate() {
+            let vals = &raw_values[j];
+            let min = vals.iter().copied().fold(f64::INFINITY, f64::min);
+            let max = vals.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let range = max - min;
+            let normalized = if range > 0.0 {
+                (vals[i] - min) / range
+            } else {
+                0.5
+            };
+            score_sum += normalized;
+        }
+        results[i].composite_score = score_sum / num_objectives as f64;
+    }
+}
+
+/// Extract an objective value directly from an OptimizationResult (without BacktestMetrics).
+/// For "minimize" objectives, values are negated so higher = better.
+fn extract_objective_from_result(r: &OptimizationResult, obj: &ObjectiveFunction) -> f64 {
+    match obj {
+        ObjectiveFunction::TotalProfit => r.total_return_pct * 100.0, // use return %
+        ObjectiveFunction::SharpeRatio => r.sharpe_ratio,
+        ObjectiveFunction::ProfitFactor => r.profit_factor,
+        ObjectiveFunction::WinRate => 0.0, // not stored directly, use objective_value if primary
+        ObjectiveFunction::ReturnDdRatio => r.return_dd_ratio,
+        ObjectiveFunction::MinStagnation => -(r.stagnation_bars as f64),
+        ObjectiveFunction::MinUlcerIndex => -r.ulcer_index_pct,
     }
 }
 
@@ -572,6 +753,8 @@ mod tests {
                 min: 10.0,
                 max: 30.0,
                 step: 10.0,
+                operand_side: "left".into(),
+                param_source: "indicator".into(),
             },
         ];
         let grid = generate_grid(&ranges).unwrap();
@@ -591,6 +774,8 @@ mod tests {
                 min: 5.0,
                 max: 10.0,
                 step: 5.0,
+                operand_side: "left".into(),
+                param_source: "indicator".into(),
             },
             ParameterRange {
                 rule_index: 0,
@@ -599,6 +784,8 @@ mod tests {
                 min: 20.0,
                 max: 30.0,
                 step: 5.0,
+                operand_side: "left".into(),
+                param_source: "indicator".into(),
             },
         ];
         let grid = generate_grid(&ranges).unwrap();
@@ -614,23 +801,27 @@ mod tests {
                 param_name: "period".into(),
                 display_name: "P1".into(),
                 min: 1.0,
-                max: 300.0,
+                max: 800.0,
                 step: 1.0,
+                operand_side: "left".into(),
+                param_source: "indicator".into(),
             },
             ParameterRange {
                 rule_index: 0,
                 param_name: "fast_period".into(),
                 display_name: "P2".into(),
                 min: 1.0,
-                max: 300.0,
+                max: 800.0,
                 step: 1.0,
+                operand_side: "left".into(),
+                param_source: "indicator".into(),
             },
         ];
         let result = generate_grid(&ranges);
         assert!(result.is_err());
         match result.unwrap_err() {
             AppError::TooManyCombinations { count, limit } => {
-                assert_eq!(count, 90000);
+                assert_eq!(count, 640000);
                 assert_eq!(limit, MAX_COMBINATIONS);
             }
             _ => panic!("Expected TooManyCombinations error"),
@@ -646,6 +837,8 @@ mod tests {
             min: 5.0,
             max: 25.0,
             step: 5.0,
+            operand_side: "left".into(),
+            param_source: "indicator".into(),
         };
         assert_eq!(snap_to_step(7.0, &range), 5.0);
         assert_eq!(snap_to_step(8.0, &range), 10.0);
@@ -695,11 +888,18 @@ mod tests {
             mae_max: 0.0,
             mfe_avg: 0.0,
             mfe_max: 0.0,
+            stagnation_bars: 100,
+            stagnation_time: String::new(),
+            ulcer_index_pct: 3.5,
+            return_dd_ratio: 2.5,
         };
 
         assert_eq!(extract_objective(&metrics, &ObjectiveFunction::TotalProfit), 1000.0);
         assert_eq!(extract_objective(&metrics, &ObjectiveFunction::SharpeRatio), 1.5);
         assert_eq!(extract_objective(&metrics, &ObjectiveFunction::ProfitFactor), 2.0);
         assert_eq!(extract_objective(&metrics, &ObjectiveFunction::WinRate), 55.0);
+        assert_eq!(extract_objective(&metrics, &ObjectiveFunction::ReturnDdRatio), 2.5);
+        assert_eq!(extract_objective(&metrics, &ObjectiveFunction::MinStagnation), -100.0);
+        assert_eq!(extract_objective(&metrics, &ObjectiveFunction::MinUlcerIndex), -3.5);
     }
 }

@@ -887,9 +887,9 @@ mod tests {
     #[test]
     fn test_vwap_basic() {
         let candles = vec![
-            Candle { datetime: "2024-01-01 09:00".to_string(), open: 100.0, high: 102.0, low: 99.0, close: 101.0, volume: 1000.0 },
-            Candle { datetime: "2024-01-01 10:00".to_string(), open: 101.0, high: 103.0, low: 100.0, close: 102.0, volume: 1500.0 },
-            Candle { datetime: "2024-01-02 09:00".to_string(), open: 102.0, high: 104.0, low: 101.0, close: 103.0, volume: 2000.0 },
+            Candle { datetime: "2024-01-01 09:00".to_string(), open: 100.0, high: 102.0, low: 99.0, close: 101.0, volume: 1000.0, ..Default::default() },
+            Candle { datetime: "2024-01-01 10:00".to_string(), open: 101.0, high: 103.0, low: 100.0, close: 102.0, volume: 1500.0, ..Default::default() },
+            Candle { datetime: "2024-01-02 09:00".to_string(), open: 102.0, high: 104.0, low: 101.0, close: 103.0, volume: 2000.0, ..Default::default() },
         ];
         let high: Vec<f64> = candles.iter().map(|c| c.high).collect();
         let low: Vec<f64> = candles.iter().map(|c| c.low).collect();
@@ -914,6 +914,7 @@ mod tests {
                 low: 99.0 + i as f64,
                 close: 100.5 + i as f64,
                 volume: 1000.0,
+                ..Default::default()
             })
             .collect();
 

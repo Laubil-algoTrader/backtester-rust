@@ -1,11 +1,28 @@
+use crate::models::config::Timeframe;
 use crate::models::result::{BacktestMetrics, EquityPoint};
 use crate::models::trade::TradeResult;
+
+/// Calculate the number of bars per trading day for a given timeframe.
+/// Used for annualizing returns and risk-adjusted ratios.
+fn bars_per_day(tf: Timeframe) -> f64 {
+    match tf {
+        Timeframe::Tick => 1440.0, // Treat like M1 (approximation)
+        Timeframe::M1 => 1440.0,   // 24h * 60
+        Timeframe::M5 => 288.0,    // 24h * 12
+        Timeframe::M15 => 96.0,    // 24h * 4
+        Timeframe::M30 => 48.0,    // 24h * 2
+        Timeframe::H1 => 24.0,
+        Timeframe::H4 => 6.0,
+        Timeframe::D1 => 1.0,
+    }
+}
 
 /// Calculate all backtest metrics from trades and equity curve.
 pub fn calculate_metrics(
     trades: &[TradeResult],
     equity_curve: &[EquityPoint],
     initial_capital: f64,
+    timeframe: Timeframe,
 ) -> BacktestMetrics {
     let total_trades = trades.len();
 
@@ -59,11 +76,13 @@ pub fn calculate_metrics(
     let final_capital = initial_capital + net_profit;
     let total_return_pct = net_profit / initial_capital * 100.0;
 
-    // Annualized return: estimate trading days from equity curve
+    // Annualized return: estimate trading days from equity curve using actual timeframe
     let trading_bars = equity_curve.len().max(1);
-    let annualized_return_pct = annualize_return(total_return_pct, trading_bars);
+    let bpd = bars_per_day(timeframe);
+    let annualized_return_pct = annualize_return(total_return_pct, trading_bars, bpd);
+    let bars_per_month = bpd * 21.0; // ~21 trading days per month
     let monthly_return_avg_pct = if trading_bars > 0 {
-        total_return_pct / (trading_bars as f64 / 21.0).max(1.0)
+        total_return_pct / (trading_bars as f64 / bars_per_month).max(1.0)
     } else {
         0.0
     };
@@ -78,9 +97,12 @@ pub fn calculate_metrics(
     };
 
     // ── Risk-adjusted ──
+    // Annualization factor: number of trades we'd expect per year
+    // For per-trade returns, use 252 trading days as the annualization basis
+    let annualization_factor = 252.0;
     let trade_returns: Vec<f64> = trades.iter().map(|t| t.pnl / initial_capital).collect();
-    let sharpe_ratio = calculate_sharpe(&trade_returns);
-    let sortino_ratio = calculate_sortino(&trade_returns);
+    let sharpe_ratio = calculate_sharpe(&trade_returns, annualization_factor);
+    let sortino_ratio = calculate_sortino(&trade_returns, annualization_factor);
     let calmar_ratio = if max_drawdown_pct > 0.0 {
         annualized_return_pct / max_drawdown_pct
     } else {
@@ -92,9 +114,10 @@ pub fn calculate_metrics(
         calculate_consecutive(trades);
 
     // ── Time ──
+    let mpb = timeframe.minutes().max(1); // minutes per bar (min 1 for tick)
     let avg_bars_in_trade =
         trades.iter().map(|t| t.duration_bars).sum::<usize>() as f64 / total_trades as f64;
-    let avg_trade_duration = format_bars(avg_bars_in_trade as usize);
+    let avg_trade_duration = format_bars(avg_bars_in_trade as usize, mpb);
 
     let avg_winner_bars = if winning_trades > 0 {
         winning.iter().map(|t| t.duration_bars).sum::<usize>() as f64 / winning_trades as f64
@@ -121,6 +144,13 @@ pub fn calculate_metrics(
     };
     let mfe_max = trades.iter().map(|t| t.mfe).fold(0.0f64, f64::max);
 
+    // ── Stagnation (longest period without new equity high) ──
+    let stagnation_bars = calculate_stagnation_bars(equity_curve);
+    let stagnation_time = format_bars(stagnation_bars, mpb);
+
+    // ── Ulcer Index % ──
+    let ulcer_index_pct = calculate_ulcer_index(equity_curve);
+
     BacktestMetrics {
         final_capital,
         total_return_pct,
@@ -131,7 +161,7 @@ pub fn calculate_metrics(
         calmar_ratio,
         max_drawdown_pct,
         max_drawdown_duration_bars: max_dd_duration_bars,
-        max_drawdown_duration_time: format_bars(max_dd_duration_bars),
+        max_drawdown_duration_time: format_bars(max_dd_duration_bars, mpb),
         avg_drawdown_pct,
         recovery_factor,
         total_trades,
@@ -155,12 +185,22 @@ pub fn calculate_metrics(
         avg_consecutive_losses: avg_consec_losses,
         avg_trade_duration,
         avg_bars_in_trade,
-        avg_winner_duration: format_bars(avg_winner_bars as usize),
-        avg_loser_duration: format_bars(avg_loser_bars as usize),
+        avg_winner_duration: format_bars(avg_winner_bars as usize, mpb),
+        avg_loser_duration: format_bars(avg_loser_bars as usize, mpb),
         mae_avg,
         mae_max,
         mfe_avg,
         mfe_max,
+        stagnation_bars,
+        stagnation_time,
+        ulcer_index_pct,
+        return_dd_ratio: if max_drawdown_pct > 0.0 {
+            total_return_pct / max_drawdown_pct
+        } else if total_return_pct > 0.0 {
+            f64::INFINITY
+        } else {
+            0.0
+        },
     }
 }
 
@@ -206,16 +246,19 @@ fn empty_metrics(initial_capital: f64) -> BacktestMetrics {
         mae_max: 0.0,
         mfe_avg: 0.0,
         mfe_max: 0.0,
+        stagnation_bars: 0,
+        stagnation_time: "0m".to_string(),
+        ulcer_index_pct: 0.0,
+        return_dd_ratio: 0.0,
     }
 }
 
-/// Annualize a return percentage based on bars (assuming M1 = ~252 trading days * 1440 bars/day).
-fn annualize_return(total_return_pct: f64, bars: usize) -> f64 {
+/// Annualize a return percentage based on bars and bars-per-day for the timeframe.
+fn annualize_return(total_return_pct: f64, bars: usize, bpd: f64) -> f64 {
     if bars == 0 {
         return 0.0;
     }
-    // Assume bars are M1: 1440 per day, 252 trading days
-    let bars_per_year = 252.0 * 1440.0;
+    let bars_per_year = 252.0 * bpd;
     let years = bars as f64 / bars_per_year;
     if years <= 0.0 {
         return total_return_pct;
@@ -272,8 +315,8 @@ fn calculate_drawdown_stats(equity_curve: &[EquityPoint]) -> (f64, usize, f64) {
     (max_dd_pct, max_dd_duration, avg_dd)
 }
 
-/// Sharpe Ratio: mean(returns) / std(returns) * sqrt(252).
-fn calculate_sharpe(returns: &[f64]) -> f64 {
+/// Sharpe Ratio: mean(returns) / std(returns) * sqrt(annualization_factor).
+fn calculate_sharpe(returns: &[f64], annualization_factor: f64) -> f64 {
     let n = returns.len();
     if n < 2 {
         return 0.0;
@@ -284,26 +327,27 @@ fn calculate_sharpe(returns: &[f64]) -> f64 {
     if std_dev == 0.0 {
         return 0.0;
     }
-    (mean / std_dev) * (252.0f64).sqrt()
+    (mean / std_dev) * annualization_factor.sqrt()
 }
 
-/// Sortino Ratio: mean(returns) / downside_deviation * sqrt(252).
-fn calculate_sortino(returns: &[f64]) -> f64 {
+/// Sortino Ratio: mean(returns) / downside_deviation * sqrt(annualization_factor).
+fn calculate_sortino(returns: &[f64], annualization_factor: f64) -> f64 {
     let n = returns.len();
     if n < 2 {
         return 0.0;
     }
     let mean = returns.iter().sum::<f64>() / n as f64;
-    let downside_sum: f64 = returns
-        .iter()
-        .filter(|&&r| r < 0.0)
-        .map(|r| r.powi(2))
-        .sum();
-    let downside_dev = (downside_sum / n as f64).sqrt();
+    let negative_returns: Vec<f64> = returns.iter().filter(|&&r| r < 0.0).copied().collect();
+    let neg_count = negative_returns.len();
+    if neg_count == 0 {
+        return 0.0; // No downside → can't compute meaningful Sortino
+    }
+    let downside_sum: f64 = negative_returns.iter().map(|r| r.powi(2)).sum();
+    let downside_dev = (downside_sum / neg_count as f64).sqrt();
     if downside_dev == 0.0 {
         return 0.0;
     }
-    (mean / downside_dev) * (252.0f64).sqrt()
+    (mean / downside_dev) * annualization_factor.sqrt()
 }
 
 /// Calculate consecutive wins/losses stats.
@@ -358,20 +402,69 @@ fn calculate_consecutive(trades: &[TradeResult]) -> (usize, usize, f64, f64) {
     (max_wins, max_losses, avg_wins, avg_losses)
 }
 
-/// Format a number of bars to a human-readable duration.
-fn format_bars(bars: usize) -> String {
-    if bars < 60 {
-        format!("{}m", bars)
-    } else if bars < 1440 {
-        format!("{}h {}m", bars / 60, bars % 60)
+/// Calculate stagnation: longest period (in bars) without making a new equity high.
+fn calculate_stagnation_bars(equity_curve: &[EquityPoint]) -> usize {
+    if equity_curve.len() < 2 {
+        return 0;
+    }
+    let mut peak = equity_curve[0].equity;
+    let mut current_stag = 0usize;
+    let mut max_stag = 0usize;
+
+    for point in equity_curve.iter().skip(1) {
+        if point.equity > peak {
+            peak = point.equity;
+            current_stag = 0;
+        } else {
+            current_stag += 1;
+            if current_stag > max_stag {
+                max_stag = current_stag;
+            }
+        }
+    }
+    max_stag
+}
+
+/// Calculate Ulcer Index percentage from the equity curve.
+/// UI = sqrt(mean(drawdown_pct²)) where drawdown_pct is measured from the running peak.
+fn calculate_ulcer_index(equity_curve: &[EquityPoint]) -> f64 {
+    if equity_curve.len() < 2 {
+        return 0.0;
+    }
+    let mut peak = equity_curve[0].equity;
+    let mut sum_sq = 0.0f64;
+    let n = equity_curve.len();
+
+    for point in equity_curve.iter() {
+        if point.equity > peak {
+            peak = point.equity;
+        }
+        let dd_pct = if peak > 0.0 {
+            (peak - point.equity) / peak * 100.0
+        } else {
+            0.0
+        };
+        sum_sq += dd_pct * dd_pct;
+    }
+    (sum_sq / n as f64).sqrt()
+}
+
+/// Format a number of bars to a human-readable duration, given minutes per bar.
+fn format_bars(bars: usize, minutes_per_bar: u32) -> String {
+    let total_minutes = bars as u64 * minutes_per_bar as u64;
+    if total_minutes < 60 {
+        format!("{}m", total_minutes)
+    } else if total_minutes < 1440 {
+        format!("{}h {}m", total_minutes / 60, total_minutes % 60)
     } else {
-        format!("{}d {}h", bars / 1440, (bars % 1440) / 60)
+        format!("{}d {}h", total_minutes / 1440, (total_minutes % 1440) / 60)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::config::Timeframe;
     use crate::models::strategy::TradeDirection;
     use crate::models::trade::CloseReason;
 
@@ -389,7 +482,7 @@ mod tests {
             commission: 0.0,
             close_reason: CloseReason::Signal,
             duration_bars,
-            duration_time: format_bars(duration_bars),
+            duration_time: format_bars(duration_bars, 1),
             mae: 5.0,
             mfe: 10.0,
         }
@@ -397,7 +490,7 @@ mod tests {
 
     #[test]
     fn test_empty_metrics() {
-        let m = calculate_metrics(&[], &[], 10000.0);
+        let m = calculate_metrics(&[], &[], 10000.0, Timeframe::M1);
         assert_eq!(m.total_trades, 0);
         assert_eq!(m.final_capital, 10000.0);
     }
@@ -415,7 +508,7 @@ mod tests {
             EquityPoint { timestamp: "2024-01-03".to_string(), equity: 10300.0 },
             EquityPoint { timestamp: "2024-01-04".to_string(), equity: 10600.0 },
         ];
-        let m = calculate_metrics(&trades, &equity_curve, 10000.0);
+        let m = calculate_metrics(&trades, &equity_curve, 10000.0, Timeframe::M1);
         assert_eq!(m.total_trades, 3);
         assert_eq!(m.winning_trades, 2);
         assert_eq!(m.losing_trades, 1);
@@ -447,7 +540,7 @@ mod tests {
     fn test_sharpe_ratio() {
         // All positive returns should give positive sharpe
         let returns = vec![0.01, 0.02, 0.01, 0.03, 0.01];
-        let sharpe = calculate_sharpe(&returns);
+        let sharpe = calculate_sharpe(&returns, 252.0);
         assert!(sharpe > 0.0);
     }
 

@@ -41,7 +41,7 @@ export function IndicatorSelector({ value, onChange }: IndicatorSelectorProps) {
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       <Select value={value.indicator_type} onValueChange={handleTypeChange}>
-        <SelectTrigger className="h-8 w-[120px] text-xs">
+        <SelectTrigger className="h-8 w-[160px] text-xs">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>

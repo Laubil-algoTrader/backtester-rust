@@ -10,6 +10,7 @@ pub enum CloseReason {
     TakeProfit,
     TrailingStop,
     EndOfData,
+    TimeClose,
 }
 
 /// A completed trade with all its details.

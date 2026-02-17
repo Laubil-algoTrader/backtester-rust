@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useAppStore } from "@/stores/useAppStore";
 import { runBacktest, cancelBacktest } from "@/lib/tauri";
-import type { BacktestConfig, Strategy, Timeframe } from "@/lib/types";
+import { sortTimeframes, PRECISION_LABELS } from "@/lib/types";
+import type { BacktestConfig, BacktestPrecision, Strategy, Timeframe } from "@/lib/types";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import {
   Select,
@@ -14,7 +15,19 @@ import {
 import { Input } from "@/components/ui/Input";
 import { Button } from "@/components/ui/Button";
 import { Progress } from "@/components/ui/Progress";
+import { DatePicker } from "@/components/ui/DatePicker";
 import { Play, Square, AlertCircle } from "lucide-react";
+
+function formatEta(seconds: number): string {
+  if (seconds < 1) return "<1s";
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds % 60);
+  if (m < 60) return s > 0 ? `${m}m ${s}s` : `${m}m`;
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  return rm > 0 ? `${h}h ${rm}m` : `${h}h`;
+}
 
 const TIMEFRAME_LABELS: Record<string, string> = {
   tick: "Tick",
@@ -41,22 +54,49 @@ export function BacktestPanel() {
     initialCapital,
     setInitialCapital,
     leverage,
-    setLeverage,
+    backtestPrecision,
+    setBacktestPrecision,
     currentStrategy,
     isLoading,
     setLoading,
     progressPercent,
     setProgress,
     setBacktestResults,
+    setEquityMarkers,
   } = useAppStore();
 
   const [error, setError] = useState<string | null>(null);
+  const [eta, setEta] = useState<string>("");
+  const startTimeRef = useRef<number>(0);
   const unlistenRef = useRef<(() => void) | null>(null);
 
   const selectedSymbol = symbols.find((s) => s.id === selectedSymbolId);
   const availableTimeframes = selectedSymbol
-    ? Object.keys(selectedSymbol.timeframe_paths)
+    ? sortTimeframes(Object.keys(selectedSymbol.timeframe_paths))
     : [];
+
+  // Available precision modes depend on symbol base timeframe
+  const availablePrecisions: BacktestPrecision[] = (() => {
+    if (!selectedSymbol) return ["SelectedTfOnly"];
+    const base = selectedSymbol.base_timeframe;
+    const hasTick = !!selectedSymbol.timeframe_paths["tick"];
+    const hasM1 = !!selectedSymbol.timeframe_paths["m1"];
+    const hasTickRaw = Object.keys(selectedSymbol.timeframe_paths).some((k) => k === "tick_raw");
+
+    if (base === "tick") {
+      const modes: BacktestPrecision[] = ["SelectedTfOnly"];
+      if (hasM1) modes.push("M1TickSimulation");
+      if (hasTick) modes.push("RealTickCustomSpread");
+      if (hasTickRaw) modes.push("RealTickRealSpread");
+      return modes;
+    }
+    if (base === "m1") {
+      const modes: BacktestPrecision[] = ["SelectedTfOnly"];
+      if (hasM1) modes.push("M1TickSimulation");
+      return modes;
+    }
+    return ["SelectedTfOnly"];
+  })();
 
   // Auto-fill dates when symbol changes
   useEffect(() => {
@@ -75,14 +115,45 @@ export function BacktestPanel() {
 
   const canRun =
     selectedSymbolId &&
-    currentStrategy.entry_rules.length > 0 &&
+    (currentStrategy.long_entry_rules.length > 0 || currentStrategy.short_entry_rules.length > 0) &&
     !isLoading;
 
+  // Ctrl+Enter shortcut listener
+  useEffect(() => {
+    const handler = () => {
+      if (canRun) handleRun();
+    };
+    document.addEventListener("shortcut:run-backtest", handler);
+    return () => document.removeEventListener("shortcut:run-backtest", handler);
+  });
+
+  const validate = (): string | null => {
+    if (!selectedSymbolId) return "Select a symbol first.";
+    if ((currentStrategy.long_entry_rules.length === 0 && currentStrategy.short_entry_rules.length === 0))
+      return "Add at least one entry rule.";
+    if (initialCapital <= 0) return "Capital must be greater than 0.";
+    if (
+      backtestStartDate &&
+      backtestEndDate &&
+      backtestStartDate >= backtestEndDate
+    )
+      return "Start date must be before end date.";
+    return null;
+  };
+
   const handleRun = async () => {
+    const validationError = validate();
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
     if (!selectedSymbolId) return;
     setError(null);
     setLoading(true, "Running backtest...");
     setBacktestResults(null);
+    setEquityMarkers([]);
+    setEta("");
+    startTimeRef.current = Date.now();
 
     // Listen to progress events
     unlistenRef.current = await listen<{
@@ -90,7 +161,13 @@ export function BacktestPanel() {
       current_bar: number;
       total_bars: number;
     }>("backtest-progress", (event) => {
-      setProgress(event.payload.percent);
+      const pct = event.payload.percent;
+      setProgress(pct);
+      if (pct > 2) {
+        const elapsed = (Date.now() - startTimeRef.current) / 1000;
+        const remaining = (elapsed / pct) * (100 - pct);
+        setEta(formatEta(remaining));
+      }
     });
 
     try {
@@ -99,14 +176,19 @@ export function BacktestPanel() {
         name: currentStrategy.name,
         created_at: currentStrategy.created_at ?? "",
         updated_at: currentStrategy.updated_at ?? "",
-        entry_rules: currentStrategy.entry_rules,
-        exit_rules: currentStrategy.exit_rules,
+        long_entry_rules: currentStrategy.long_entry_rules,
+        short_entry_rules: currentStrategy.short_entry_rules,
+        long_exit_rules: currentStrategy.long_exit_rules,
+        short_exit_rules: currentStrategy.short_exit_rules,
         position_sizing: currentStrategy.position_sizing,
         stop_loss: currentStrategy.stop_loss,
         take_profit: currentStrategy.take_profit,
         trailing_stop: currentStrategy.trailing_stop,
         trading_costs: currentStrategy.trading_costs,
         trade_direction: currentStrategy.trade_direction,
+        trading_hours: currentStrategy.trading_hours,
+        max_daily_trades: currentStrategy.max_daily_trades,
+        close_trades_at: currentStrategy.close_trades_at,
       };
 
       const config: BacktestConfig = {
@@ -116,6 +198,7 @@ export function BacktestPanel() {
         end_date: backtestEndDate,
         initial_capital: initialCapital,
         leverage,
+        precision: backtestPrecision,
       };
 
       const results = await runBacktest(strategy, config);
@@ -145,13 +228,13 @@ export function BacktestPanel() {
   return (
     <Card>
       <CardHeader className="pb-3">
-        <CardTitle className="text-base">Backtest Configuration</CardTitle>
+        <CardTitle className="text-[11px] uppercase tracking-[0.15em]">Backtest Configuration</CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
           {/* Symbol */}
           <div className="space-y-1">
-            <label className="text-xs text-muted-foreground">Symbol</label>
+            <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Symbol</label>
             <Select
               value={selectedSymbolId ?? ""}
               onValueChange={setSelectedSymbolId}
@@ -171,7 +254,7 @@ export function BacktestPanel() {
 
           {/* Timeframe */}
           <div className="space-y-1">
-            <label className="text-xs text-muted-foreground">Timeframe</label>
+            <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Timeframe</label>
             <Select
               value={selectedTimeframe}
               onValueChange={(v) => setSelectedTimeframe(v as Timeframe)}
@@ -189,31 +272,47 @@ export function BacktestPanel() {
             </Select>
           </div>
 
+          {/* Precision */}
+          <div className="space-y-1">
+            <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Precision</label>
+            <Select
+              value={backtestPrecision}
+              onValueChange={(v) => setBacktestPrecision(v as BacktestPrecision)}
+            >
+              <SelectTrigger className="h-8 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {availablePrecisions.map((p) => (
+                  <SelectItem key={p} value={p}>
+                    {PRECISION_LABELS[p]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
           {/* Start Date */}
           <div className="space-y-1">
-            <label className="text-xs text-muted-foreground">Start Date</label>
-            <Input
-              type="date"
-              className="h-8 text-xs"
+            <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Start Date</label>
+            <DatePicker
               value={backtestStartDate.slice(0, 10)}
-              onChange={(e) => setBacktestStartDate(e.target.value)}
+              onChange={(v) => setBacktestStartDate(v)}
             />
           </div>
 
           {/* End Date */}
           <div className="space-y-1">
-            <label className="text-xs text-muted-foreground">End Date</label>
-            <Input
-              type="date"
-              className="h-8 text-xs"
+            <label className="text-[10px] uppercase tracking-wider text-muted-foreground">End Date</label>
+            <DatePicker
               value={backtestEndDate.slice(0, 10)}
-              onChange={(e) => setBacktestEndDate(e.target.value)}
+              onChange={(v) => setBacktestEndDate(v)}
             />
           </div>
 
           {/* Capital */}
           <div className="space-y-1">
-            <label className="text-xs text-muted-foreground">Capital ($)</label>
+            <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Capital ($)</label>
             <Input
               type="number"
               className="h-8 text-xs"
@@ -224,18 +323,6 @@ export function BacktestPanel() {
             />
           </div>
 
-          {/* Leverage */}
-          <div className="space-y-1">
-            <label className="text-xs text-muted-foreground">Leverage</label>
-            <Input
-              type="number"
-              className="h-8 text-xs"
-              min={1}
-              step={1}
-              value={leverage}
-              onChange={(e) => setLeverage(Number(e.target.value))}
-            />
-          </div>
         </div>
 
         {/* Actions */}
@@ -260,7 +347,7 @@ export function BacktestPanel() {
             <div className="flex flex-1 items-center gap-2">
               <Progress value={progressPercent} className="flex-1" />
               <span className="text-xs text-muted-foreground">
-                {progressPercent}%
+                {progressPercent}%{eta && <> | ETA: {eta}</>}
               </span>
             </div>
           )}

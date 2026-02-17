@@ -17,17 +17,17 @@ type SortKey = keyof TradeResult;
 type SortDir = "asc" | "desc";
 
 const COLUMNS: { key: SortKey; label: string; align?: "right" }[] = [
-  { key: "direction", label: "Dir" },
-  { key: "entry_time", label: "Entry Time" },
-  { key: "entry_price", label: "Entry", align: "right" },
-  { key: "exit_time", label: "Exit Time" },
-  { key: "exit_price", label: "Exit", align: "right" },
-  { key: "lots", label: "Lots", align: "right" },
+  { key: "direction", label: "DIR" },
+  { key: "entry_time", label: "ENTRY TIME" },
+  { key: "entry_price", label: "ENTRY", align: "right" },
+  { key: "exit_time", label: "EXIT TIME" },
+  { key: "exit_price", label: "EXIT", align: "right" },
+  { key: "lots", label: "LOTS", align: "right" },
   { key: "pnl", label: "P&L", align: "right" },
-  { key: "pnl_pips", label: "Pips", align: "right" },
-  { key: "commission", label: "Comm", align: "right" },
-  { key: "close_reason", label: "Reason" },
-  { key: "duration_time", label: "Duration" },
+  { key: "pnl_pips", label: "PIPS", align: "right" },
+  { key: "commission", label: "COMM", align: "right" },
+  { key: "close_reason", label: "REASON" },
+  { key: "duration_time", label: "DURATION" },
 ];
 
 interface TradesListProps {
@@ -70,7 +70,7 @@ export function TradesList({ trades }: TradesListProps) {
 
   if (trades.length === 0) {
     return (
-      <p className="py-8 text-center text-sm text-muted-foreground">
+      <p className="py-8 text-center text-xs uppercase tracking-wider text-muted-foreground">
         No trades to display.
       </p>
     );
@@ -81,11 +81,11 @@ export function TradesList({ trades }: TradesListProps) {
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead className="w-10">#</TableHead>
+            <TableHead className="w-10 text-[10px] tracking-widest">#</TableHead>
             {COLUMNS.map((col) => (
               <TableHead
                 key={col.key}
-                className={`cursor-pointer select-none whitespace-nowrap ${
+                className={`cursor-pointer select-none whitespace-nowrap text-[10px] tracking-widest ${
                   col.align === "right" ? "text-right" : ""
                 }`}
                 onClick={() => handleSort(col.key)}
@@ -104,48 +104,48 @@ export function TradesList({ trades }: TradesListProps) {
           {paginated.map((trade, idx) => {
             const isWin = trade.pnl > 0;
             const rowClass = isWin
-              ? "bg-emerald-500/5"
+              ? "bg-emerald-500/[0.03]"
               : trade.pnl < 0
-                ? "bg-red-500/5"
+                ? "bg-red-500/[0.03]"
                 : "";
             return (
               <TableRow key={trade.id} className={rowClass}>
-                <TableCell className="text-xs text-muted-foreground">
+                <TableCell className="text-[11px] tabular-nums text-muted-foreground">
                   {page * PAGE_SIZE + idx + 1}
                 </TableCell>
-                <TableCell className="text-xs">
+                <TableCell className="text-[11px]">
                   <span
                     className={
                       trade.direction === "Long"
-                        ? "text-emerald-500"
-                        : "text-red-500"
+                        ? "font-medium text-emerald-400"
+                        : "font-medium text-red-400"
                     }
                   >
-                    {trade.direction === "Long" ? "L" : "S"}
+                    {trade.direction}
                   </span>
                 </TableCell>
-                <TableCell className="text-xs">{trade.entry_time.slice(0, 16)}</TableCell>
-                <TableCell className="text-right text-xs">{trade.entry_price.toFixed(5)}</TableCell>
-                <TableCell className="text-xs">{trade.exit_time.slice(0, 16)}</TableCell>
-                <TableCell className="text-right text-xs">{trade.exit_price.toFixed(5)}</TableCell>
-                <TableCell className="text-right text-xs">{trade.lots.toFixed(2)}</TableCell>
+                <TableCell className="text-[11px] tabular-nums">{trade.entry_time.slice(0, 16)}</TableCell>
+                <TableCell className="text-right text-[11px] tabular-nums">{trade.entry_price.toFixed(5)}</TableCell>
+                <TableCell className="text-[11px] tabular-nums">{trade.exit_time.slice(0, 16)}</TableCell>
+                <TableCell className="text-right text-[11px] tabular-nums">{trade.exit_price.toFixed(5)}</TableCell>
+                <TableCell className="text-right text-[11px] tabular-nums">{trade.lots.toFixed(2)}</TableCell>
                 <TableCell
-                  className={`text-right text-xs font-medium ${
-                    isWin ? "text-emerald-500" : trade.pnl < 0 ? "text-red-500" : ""
+                  className={`text-right text-[11px] font-medium tabular-nums ${
+                    isWin ? "text-emerald-400" : trade.pnl < 0 ? "text-red-400" : ""
                   }`}
                 >
-                  ${trade.pnl.toFixed(2)}
+                  {isWin ? "+" : ""}${trade.pnl.toFixed(2)}
                 </TableCell>
                 <TableCell
-                  className={`text-right text-xs ${
-                    isWin ? "text-emerald-500" : trade.pnl < 0 ? "text-red-500" : ""
+                  className={`text-right text-[11px] tabular-nums ${
+                    isWin ? "text-emerald-400" : trade.pnl < 0 ? "text-red-400" : ""
                   }`}
                 >
                   {trade.pnl_pips.toFixed(1)}
                 </TableCell>
-                <TableCell className="text-right text-xs">${trade.commission.toFixed(2)}</TableCell>
-                <TableCell className="text-xs">{trade.close_reason}</TableCell>
-                <TableCell className="text-xs">{trade.duration_time}</TableCell>
+                <TableCell className="text-right text-[11px] tabular-nums">${trade.commission.toFixed(2)}</TableCell>
+                <TableCell className="text-[11px]">{trade.close_reason}</TableCell>
+                <TableCell className="text-[11px] tabular-nums">{trade.duration_time}</TableCell>
               </TableRow>
             );
           })}
@@ -154,7 +154,7 @@ export function TradesList({ trades }: TradesListProps) {
 
       {/* Pagination */}
       <div className="flex items-center justify-between">
-        <span className="text-xs text-muted-foreground">
+        <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
           {trades.length} trade{trades.length !== 1 ? "s" : ""} total
         </span>
         <div className="flex items-center gap-2">
@@ -166,7 +166,7 @@ export function TradesList({ trades }: TradesListProps) {
           >
             <ChevronLeft className="h-4 w-4" />
           </Button>
-          <span className="text-xs text-muted-foreground">
+          <span className="text-[11px] tabular-nums text-muted-foreground">
             {page + 1} / {totalPages}
           </span>
           <Button
