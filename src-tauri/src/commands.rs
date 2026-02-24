@@ -865,6 +865,105 @@ pub async fn cancel_download(
     Ok(())
 }
 
+// ── License Commands ──
+
+/// Validate a license key and optionally save credentials.
+#[tauri::command]
+pub async fn validate_license(
+    state: tauri::State<'_, AppState>,
+    username: String,
+    license_key: String,
+    remember: bool,
+) -> Result<crate::license::LicenseResponse, AppError> {
+    let response = crate::license::validate_license(&username, &license_key).await;
+
+    if response.valid {
+        // Update the tier in app state
+        let mut tier = state.license_tier.lock().await;
+        *tier = response.tier;
+
+        // Persist credentials if "remember me" is checked
+        if remember {
+            crate::license::save_credentials(&state.data_dir, &username, &license_key)?;
+        } else {
+            // If not remembering, clear any previously saved credentials
+            crate::license::clear_credentials(&state.data_dir)?;
+        }
+    }
+
+    Ok(response)
+}
+
+/// Load saved credentials from disk (for auto-login).
+#[tauri::command]
+pub async fn load_saved_license(
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<crate::license::SavedCredentials>, AppError> {
+    Ok(crate::license::load_credentials(&state.data_dir))
+}
+
+/// Clear saved license and reset tier to Free.
+#[tauri::command]
+pub async fn clear_license(
+    state: tauri::State<'_, AppState>,
+) -> Result<(), AppError> {
+    let mut tier = state.license_tier.lock().await;
+    *tier = crate::license::LicenseTier::Free;
+    crate::license::clear_credentials(&state.data_dir)?;
+    Ok(())
+}
+
+/// Start background license monitor that re-validates every hour.
+/// Emits "license-tier-changed" event if the tier changes.
+#[tauri::command]
+pub async fn start_license_monitor(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), AppError> {
+    let data_dir = state.data_dir.clone();
+    let license_tier = state.license_tier.clone();
+
+    tokio::spawn(async move {
+        let interval = std::time::Duration::from_secs(3600); // 1 hour
+        loop {
+            tokio::time::sleep(interval).await;
+
+            // Load saved credentials to re-validate
+            let creds = match crate::license::load_credentials(&data_dir) {
+                Some(c) => c,
+                None => continue,
+            };
+
+            let response =
+                crate::license::validate_license(&creds.username, &creds.license_key).await;
+            let new_tier = if response.valid {
+                response.tier
+            } else {
+                crate::license::LicenseTier::Free
+            };
+
+            let mut current = license_tier.lock().await;
+            if *current != new_tier {
+                info!(
+                    "License tier changed: {:?} -> {:?} (user: {})",
+                    *current, new_tier, creds.username
+                );
+                *current = new_tier;
+                let tier_str = match new_tier {
+                    crate::license::LicenseTier::Pro => "pro",
+                    crate::license::LicenseTier::Free => "free",
+                };
+                let _ = app.emit(
+                    "license-tier-changed",
+                    serde_json::json!({ "tier": tier_str }),
+                );
+            }
+        }
+    });
+
+    Ok(())
+}
+
 // ── Helpers ──
 
 fn emit_download_progress(app: &AppHandle, symbol_name: &str, percent: u8, message: &str) {

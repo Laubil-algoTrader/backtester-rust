@@ -2,6 +2,7 @@ pub mod commands;
 pub mod data;
 pub mod engine;
 pub mod errors;
+pub mod license;
 pub mod models;
 pub mod utils;
 
@@ -24,6 +25,8 @@ pub struct AppState {
     pub cancel_flag: Arc<AtomicBool>,
     /// Per-download cancellation flags, keyed by symbol name.
     pub download_cancel_flags: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    /// Current license tier (Arc for sharing with background monitor).
+    pub license_tier: Arc<Mutex<license::LicenseTier>>,
 }
 
 /// Resolve the application data directory and ensure it exists.
@@ -77,6 +80,7 @@ pub fn run() {
         data_dir,
         cancel_flag: Arc::new(AtomicBool::new(false)),
         download_cancel_flags: Arc::new(Mutex::new(HashMap::new())),
+        license_tier: Arc::new(Mutex::new(license::LicenseTier::Free)),
     };
 
     tauri::Builder::default()
@@ -103,6 +107,10 @@ pub fn run() {
             commands::generate_strategy_code,
             commands::download_dukascopy,
             commands::cancel_download,
+            commands::validate_license,
+            commands::load_saved_license,
+            commands::clear_license,
+            commands::start_license_monitor,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

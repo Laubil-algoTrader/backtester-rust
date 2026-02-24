@@ -9,6 +9,8 @@ import type {
   OptimizationConfig,
   Timeframe,
   CodeGenerationResult,
+  LicenseResponse,
+  SavedCredentials,
 } from "./types";
 
 /// Upload a CSV file and create a new symbol.
@@ -152,4 +154,34 @@ export async function cancelDownload(symbolName: string): Promise<void> {
 /// Placeholder greet command (for testing communication).
 export async function greet(name: string): Promise<string> {
   return invoke<string>("greet", { name });
+}
+
+// ── License ──
+
+/// Validate a license key.
+export async function validateLicense(
+  username: string,
+  licenseKey: string,
+  remember: boolean
+): Promise<LicenseResponse> {
+  return invoke<LicenseResponse>("validate_license", {
+    username,
+    licenseKey,
+    remember,
+  });
+}
+
+/// Load saved credentials from disk.
+export async function loadSavedLicense(): Promise<SavedCredentials | null> {
+  return invoke<SavedCredentials | null>("load_saved_license");
+}
+
+/// Clear saved license and reset to Free tier.
+export async function clearLicense(): Promise<void> {
+  return invoke<void>("clear_license");
+}
+
+/// Start background license monitor (re-validates every hour).
+export async function startLicenseMonitor(): Promise<void> {
+  return invoke<void>("start_license_monitor");
 }
