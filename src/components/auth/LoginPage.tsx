@@ -1,13 +1,15 @@
 import { useState, useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import { useAppStore } from "@/stores/useAppStore";
 import { validateLicense, loadSavedLicense } from "@/lib/tauri";
 import { Input } from "@/components/ui/Input";
 import { Button } from "@/components/ui/Button";
 import { Loader2, KeyRound, User, Zap, BarChart3, Code2, Settings2, ExternalLink } from "lucide-react";
 
-const REGISTER_URL = "https://lbquant-web.vercel.app/register";
+const REGISTER_URL = "https://lb-quant.com/register";
 
 export function LoginPage() {
+  const { t } = useTranslation("auth");
   const { setLicenseInfo, setLicenseChecked } = useAppStore();
 
   const [username, setUsername] = useState("");
@@ -43,11 +45,11 @@ export function LoginPage() {
 
   const handleActivate = async () => {
     if (!username.trim()) {
-      setError("Username is required");
+      setError(t("usernameRequired"));
       return;
     }
     if (!licenseKey.trim()) {
-      setError("License key is required. Get one free at lbquant-web.vercel.app/register");
+      setError(t("licenseRequired"));
       return;
     }
     setError(null);
@@ -58,7 +60,7 @@ export function LoginPage() {
         setLicenseInfo(response.tier, username.trim());
         setLicenseChecked(true);
       } else {
-        setError(response.message ?? "Invalid license key");
+        setError(response.message ?? t("invalidLicense"));
       }
     } catch (err) {
       setError(typeof err === "string" ? err : String(err));
@@ -87,10 +89,10 @@ export function LoginPage() {
         {/* Header */}
         <div className="mb-8 text-center">
           <h1 className="text-3xl font-bold tracking-tight text-foreground">
-            LBQuant
+            {t("title")}
           </h1>
           <p className="mt-1.5 text-sm text-muted-foreground">
-            High-speed strategy backtesting engine
+            {t("subtitle")}
           </p>
         </div>
 
@@ -98,20 +100,20 @@ export function LoginPage() {
           {/* Left: Login form */}
           <div className="flex-1 rounded-lg border border-border/40 bg-card p-6">
             <h2 className="mb-4 text-lg font-semibold text-foreground">
-              Activate License
+              {t("signIn")}
             </h2>
 
             <div className="space-y-3" onKeyDown={handleKeyDown}>
               <div>
                 <label className="mb-1 block text-sm text-muted-foreground">
-                  Username
+                  {t("username")}
                 </label>
                 <div className="relative">
                   <User className="absolute left-2.5 top-2 h-4 w-4 text-muted-foreground" />
                   <Input
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
-                    placeholder="Your account name"
+                    placeholder={t("usernamePlaceholder")}
                     className="pl-8"
                     autoFocus
                   />
@@ -120,14 +122,14 @@ export function LoginPage() {
 
               <div>
                 <label className="mb-1 block text-sm text-muted-foreground">
-                  License Key
+                  {t("licenseKey")}
                 </label>
                 <div className="relative">
                   <KeyRound className="absolute left-2.5 top-2 h-4 w-4 text-muted-foreground" />
                   <Input
                     value={licenseKey}
                     onChange={(e) => setLicenseKey(e.target.value)}
-                    placeholder="LBQ-XXXX-XXXX-XXXX"
+                    placeholder={t("licenseKeyPlaceholder")}
                     className="pl-8 font-mono"
                   />
                 </div>
@@ -140,7 +142,7 @@ export function LoginPage() {
                   onChange={(e) => setRemember(e.target.checked)}
                   className="h-3.5 w-3.5 accent-primary"
                 />
-                Remember me
+                {t("rememberMe")}
               </label>
 
               {error && (
@@ -159,19 +161,19 @@ export function LoginPage() {
                 ) : (
                   <KeyRound className="mr-2 h-4 w-4" />
                 )}
-                Activate
+                {t("signIn")}
               </Button>
 
               <div className="pt-1 text-center">
                 <p className="text-xs text-muted-foreground">
-                  Don't have a license?{" "}
+                  {t("newHere")}{" "}
                   <a
                     href={REGISTER_URL}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="inline-flex items-center gap-1 text-primary hover:underline"
                   >
-                    Get one free
+                    {t("createFreeAccount")}
                     <ExternalLink className="h-3 w-3" />
                   </a>
                 </p>
@@ -184,20 +186,20 @@ export function LoginPage() {
             {/* Free tier */}
             <div className="rounded-lg border border-border/40 bg-card p-4">
               <h3 className="mb-2 text-sm font-semibold text-foreground">
-                Free
+                {t("freeTier.title")}
               </h3>
               <ul className="space-y-1.5 text-sm text-muted-foreground">
                 <li className="flex items-center gap-2">
                   <BarChart3 className="h-3.5 w-3.5 text-emerald-500" />
-                  Import & manage market data
+                  {t("freeTier.importData")}
                 </li>
                 <li className="flex items-center gap-2">
                   <Settings2 className="h-3.5 w-3.5 text-emerald-500" />
-                  Visual strategy builder
+                  {t("freeTier.strategyBuilder")}
                 </li>
                 <li className="flex items-center gap-2">
                   <Zap className="h-3.5 w-3.5 text-emerald-500" />
-                  Full backtesting engine
+                  {t("freeTier.backtesting")}
                 </li>
               </ul>
             </div>
@@ -205,20 +207,20 @@ export function LoginPage() {
             {/* Pro tier */}
             <div className="rounded-lg border border-primary/30 bg-primary/[0.03] p-4">
               <h3 className="mb-2 text-sm font-semibold text-primary">
-                Pro
+                {t("proTier.title")}
               </h3>
               <ul className="space-y-1.5 text-sm text-muted-foreground">
                 <li className="flex items-center gap-2">
                   <BarChart3 className="h-3.5 w-3.5 text-emerald-500" />
-                  Everything in Free
+                  {t("proTier.everythingFree")}
                 </li>
                 <li className="flex items-center gap-2">
                   <Zap className="h-3.5 w-3.5 text-primary" />
-                  Grid Search & Genetic optimization
+                  {t("proTier.optimization")}
                 </li>
                 <li className="flex items-center gap-2">
                   <Code2 className="h-3.5 w-3.5 text-primary" />
-                  MQL5 & PineScript code export
+                  {t("proTier.codeExport")}
                 </li>
               </ul>
             </div>

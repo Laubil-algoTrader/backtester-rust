@@ -1,7 +1,8 @@
 import { useMemo } from "react";
+import { useTranslation } from "react-i18next";
 import type { EquityPoint } from "@/lib/types";
 
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const MONTH_KEYS = ["months.jan", "months.feb", "months.mar", "months.apr", "months.may", "months.jun", "months.jul", "months.aug", "months.sep", "months.oct", "months.nov", "months.dec"];
 
 interface MonthlyRow {
   year: number;
@@ -79,58 +80,90 @@ function cellColor(value: number | null): string {
   return "text-muted-foreground";
 }
 
+/** Heatmap background for monthly/YTD cells — mirrors Bloomberg Historical Yields style.
+ *  Uses the full range of values to normalize colors. */
+function cellBg(value: number | null, absMax: number): string | undefined {
+  if (value === null || absMax === 0) return undefined;
+  const t = Math.max(-1, Math.min(1, value / absMax));
+  if (t > 0) {
+    // Green zone: positive returns
+    const opacity = 0.08 + t * 0.25;
+    return `rgba(16, 185, 129, ${opacity.toFixed(3)})`;
+  } else if (t < 0) {
+    // Red zone: negative returns
+    const opacity = 0.08 + Math.abs(t) * 0.25;
+    return `rgba(220, 38, 38, ${opacity.toFixed(3)})`;
+  }
+  return undefined;
+}
+
 interface MonthlyReturnsProps {
   equityCurve: EquityPoint[];
 }
 
 export function MonthlyReturns({ equityCurve }: MonthlyReturnsProps) {
+  const { t } = useTranslation("common");
   const rows = useMemo(() => computeMonthlyReturns(equityCurve), [equityCurve]);
+
+  // Compute absolute max for heatmap normalization
+  const absMax = useMemo(() => {
+    let max = 0;
+    for (const row of rows) {
+      for (const m of row.months) {
+        if (m !== null && Math.abs(m) > max) max = Math.abs(m);
+      }
+      if (Math.abs(row.ytd) > max) max = Math.abs(row.ytd);
+    }
+    return max;
+  }, [rows]);
 
   if (rows.length === 0) {
     return (
-      <p className="py-4 text-center text-xs uppercase tracking-wider text-muted-foreground">
-        Not enough data for monthly breakdown.
+      <p className="py-4 text-center text-sm text-muted-foreground">
+        {t("noData")}
       </p>
     );
   }
 
   return (
     <div className="overflow-x-auto">
-      <table className="w-full border-collapse text-[11px] tabular-nums">
+      <table className="w-full border-collapse font-mono text-sm tabular-nums">
         <thead>
-          <tr className="border-b border-border/60">
-            <th className="px-2 py-2 text-left text-[10px] font-medium tracking-widest text-muted-foreground">
-              YEAR
+          <tr className="border-b border-border/40">
+            <th className="px-2 py-2 text-left text-xs font-medium text-muted-foreground">
+              {t("year")}
             </th>
-            {MONTHS.map((m) => (
+            {MONTH_KEYS.map((key) => (
               <th
-                key={m}
-                className="px-2 py-2 text-right text-[10px] font-medium tracking-widest text-muted-foreground"
+                key={key}
+                className="px-2 py-2 text-right text-xs font-medium text-muted-foreground"
               >
-                {m.toUpperCase()}
+                {t(key)}
               </th>
             ))}
-            <th className="px-2 py-2 text-right text-[10px] font-medium tracking-widest text-muted-foreground">
-              YTD
+            <th className="border-l border-border/30 px-2 py-2 text-right text-xs font-medium text-muted-foreground">
+              {t("ytd")}
             </th>
           </tr>
         </thead>
         <tbody>
           {rows.map((row) => (
-            <tr key={row.year} className="border-b border-border/30 hover:bg-card/50">
-              <td className="px-2 py-1.5 font-medium text-foreground">
+            <tr key={row.year} className="border-b border-border/20">
+              <td className="px-2 py-1.5 font-semibold text-foreground">
                 {row.year}
               </td>
               {row.months.map((val, i) => (
                 <td
                   key={i}
                   className={`px-2 py-1.5 text-right ${cellColor(val)}`}
+                  style={cellBg(val, absMax) ? { backgroundColor: cellBg(val, absMax) } : undefined}
                 >
                   {formatCell(val)}
                 </td>
               ))}
               <td
-                className={`px-2 py-1.5 text-right font-medium ${cellColor(row.ytd)}`}
+                className={`border-l border-border/30 px-2 py-1.5 text-right font-semibold ${cellColor(row.ytd)}`}
+                style={cellBg(row.ytd, absMax) ? { backgroundColor: cellBg(row.ytd, absMax) } : undefined}
               >
                 {row.ytd.toFixed(2)}
               </td>

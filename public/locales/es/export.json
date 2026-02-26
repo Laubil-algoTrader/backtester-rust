@@ -1,0 +1,32 @@
+{
+  "title": "Exportar Código de Estrategia",
+  "untitled": "Estrategia Sin Nombre",
+  "regenerate": "Regenerar",
+  "copy": "Copiar",
+  "copied": "Copiado",
+  "downloadAll": "Descargar Todo ({{count}} archivos)",
+  "noRulesError": "No hay reglas de entrada definidas. Crea una estrategia primero.",
+  "noCodeYet": "Aún no se generó código. Crea una estrategia con reglas de entrada primero.",
+  "expertAdvisor": "Expert Advisor",
+  "strategyScript": "Strategy Script",
+  "customIndicator": "Indicador Personalizado",
+  "lines": "líneas",
+  "download": "Descargar",
+  "downloadExt": "Descargar .{{ext}}",
+  "mql5Notes": {
+    "title": "Notas MQL5:",
+    "note1": "Todos los indicadores usan implementaciones personalizadas que coinciden exactamente con el motor del backtester",
+    "note2": "Coloca los archivos de indicadores BT_*.mq5 en tu carpeta MQL5/Indicators/",
+    "note3": "Compila todos los archivos de indicadores y el EA en MetaEditor antes de usar",
+    "note4": "Ajusta el Magic Number para evitar conflictos con otros EAs",
+    "note5": "Prueba en el Strategy Tester antes de desplegar en una cuenta real"
+  },
+  "pineNotes": {
+    "title": "Notas Pine Script:",
+    "note1": "Copia el código al Pine Editor de TradingView y agrégalo al gráfico",
+    "note2": "La comisión y el deslizamiento se configuran en la declaración strategy()",
+    "note3": "El tamaño de posición puede necesitar ajuste manual según el tamaño de tu cuenta",
+    "note4": "ADX usa ta.dmi() que puede comportarse ligeramente diferente",
+    "note5": "Los resultados del backtest diferirán debido a diferencias de plataforma en la ejecución de órdenes"
+  }
+}

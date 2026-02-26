@@ -20,6 +20,34 @@ pub enum IndicatorType {
     WilliamsR,
     ParabolicSAR,
     VWAP,
+    // New indicators
+    Aroon,
+    AwesomeOscillator,
+    BarRange,
+    BiggestRange,
+    HighestInRange,
+    LowestInRange,
+    SmallestRange,
+    BearsPower,
+    BullsPower,
+    DeMarker,
+    Fibonacci,
+    Fractal,
+    GannHiLo,
+    HeikenAshi,
+    HullMA,
+    Ichimoku,
+    KeltnerChannel,
+    LaguerreRSI,
+    LinearRegression,
+    Momentum,
+    SuperTrend,
+    TrueRange,
+    StdDev,
+    Reflex,
+    Pivots,
+    UlcerIndex,
+    Vortex,
 }
 
 /// Parameters for indicator calculation. Each indicator uses the fields relevant to it.
@@ -43,6 +71,10 @@ pub struct IndicatorParams {
     pub acceleration_factor: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub maximum_factor: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gamma: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub multiplier: Option<f64>,
 }
 
 /// Configuration for a single indicator instance.
@@ -86,6 +118,12 @@ impl IndicatorConfig {
         if let Some(m) = self.params.maximum_factor {
             key.push_str(&format!("_mf{:.4}", m));
         }
+        if let Some(g) = self.params.gamma {
+            key.push_str(&format!("_g{:.4}", g));
+        }
+        if let Some(m) = self.params.multiplier {
+            key.push_str(&format!("_mul{:.2}", m));
+        }
         key
     }
 }
@@ -119,6 +157,23 @@ pub enum OperandType {
     Indicator,
     Price,
     Constant,
+    BarTime,
+    CandlePattern,
+}
+
+/// Time/bar fields for the BarTime operand type.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TimeField {
+    CurrentBar,
+    BarTimeValue,
+    BarHour,
+    BarMinute,
+    BarDayOfWeek,
+    CurrentTime,
+    CurrentHour,
+    CurrentMinute,
+    CurrentDayOfWeek,
+    CurrentMonth,
 }
 
 /// Which price field to use as an operand.
@@ -128,6 +183,22 @@ pub enum PriceField {
     High,
     Low,
     Close,
+    DailyOpen,
+    DailyHigh,
+    DailyLow,
+    DailyClose,
+}
+
+/// Candle pattern types for the CandlePattern operand.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CandlePatternType {
+    Doji,
+    Hammer,
+    ShootingStar,
+    BearishEngulfing,
+    BullishEngulfing,
+    DarkCloud,
+    PiercingLine,
 }
 
 /// One side of a rule comparison. Flat struct matching the TypeScript interface.
@@ -140,6 +211,10 @@ pub struct Operand {
     pub price_field: Option<PriceField>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub constant_value: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_field: Option<TimeField>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candle_pattern: Option<CandlePatternType>,
     /// Look back N bars for the operand value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offset: Option<usize>,

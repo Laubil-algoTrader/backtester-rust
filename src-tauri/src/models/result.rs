@@ -203,4 +203,7 @@ pub struct OptimizationResult {
     /// Out-of-Sample results for each OOS period (empty if no OOS configured).
     #[serde(default)]
     pub oos_results: Vec<OosResult>,
+    /// Downsampled equity curve for sparkline visualization (max ~60 points).
+    #[serde(default)]
+    pub equity_curve: Vec<EquityPoint>,
 }

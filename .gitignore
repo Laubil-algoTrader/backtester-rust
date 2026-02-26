@@ -23,3 +23,11 @@ Thumbs.db
 
 # Temp
 *.tmp
+
+# Build scripts and logs
+*.bat
+*_out.txt
+*_log.txt
+build_log.txt
+check_result.txt
+PLAN.md

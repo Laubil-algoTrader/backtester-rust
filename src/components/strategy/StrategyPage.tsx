@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useAppStore } from "@/stores/useAppStore";
 import { saveStrategy, loadStrategies } from "@/lib/tauri";
 import type { Strategy } from "@/lib/types";
@@ -41,6 +42,9 @@ export function StrategyPage() {
     setSavedStrategies,
     resetStrategy,
   } = useAppStore();
+
+  const { t } = useTranslation("strategy");
+  const { t: tc } = useTranslation("common");
 
   const [showLoadDialog, setShowLoadDialog] = useState(false);
   const [showSaveDialog, setShowSaveDialog] = useState(false);
@@ -115,30 +119,30 @@ export function StrategyPage() {
           className="h-9 max-w-xs font-medium"
           value={currentStrategy.name}
           onChange={(e) => updateStrategyName(e.target.value)}
-          placeholder="Strategy name"
+          placeholder={t("strategyName")}
         />
         <div className="flex gap-2">
           <Button
             variant="outline"
             size="sm"
-            className="text-[10px] uppercase tracking-wider"
+            className="text-sm"
             onClick={() => setShowLoadDialog(true)}
           >
             <FolderOpen className="mr-1.5 h-3.5 w-3.5" />
-            Load
+            {tc("buttons.load")}
           </Button>
           <Button
             variant="outline"
             size="sm"
-            className="text-[10px] uppercase tracking-wider"
+            className="text-sm"
             onClick={() => setShowSaveDialog(true)}
           >
             <Save className="mr-1.5 h-3.5 w-3.5" />
-            Save
+            {tc("buttons.save")}
           </Button>
-          <Button variant="outline" size="sm" className="text-[10px] uppercase tracking-wider" onClick={resetStrategy}>
+          <Button variant="outline" size="sm" className="text-sm" onClick={resetStrategy}>
             <FilePlus className="mr-1.5 h-3.5 w-3.5" />
-            New
+            {tc("buttons.new")}
           </Button>
         </div>
       </div>
@@ -149,13 +153,13 @@ export function StrategyPage() {
         <div className="space-y-4 lg:col-span-2">
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="text-[11px] uppercase tracking-[0.15em]">Entry Rules</CardTitle>
+              <CardTitle className="text-sm">{t("entryRules")}</CardTitle>
             </CardHeader>
             <CardContent>
               <Tabs defaultValue="long">
-                <TabsList className="mb-3 grid w-full grid-cols-2">
-                  <TabsTrigger value="long" className="text-xs">Long</TabsTrigger>
-                  <TabsTrigger value="short" className="text-xs">Short</TabsTrigger>
+                <TabsList className="mb-3 w-full">
+                  <TabsTrigger value="long" className="text-sm">{t("long")}</TabsTrigger>
+                  <TabsTrigger value="short" className="text-sm">{t("short")}</TabsTrigger>
                 </TabsList>
                 <TabsContent value="long">
                   <RulesList
@@ -177,13 +181,13 @@ export function StrategyPage() {
 
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="text-[11px] uppercase tracking-[0.15em]">Exit Rules</CardTitle>
+              <CardTitle className="text-sm">{t("exitRules")}</CardTitle>
             </CardHeader>
             <CardContent>
               <Tabs defaultValue="long">
-                <TabsList className="mb-3 grid w-full grid-cols-2">
-                  <TabsTrigger value="long" className="text-xs">Long</TabsTrigger>
-                  <TabsTrigger value="short" className="text-xs">Short</TabsTrigger>
+                <TabsList className="mb-3 w-full">
+                  <TabsTrigger value="long" className="text-sm">{t("long")}</TabsTrigger>
+                  <TabsTrigger value="short" className="text-sm">{t("short")}</TabsTrigger>
                 </TabsList>
                 <TabsContent value="long">
                   <RulesList
@@ -208,7 +212,7 @@ export function StrategyPage() {
         <div>
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="text-[11px] uppercase tracking-[0.15em]">Configuration</CardTitle>
+              <CardTitle className="text-sm">{t("configuration")}</CardTitle>
             </CardHeader>
             <CardContent>
               <ConfigPanel
@@ -240,9 +244,9 @@ export function StrategyPage() {
       <Dialog open={showLoadDialog} onOpenChange={setShowLoadDialog}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>Load Strategy</DialogTitle>
+            <DialogTitle>{t("loadStrategy")}</DialogTitle>
             <DialogDescription>
-              Select a saved strategy to load.
+              {t("selectSaved")}
             </DialogDescription>
           </DialogHeader>
           <StrategyList

@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useMemo } from "react";
+import { useTranslation } from "react-i18next";
 import { useAppStore } from "@/stores/useAppStore";
 import type { ParamSource, ParameterRange, Strategy } from "@/lib/types";
 import { getIndicatorParamFields } from "@/components/strategy/utils";
@@ -11,6 +12,8 @@ import {
   TableHead,
   TableCell,
 } from "@/components/ui/Table";
+import { ChevronRight } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 interface DetectedParam {
   ruleIndex: number;
@@ -24,6 +27,36 @@ interface DetectedParam {
   currentValue: number;
   paramSource: ParamSource;
 }
+
+function getCategoryKey(source: ParamSource): string {
+  switch (source) {
+    case "long_entry":
+    case "short_entry":
+      return "categories.entryParams";
+    case "long_exit":
+    case "short_exit":
+      return "categories.exitParams";
+    case "stop_loss":
+      return "categories.stopLoss";
+    case "take_profit":
+      return "categories.takeProfit";
+    case "trailing_stop":
+      return "categories.trailingStop";
+    case "trading_hours":
+    case "close_trades_at":
+      return "categories.filters";
+  }
+}
+
+// Stable category ordering (using translation keys)
+const CATEGORY_ORDER = [
+  "categories.entryParams",
+  "categories.exitParams",
+  "categories.stopLoss",
+  "categories.takeProfit",
+  "categories.trailingStop",
+  "categories.filters",
+];
 
 /** Scan strategy rules and find all optimizable indicator parameters + SL/TP/TS + time filters. */
 function detectParams(strategy: Pick<Strategy, "long_entry_rules" | "short_entry_rules" | "long_exit_rules" | "short_exit_rules" | "stop_loss" | "take_profit" | "trailing_stop" | "trading_hours" | "close_trades_at">): DetectedParam[] {
@@ -43,25 +76,44 @@ function detectParams(strategy: Pick<Strategy, "long_entry_rules" | "short_entry
       for (const side of ["left", "right"] as const) {
         const operand =
           side === "left" ? rule.left_operand : rule.right_operand;
-        if (operand.operand_type !== "Indicator" || !operand.indicator) continue;
+        // Detect Indicator parameters
+        if (operand.operand_type === "Indicator" && operand.indicator) {
+          const ind = operand.indicator;
+          const fields = getIndicatorParamFields(ind.indicator_type);
 
-        const ind = operand.indicator;
-        const fields = getIndicatorParamFields(ind.indicator_type);
+          for (const field of fields) {
+            const currentValue =
+              (ind.params as Record<string, number | undefined>)[field.key] ??
+              field.defaultValue;
+            params.push({
+              ruleIndex: i,
+              operandSide: side,
+              ruleLabel: `${group.label} #${i + 1} (${side}) — ${ind.indicator_type}`,
+              paramKey: field.key,
+              paramLabel: field.label,
+              defaultMin: Math.max(field.min, 1),
+              defaultMax: Math.min(field.max, currentValue * 3),
+              defaultStep: field.step,
+              currentValue,
+              paramSource: group.source,
+            });
+          }
+        }
 
-        for (const field of fields) {
-          const currentValue =
-            (ind.params as Record<string, number | undefined>)[field.key] ??
-            field.defaultValue;
+        // Detect Constant (nivel) parameters
+        if (operand.operand_type === "Constant" && operand.constant_value != null) {
+          const val = operand.constant_value;
+          const absVal = Math.abs(val) || 1;
           params.push({
             ruleIndex: i,
             operandSide: side,
-            ruleLabel: `${group.label} #${i + 1} (${side}) — ${ind.indicator_type}`,
-            paramKey: field.key,
-            paramLabel: field.label,
-            defaultMin: Math.max(field.min, 1),
-            defaultMax: Math.min(field.max, currentValue * 3),
-            defaultStep: field.step,
-            currentValue,
+            ruleLabel: `${group.label} #${i + 1} (${side}) — Constant`,
+            paramKey: "constant_value",
+            paramLabel: "Level",
+            defaultMin: val >= 0 ? 0 : -absVal * 3,
+            defaultMax: absVal * 3,
+            defaultStep: absVal >= 100 ? 10 : absVal >= 10 ? 1 : 0.1,
+            currentValue: val,
             paramSource: group.source,
           });
         }
@@ -215,7 +267,7 @@ function detectParams(strategy: Pick<Strategy, "long_entry_rules" | "short_entry
   return params;
 }
 
-function paramKey(p: DetectedParam): string {
+function makeParamKey(p: DetectedParam): string {
   if (p.paramSource === "stop_loss" || p.paramSource === "take_profit" || p.paramSource === "trailing_stop"
     || p.paramSource === "trading_hours" || p.paramSource === "close_trades_at") {
     return `${p.paramSource}_${p.paramKey}`;
@@ -228,6 +280,7 @@ interface ParameterRangesProps {
 }
 
 export function ParameterRanges({ onChange }: ParameterRangesProps) {
+  const { t } = useTranslation("optimization");
   const { currentStrategy } = useAppStore();
 
   const detected = useMemo(
@@ -245,17 +298,35 @@ export function ParameterRanges({ onChange }: ParameterRangesProps) {
     ],
   );
 
+  // Group params by category
+  const groups = useMemo(() => {
+    const map = new Map<string, DetectedParam[]>();
+    for (const p of detected) {
+      const cat = getCategoryKey(p.paramSource);
+      if (!map.has(cat)) map.set(cat, []);
+      map.get(cat)!.push(p);
+    }
+    // Return in stable order
+    const sorted: [string, DetectedParam[]][] = [];
+    for (const cat of CATEGORY_ORDER) {
+      const items = map.get(cat);
+      if (items && items.length > 0) sorted.push([cat, items]);
+    }
+    return sorted;
+  }, [detected]);
+
   // Track enabled state and ranges per parameter
   const [enabled, setEnabled] = useState<Record<string, boolean>>({});
   const [ranges, setRanges] = useState<
     Record<string, { min: number; max: number; step: number }>
   >({});
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set(CATEGORY_ORDER));
 
   // Initialize defaults when detected params change
   useEffect(() => {
     const newRanges: Record<string, { min: number; max: number; step: number }> = {};
     for (const p of detected) {
-      const key = paramKey(p);
+      const key = makeParamKey(p);
       if (!ranges[key]) {
         newRanges[key] = {
           min: p.defaultMin,
@@ -273,7 +344,7 @@ export function ParameterRanges({ onChange }: ParameterRangesProps) {
   const notifyChange = useCallback(() => {
     const result: ParameterRange[] = [];
     for (const p of detected) {
-      const key = paramKey(p);
+      const key = makeParamKey(p);
       if (enabled[key]) {
         const r = ranges[key];
         if (r) {
@@ -312,93 +383,140 @@ export function ParameterRanges({ onChange }: ParameterRangesProps) {
     }));
   };
 
+  const toggleCollapse = (category: string) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(category)) {
+        next.delete(category);
+      } else {
+        next.add(category);
+      }
+      return next;
+    });
+  };
+
   if (detected.length === 0) {
     return (
-      <p className="py-4 text-center text-xs uppercase tracking-wider text-muted-foreground">
-        No optimizable parameters found. Add indicator-based rules or
-        configure stop loss / take profit / trailing stop first.
+      <p className="py-4 text-center text-sm text-muted-foreground">
+        {t("noParams")}
       </p>
     );
   }
 
   return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          <TableHead className="w-10 text-[10px] tracking-widest">ON</TableHead>
-          <TableHead className="text-[10px] tracking-widest">PARAMETER</TableHead>
-          <TableHead className="w-20 text-[10px] tracking-widest">CURRENT</TableHead>
-          <TableHead className="w-24 text-[10px] tracking-widest">MIN</TableHead>
-          <TableHead className="w-24 text-[10px] tracking-widest">MAX</TableHead>
-          <TableHead className="w-24 text-[10px] tracking-widest">STEP</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {detected.map((p) => {
-          const key = paramKey(p);
-          const isEnabled = !!enabled[key];
-          const r = ranges[key] ?? {
-            min: p.defaultMin,
-            max: p.defaultMax,
-            step: p.defaultStep,
-          };
-          return (
-            <TableRow key={key} className={isEnabled ? "" : "opacity-50"}>
-              <TableCell>
-                <input
-                  type="checkbox"
-                  checked={isEnabled}
-                  onChange={() => toggleEnabled(key)}
-                  className="h-4 w-4 accent-primary"
-                />
-              </TableCell>
-              <TableCell className="text-xs">
-                <span className="font-medium">{p.paramLabel}</span>
-                <span className="ml-1 text-muted-foreground">
-                  ({p.ruleLabel})
-                </span>
-              </TableCell>
-              <TableCell className="text-xs text-muted-foreground">
-                {p.currentValue}
-              </TableCell>
-              <TableCell>
-                <Input
-                  type="number"
-                  className="h-7 w-full text-xs"
-                  value={r.min}
-                  onChange={(e) =>
-                    updateRange(key, "min", Number(e.target.value))
-                  }
-                  disabled={!isEnabled}
-                />
-              </TableCell>
-              <TableCell>
-                <Input
-                  type="number"
-                  className="h-7 w-full text-xs"
-                  value={r.max}
-                  onChange={(e) =>
-                    updateRange(key, "max", Number(e.target.value))
-                  }
-                  disabled={!isEnabled}
-                />
-              </TableCell>
-              <TableCell>
-                <Input
-                  type="number"
-                  className="h-7 w-full text-xs"
-                  value={r.step}
-                  step="any"
-                  onChange={(e) =>
-                    updateRange(key, "step", Number(e.target.value))
-                  }
-                  disabled={!isEnabled}
-                />
-              </TableCell>
-            </TableRow>
-          );
-        })}
-      </TableBody>
-    </Table>
+    <div className="space-y-1">
+      {groups.map(([category, params]) => {
+        const isCollapsed = collapsed.has(category);
+        const enabledCount = params.filter((p) => enabled[makeParamKey(p)]).length;
+
+        return (
+          <div key={category}>
+            {/* Category header */}
+            <button
+              type="button"
+              onClick={() => toggleCollapse(category)}
+              className="flex w-full items-center gap-2 rounded px-1 py-1.5 text-sm text-foreground/70 transition-colors hover:bg-foreground/[0.03]"
+            >
+              <ChevronRight
+                className={cn(
+                  "h-3.5 w-3.5 transition-transform",
+                  !isCollapsed && "rotate-90",
+                )}
+              />
+              <span className="font-medium">{t(category)}</span>
+              <span className="text-xs text-muted-foreground">
+                {enabledCount > 0 ? (
+                  <span className="text-primary">{enabledCount}/{params.length}</span>
+                ) : (
+                  `${params.length}`
+                )}
+              </span>
+            </button>
+
+            {/* Parameter table (collapsible) */}
+            {!isCollapsed && (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-10 text-xs">{t("table.on")}</TableHead>
+                    <TableHead className="text-xs">{t("table.parameter")}</TableHead>
+                    <TableHead className="w-20 text-xs">{t("table.current")}</TableHead>
+                    <TableHead className="w-24 text-xs">{t("table.min")}</TableHead>
+                    <TableHead className="w-24 text-xs">{t("table.max")}</TableHead>
+                    <TableHead className="w-24 text-xs">{t("table.step")}</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {params.map((p) => {
+                    const key = makeParamKey(p);
+                    const isEnabled = !!enabled[key];
+                    const r = ranges[key] ?? {
+                      min: p.defaultMin,
+                      max: p.defaultMax,
+                      step: p.defaultStep,
+                    };
+                    return (
+                      <TableRow key={key} className={isEnabled ? "" : "opacity-50"}>
+                        <TableCell>
+                          <input
+                            type="checkbox"
+                            checked={isEnabled}
+                            onChange={() => toggleEnabled(key)}
+                            className="h-4 w-4 accent-primary"
+                          />
+                        </TableCell>
+                        <TableCell className="text-sm">
+                          <span className="font-medium">{p.paramLabel}</span>
+                          <span className="ml-1 text-muted-foreground">
+                            ({p.ruleLabel})
+                          </span>
+                        </TableCell>
+                        <TableCell className="text-sm text-muted-foreground">
+                          {p.currentValue}
+                        </TableCell>
+                        <TableCell>
+                          <Input
+                            type="number"
+                            className="h-8 w-full text-sm"
+                            value={r.min}
+                            onChange={(e) =>
+                              updateRange(key, "min", Number(e.target.value))
+                            }
+                            disabled={!isEnabled}
+                          />
+                        </TableCell>
+                        <TableCell>
+                          <Input
+                            type="number"
+                            className="h-8 w-full text-sm"
+                            value={r.max}
+                            onChange={(e) =>
+                              updateRange(key, "max", Number(e.target.value))
+                            }
+                            disabled={!isEnabled}
+                          />
+                        </TableCell>
+                        <TableCell>
+                          <Input
+                            type="number"
+                            className="h-8 w-full text-sm"
+                            value={r.step}
+                            step="any"
+                            onChange={(e) =>
+                              updateRange(key, "step", Number(e.target.value))
+                            }
+                            disabled={!isEnabled}
+                          />
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            )}
+          </div>
+        );
+      })}
+    </div>
   );
 }

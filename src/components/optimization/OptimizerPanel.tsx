@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useMemo } from "react";
+import { useTranslation } from "react-i18next";
 import { listen } from "@tauri-apps/api/event";
 import { useAppStore } from "@/stores/useAppStore";
 import { runOptimization, cancelOptimization } from "@/lib/tauri";
@@ -50,14 +51,14 @@ const TIMEFRAME_LABELS: Record<string, string> = {
   d1: "D1",
 };
 
-const OBJECTIVE_OPTIONS: { value: ObjectiveFunction; label: string }[] = [
-  { value: "TotalProfit", label: "Total Profit" },
-  { value: "SharpeRatio", label: "Sharpe Ratio" },
-  { value: "ProfitFactor", label: "Profit Factor" },
-  { value: "WinRate", label: "Win Rate" },
-  { value: "ReturnDdRatio", label: "Return/DD Ratio" },
-  { value: "MinStagnation", label: "Min Stagnation" },
-  { value: "MinUlcerIndex", label: "Min Ulcer Index" },
+const OBJECTIVE_KEYS: { value: ObjectiveFunction; tKey: string }[] = [
+  { value: "TotalProfit", tKey: "totalProfit" },
+  { value: "SharpeRatio", tKey: "sharpeRatio" },
+  { value: "ProfitFactor", tKey: "profitFactor" },
+  { value: "WinRate", tKey: "winRate" },
+  { value: "ReturnDdRatio", tKey: "returnDdRatio" },
+  { value: "MinStagnation", tKey: "minStagnation" },
+  { value: "MinUlcerIndex", tKey: "minUlcerIndex" },
 ];
 
 interface OptimizerPanelProps {
@@ -65,6 +66,8 @@ interface OptimizerPanelProps {
 }
 
 export function OptimizerPanel({ parameterRanges }: OptimizerPanelProps) {
+  const { t } = useTranslation("optimization");
+  const { t: tc } = useTranslation("common");
   const {
     symbols,
     selectedSymbolId,
@@ -175,32 +178,32 @@ export function OptimizerPanel({ parameterRanges }: OptimizerPanelProps) {
   });
 
   const validate = (): string | null => {
-    if (!selectedSymbolId) return "Select a symbol first.";
+    if (!selectedSymbolId) return t("validation.selectSymbol");
     if ((currentStrategy.long_entry_rules.length === 0 && currentStrategy.short_entry_rules.length === 0))
-      return "Add at least one entry rule.";
+      return t("validation.addEntryRule");
     if (parameterRanges.length === 0)
-      return "Enable at least one parameter range.";
-    if (initialCapital <= 0) return "Capital must be greater than 0.";
-    if (leverage < 1) return "Leverage must be at least 1.";
+      return t("validation.enableParam");
+    if (initialCapital <= 0) return t("validation.capitalPositive");
+    if (leverage < 1) return t("validation.leverageMin");
     if (
       backtestStartDate &&
       backtestEndDate &&
       backtestStartDate >= backtestEndDate
     )
-      return "Start date must be before end date.";
+      return t("validation.dateOrder");
     for (const r of parameterRanges) {
       if (r.min >= r.max)
-        return `Parameter "${r.display_name}": min must be less than max.`;
+        return t("validation.minMax", { name: r.display_name });
       if (r.step <= 0)
-        return `Parameter "${r.display_name}": step must be greater than 0.`;
+        return t("validation.stepPositive", { name: r.display_name });
     }
     if (method === "GeneticAlgorithm") {
-      if (populationSize < 2) return "Population size must be at least 2.";
-      if (generations < 1) return "Generations must be at least 1.";
+      if (populationSize < 2) return t("validation.populationMin");
+      if (generations < 1) return t("validation.generationsMin");
       if (mutationRate < 0 || mutationRate > 1)
-        return "Mutation rate must be between 0 and 1.";
+        return t("validation.mutationRange");
       if (crossoverRate < 0 || crossoverRate > 1)
-        return "Crossover rate must be between 0 and 1.";
+        return t("validation.crossoverRange");
     }
     return null;
   };
@@ -215,7 +218,7 @@ export function OptimizerPanel({ parameterRanges }: OptimizerPanelProps) {
     setError(null);
     setBestSoFar(null);
     setEtaDisplay("");
-    setLoading(true, "Running optimization...");
+    setLoading(true, t("runningOptimization"));
     setOptimizationResults([]);
 
     unlistenRef.current = await listen<{
@@ -290,8 +293,10 @@ export function OptimizerPanel({ parameterRanges }: OptimizerPanelProps) {
       const results = await runOptimization(strategy, optConfig);
       setOptimizationResults(results);
     } catch (err) {
-      const msg = typeof err === "string" ? err : String(err);
-      if (!msg.includes("Cancelled")) {
+      const msg = typeof err === "string" ? err : err instanceof Error ? err.message : JSON.stringify(err);
+      if (msg.includes("Cancelled") || msg.includes("cancelled") || msg.includes("cancel")) {
+        setError(tc("stoppedByUser"));
+      } else {
         setError(msg);
       }
     } finally {
@@ -312,332 +317,346 @@ export function OptimizerPanel({ parameterRanges }: OptimizerPanelProps) {
   };
 
   return (
-    <Card>
-      <CardHeader className="pb-3">
-        <CardTitle className="text-[11px] uppercase tracking-[0.15em]">Optimization Configuration</CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {/* Row 1: Method + Objective + Symbol + Timeframe + Precision */}
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-6">
-          <div className="space-y-1">
-            <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Method</label>
-            <Select
-              value={method}
-              onValueChange={(v) => setMethod(v as OptimizationMethod)}
-            >
-              <SelectTrigger className="h-8 text-xs">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="GridSearch">Grid Search</SelectItem>
-                <SelectItem value="GeneticAlgorithm">
-                  Genetic Algorithm
-                </SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="space-y-1 md:col-span-2">
-            <label className="text-[10px] uppercase tracking-wider text-muted-foreground">
-              Objectives {objectives.length > 1 && <span className="text-primary">({objectives.length})</span>}
-            </label>
-            <div className="flex flex-wrap gap-1.5">
-              {OBJECTIVE_OPTIONS.map((o) => {
-                const selected = objectives.includes(o.value);
-                return (
-                  <button
-                    key={o.value}
-                    type="button"
-                    onClick={() => {
-                      if (selected) {
-                        // Don't allow deselecting the last objective
-                        if (objectives.length > 1) {
-                          setObjectives(objectives.filter((v) => v !== o.value));
-                        }
-                      } else {
-                        setObjectives([...objectives, o.value]);
-                      }
-                    }}
-                    className={`rounded-md border px-2 py-1 text-[10px] font-medium transition-colors ${
-                      selected
-                        ? "border-primary bg-primary/15 text-primary"
-                        : "border-border bg-card text-muted-foreground hover:border-primary/50"
-                    }`}
-                  >
-                    {o.label}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          <div className="space-y-1">
-            <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Symbol</label>
-            <Select
-              value={selectedSymbolId ?? ""}
-              onValueChange={setSelectedSymbolId}
-            >
-              <SelectTrigger className="h-8 text-xs">
-                <SelectValue placeholder="Select symbol" />
-              </SelectTrigger>
-              <SelectContent>
-                {symbols.map((s) => (
-                  <SelectItem key={s.id} value={s.id}>
-                    {s.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="space-y-1">
-            <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Timeframe</label>
-            <Select
-              value={selectedTimeframe}
-              onValueChange={(v) => setSelectedTimeframe(v as Timeframe)}
-            >
-              <SelectTrigger className="h-8 text-xs">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {availableTimeframes.map((tf) => (
-                  <SelectItem key={tf} value={tf}>
-                    {TIMEFRAME_LABELS[tf] ?? tf}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="space-y-1">
-            <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Precision</label>
-            <Select
-              value={backtestPrecision}
-              onValueChange={(v) => setBacktestPrecision(v as BacktestPrecision)}
-            >
-              <SelectTrigger className="h-8 text-xs">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {availablePrecisions.map((p) => (
-                  <SelectItem key={p} value={p}>
-                    {PRECISION_LABELS[p]}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
-
-        {/* Row 2: IS Dates + Capital + Leverage */}
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-          <div className="space-y-1">
-            <label className="text-[10px] uppercase tracking-wider text-muted-foreground">IS Start</label>
-            <DatePicker
-              value={backtestStartDate.slice(0, 10)}
-              onChange={(v) => setBacktestStartDate(v)}
-            />
-          </div>
-          <div className="space-y-1">
-            <label className="text-[10px] uppercase tracking-wider text-muted-foreground">IS End</label>
-            <DatePicker
-              value={backtestEndDate.slice(0, 10)}
-              onChange={(v) => setBacktestEndDate(v)}
-            />
-          </div>
-          <div className="space-y-1">
-            <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Capital ($)</label>
-            <Input
-              type="number"
-              className="h-8 text-xs"
-              min={0}
-              step="any"
-              value={initialCapital}
-              onChange={(e) => setInitialCapital(Number(e.target.value))}
-            />
-          </div>
-          <div className="space-y-1">
-            <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Leverage</label>
-            <Input
-              type="number"
-              className="h-8 text-xs"
-              min={1}
-              step={1}
-              value={leverage}
-              onChange={(e) => setLeverage(Number(e.target.value))}
-            />
-          </div>
-        </div>
-
-        {/* OOS Periods */}
-        <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <label className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-              Out-of-Sample Periods {oosPeriods.length > 0 && <span className="text-primary">({oosPeriods.length})</span>}
-            </label>
-            <button
-              type="button"
-              onClick={() => {
-                const num = oosPeriods.length + 1;
-                setOosPeriods([...oosPeriods, { label: `OOS ${num}`, start_date: "", end_date: "" }]);
-              }}
-              className="flex items-center gap-1 rounded px-2 py-1 text-[10px] font-medium text-primary transition-colors hover:bg-primary/10"
-            >
-              <Plus className="h-3 w-3" />
-              Add OOS
-            </button>
-          </div>
-          {oosPeriods.map((oos, idx) => (
-            <div key={idx} className="grid grid-cols-[auto_1fr_1fr_auto] items-end gap-2">
-              <span className="pb-1.5 text-[10px] font-medium text-muted-foreground">{oos.label}</span>
-              <div className="space-y-1">
-                <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Start</label>
-                <DatePicker
-                  value={oos.start_date}
-                  onChange={(v) => {
-                    const updated = [...oosPeriods];
-                    updated[idx] = { ...updated[idx], start_date: v };
-                    setOosPeriods(updated);
-                  }}
-                />
-              </div>
-              <div className="space-y-1">
-                <label className="text-[10px] uppercase tracking-wider text-muted-foreground">End</label>
-                <DatePicker
-                  value={oos.end_date}
-                  onChange={(v) => {
-                    const updated = [...oosPeriods];
-                    updated[idx] = { ...updated[idx], end_date: v };
-                    setOosPeriods(updated);
-                  }}
-                />
-              </div>
-              <button
-                type="button"
-                onClick={() => setOosPeriods(oosPeriods.filter((_, i) => i !== idx))}
-                className="mb-0.5 rounded p-1.5 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          ))}
-        </div>
-
-        {/* GA Config (only for Genetic Algorithm) */}
-        {method === "GeneticAlgorithm" && (
-          <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-            <div className="space-y-1">
-              <label className="text-[10px] uppercase tracking-wider text-muted-foreground">
-                Population Size
-              </label>
-              <Input
-                type="number"
-                className="h-8 text-xs"
-                min={10}
-                step={10}
-                value={populationSize}
-                onChange={(e) => setPopulationSize(Number(e.target.value))}
-              />
-            </div>
-            <div className="space-y-1">
-              <label className="text-[10px] uppercase tracking-wider text-muted-foreground">
-                Generations
-              </label>
-              <Input
-                type="number"
-                className="h-8 text-xs"
-                min={1}
-                step={1}
-                value={generations}
-                onChange={(e) => setGenerations(Number(e.target.value))}
-              />
-            </div>
-            <div className="space-y-1">
-              <label className="text-[10px] uppercase tracking-wider text-muted-foreground">
-                Mutation Rate
-              </label>
-              <Input
-                type="number"
-                className="h-8 text-xs"
-                min={0}
-                max={1}
-                step={0.01}
-                value={mutationRate}
-                onChange={(e) => setMutationRate(Number(e.target.value))}
-              />
-            </div>
-            <div className="space-y-1">
-              <label className="text-[10px] uppercase tracking-wider text-muted-foreground">
-                Crossover Rate
-              </label>
-              <Input
-                type="number"
-                className="h-8 text-xs"
-                min={0}
-                max={1}
-                step={0.01}
-                value={crossoverRate}
-                onChange={(e) => setCrossoverRate(Number(e.target.value))}
-              />
-            </div>
-          </div>
+    <>
+      {/* Actions bar */}
+      <div className="flex items-center gap-3">
+        {!isLoading ? (
+          <Button size="sm" onClick={handleRun} disabled={!canRun}>
+            <Play className="mr-1.5 h-4 w-4" />
+            {t("runOptimization")}
+          </Button>
+        ) : (
+          <Button
+            size="sm"
+            variant="destructive"
+            onClick={handleCancel}
+          >
+            <Square className="mr-1.5 h-4 w-4" />
+            {tc("buttons.cancel")}
+          </Button>
         )}
 
-        {/* Combination count warning for Grid Search */}
-        {method === "GridSearch" && parameterRanges.length > 0 && (
-          <div className="flex items-center gap-2 text-xs">
-            <span className="text-muted-foreground">
-              Combinations: {combinationCount.toLocaleString()}
+        {isLoading && (
+          <div className="flex flex-1 items-center gap-2">
+            <Progress value={progressPercent} className="flex-1" />
+            <span className="whitespace-nowrap text-sm text-muted-foreground">
+              {progressPercent}%
+              {bestSoFar !== null && (
+                <> | Best: {bestSoFar.toFixed(2)}</>
+              )}
+              {etaDisplay && <> | ETA: {etaDisplay}</>}
             </span>
+          </div>
+        )}
+
+        {!isLoading && method === "GridSearch" && parameterRanges.length > 0 && (
+          <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
+            {combinationCount.toLocaleString()} {tc("combinations")}
             {combinationCount > 500000 && (
-              <span className="flex items-center gap-1 text-amber-500">
-                <AlertTriangle className="h-3 w-3" />
-                Exceeds 500,000 limit
-              </span>
+              <AlertTriangle className="h-3 w-3 text-amber-500" />
             )}
-          </div>
+          </span>
         )}
+      </div>
 
-        {/* Actions */}
-        <div className="flex items-center gap-3">
-          {!isLoading ? (
-            <Button size="sm" onClick={handleRun} disabled={!canRun}>
-              <Play className="mr-1.5 h-4 w-4" />
-              Run Optimization
-            </Button>
-          ) : (
-            <Button
-              size="sm"
-              variant="destructive"
-              onClick={handleCancel}
-            >
-              <Square className="mr-1.5 h-4 w-4" />
-              Cancel
-            </Button>
-          )}
-
-          {isLoading && (
-            <div className="flex flex-1 items-center gap-2">
-              <Progress value={progressPercent} className="flex-1" />
-              <span className="text-xs text-muted-foreground">
-                {progressPercent}%
-                {bestSoFar !== null && (
-                  <> | Best: {bestSoFar.toFixed(2)}</>
-                )}
-                {etaDisplay && <> | ETA: {etaDisplay}</>}
-              </span>
-            </div>
-          )}
+      {/* Error */}
+      {error && (
+        <div className="flex items-start gap-2 rounded border border-destructive/50 bg-destructive/10 p-3">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
+          <p className="text-sm text-destructive">{error}</p>
         </div>
+      )}
 
-        {/* Error */}
-        {error && (
-          <div className="flex items-start gap-2 rounded-md border border-destructive/50 bg-destructive/10 p-3">
-            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
-            <p className="text-xs text-destructive">{error}</p>
-          </div>
-        )}
-      </CardContent>
-    </Card>
+      {/* 2-column config grid */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        {/* Left: Optimization Setup */}
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-sm">{t("setup")}</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {/* Method + Objectives */}
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <label className="text-sm text-muted-foreground">{t("method")}</label>
+                <Select
+                  value={method}
+                  onValueChange={(v) => setMethod(v as OptimizationMethod)}
+                >
+                  <SelectTrigger className="h-9 text-sm">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="GridSearch">{t("gridSearch")}</SelectItem>
+                    <SelectItem value="GeneticAlgorithm">
+                      {t("geneticAlgorithm")}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-sm text-muted-foreground">
+                  {t("objectives")} {objectives.length > 1 && <span className="text-primary">({objectives.length})</span>}
+                </label>
+                <div className="flex flex-wrap gap-1">
+                  {OBJECTIVE_KEYS.map((o) => {
+                    const selected = objectives.includes(o.value);
+                    return (
+                      <button
+                        key={o.value}
+                        type="button"
+                        onClick={() => {
+                          if (selected) {
+                            if (objectives.length > 1) {
+                              setObjectives(objectives.filter((v) => v !== o.value));
+                            }
+                          } else {
+                            setObjectives([...objectives, o.value]);
+                          }
+                        }}
+                        className={`rounded border px-2 py-0.5 text-xs font-medium transition-colors ${
+                          selected
+                            ? "border-primary bg-primary/15 text-primary"
+                            : "border-border bg-card text-muted-foreground hover:border-primary/50"
+                        }`}
+                      >
+                        {t(o.tKey)}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            {/* IS Dates */}
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <label className="text-sm text-muted-foreground">{t("isStart")}</label>
+                <DatePicker
+                  value={backtestStartDate.slice(0, 10)}
+                  onChange={(v) => setBacktestStartDate(v)}
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-sm text-muted-foreground">{t("isEnd")}</label>
+                <DatePicker
+                  value={backtestEndDate.slice(0, 10)}
+                  onChange={(v) => setBacktestEndDate(v)}
+                />
+              </div>
+            </div>
+
+            {/* OOS Periods */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="text-sm font-medium text-muted-foreground">
+                  {t("oosPeriods")} {oosPeriods.length > 0 && <span className="text-primary">({oosPeriods.length})</span>}
+                </label>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const num = oosPeriods.length + 1;
+                    setOosPeriods([...oosPeriods, { label: `OOS ${num}`, start_date: "", end_date: "" }]);
+                  }}
+                  className="flex items-center gap-1 rounded px-2 py-1 text-sm font-medium text-primary transition-colors hover:bg-primary/10"
+                >
+                  <Plus className="h-3 w-3" />
+                  {tc("buttons.add")}
+                </button>
+              </div>
+              {oosPeriods.map((oos, idx) => (
+                <div key={idx} className="grid grid-cols-[auto_1fr_1fr_auto] items-end gap-2">
+                  <span className="pb-1.5 text-sm font-medium text-muted-foreground">{oos.label}</span>
+                  <div className="space-y-1">
+                    <label className="text-xs text-muted-foreground">Start</label>
+                    <DatePicker
+                      value={oos.start_date}
+                      onChange={(v) => {
+                        const updated = [...oosPeriods];
+                        updated[idx] = { ...updated[idx], start_date: v };
+                        setOosPeriods(updated);
+                      }}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs text-muted-foreground">End</label>
+                    <DatePicker
+                      value={oos.end_date}
+                      onChange={(v) => {
+                        const updated = [...oosPeriods];
+                        updated[idx] = { ...updated[idx], end_date: v };
+                        setOosPeriods(updated);
+                      }}
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setOosPeriods(oosPeriods.filter((_, i) => i !== idx))}
+                    className="mb-0.5 rounded p-1.5 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              ))}
+            </div>
+
+            {/* GA Config (only for Genetic Algorithm) */}
+            {method === "GeneticAlgorithm" && (
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="text-sm text-muted-foreground">
+                    {t("population")}
+                  </label>
+                  <Input
+                    type="number"
+                    className="h-9 text-sm"
+                    min={10}
+                    step={10}
+                    value={populationSize}
+                    onChange={(e) => setPopulationSize(Number(e.target.value))}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-sm text-muted-foreground">
+                    {t("generations")}
+                  </label>
+                  <Input
+                    type="number"
+                    className="h-9 text-sm"
+                    min={1}
+                    step={1}
+                    value={generations}
+                    onChange={(e) => setGenerations(Number(e.target.value))}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-sm text-muted-foreground">
+                    {t("mutationRate")}
+                  </label>
+                  <Input
+                    type="number"
+                    className="h-9 text-sm"
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    value={mutationRate}
+                    onChange={(e) => setMutationRate(Number(e.target.value))}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-sm text-muted-foreground">
+                    {t("crossoverRate")}
+                  </label>
+                  <Input
+                    type="number"
+                    className="h-9 text-sm"
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    value={crossoverRate}
+                    onChange={(e) => setCrossoverRate(Number(e.target.value))}
+                  />
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Right: Market & Execution */}
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-sm">{t("marketExecution")}</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {/* Symbol + Timeframe */}
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <label className="text-sm text-muted-foreground">{t("symbol")}</label>
+                <Select
+                  value={selectedSymbolId ?? ""}
+                  onValueChange={setSelectedSymbolId}
+                >
+                  <SelectTrigger className="h-9 text-sm">
+                    <SelectValue placeholder={t("selectSymbol")} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {symbols.map((s) => (
+                      <SelectItem key={s.id} value={s.id}>
+                        {s.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1">
+                <label className="text-sm text-muted-foreground">{t("timeframe")}</label>
+                <Select
+                  value={selectedTimeframe}
+                  onValueChange={(v) => setSelectedTimeframe(v as Timeframe)}
+                >
+                  <SelectTrigger className="h-9 text-sm">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {availableTimeframes.map((tf) => (
+                      <SelectItem key={tf} value={tf}>
+                        {TIMEFRAME_LABELS[tf] ?? tf}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            {/* Precision */}
+            <div className="space-y-1">
+              <label className="text-sm text-muted-foreground">{t("precision")}</label>
+              <Select
+                value={backtestPrecision}
+                onValueChange={(v) => setBacktestPrecision(v as BacktestPrecision)}
+              >
+                <SelectTrigger className="h-9 text-sm">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {availablePrecisions.map((p) => (
+                    <SelectItem key={p} value={p}>
+                      {PRECISION_LABELS[p]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            {/* Capital + Leverage */}
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <label className="text-sm text-muted-foreground">{t("capital")}</label>
+                <Input
+                  type="number"
+                  className="h-9 text-sm"
+                  min={0}
+                  step="any"
+                  value={initialCapital}
+                  onChange={(e) => setInitialCapital(Number(e.target.value))}
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-sm text-muted-foreground">{t("leverage")}</label>
+                <Input
+                  type="number"
+                  className="h-9 text-sm"
+                  min={1}
+                  step={1}
+                  value={leverage}
+                  onChange={(e) => setLeverage(Number(e.target.value))}
+                />
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    </>
   );
 }

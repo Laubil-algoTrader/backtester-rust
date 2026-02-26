@@ -5,6 +5,8 @@ import type {
   Operand,
   Rule,
   Comparator,
+  TimeField,
+  CandlePatternType,
 } from "@/lib/types";
 
 // ── Indicator metadata ──
@@ -32,6 +34,34 @@ export const INDICATOR_OPTIONS: { value: IndicatorType; label: string }[] = [
   { value: "WilliamsR", label: "Williams %R" },
   { value: "ParabolicSAR", label: "Parabolic SAR" },
   { value: "VWAP", label: "VWAP" },
+  // New indicators
+  { value: "Aroon", label: "Aroon" },
+  { value: "AwesomeOscillator", label: "Awesome Oscillator" },
+  { value: "BarRange", label: "Bar Range" },
+  { value: "BiggestRange", label: "Biggest Range" },
+  { value: "HighestInRange", label: "Highest in Range" },
+  { value: "LowestInRange", label: "Lowest in Range" },
+  { value: "SmallestRange", label: "Smallest Range" },
+  { value: "BearsPower", label: "Bears Power" },
+  { value: "BullsPower", label: "Bulls Power" },
+  { value: "DeMarker", label: "DeMarker" },
+  { value: "Fibonacci", label: "Fibonacci" },
+  { value: "Fractal", label: "Fractal" },
+  { value: "GannHiLo", label: "Gann HiLo" },
+  { value: "HeikenAshi", label: "Heiken Ashi" },
+  { value: "HullMA", label: "Hull MA" },
+  { value: "Ichimoku", label: "Ichimoku" },
+  { value: "KeltnerChannel", label: "Keltner Channel" },
+  { value: "LaguerreRSI", label: "Laguerre RSI" },
+  { value: "LinearRegression", label: "Linear Regression" },
+  { value: "Momentum", label: "Momentum" },
+  { value: "SuperTrend", label: "SuperTrend" },
+  { value: "TrueRange", label: "True Range" },
+  { value: "StdDev", label: "Std Deviation" },
+  { value: "Reflex", label: "Reflex" },
+  { value: "Pivots", label: "Pivots" },
+  { value: "UlcerIndex", label: "Ulcer Index" },
+  { value: "Vortex", label: "Vortex" },
 ];
 
 export const COMPARATOR_OPTIONS: { value: Comparator; label: string }[] = [
@@ -42,6 +72,29 @@ export const COMPARATOR_OPTIONS: { value: Comparator; label: string }[] = [
   { value: "Equal", label: "==" },
   { value: "CrossAbove", label: "Cross Above" },
   { value: "CrossBelow", label: "Cross Below" },
+];
+
+export const TIME_FIELD_OPTIONS: { value: TimeField; label: string }[] = [
+  { value: "CurrentBar", label: "Current Bar" },
+  { value: "BarTimeValue", label: "Bar Time (min)" },
+  { value: "BarHour", label: "Bar Hour" },
+  { value: "BarMinute", label: "Bar Minute" },
+  { value: "BarDayOfWeek", label: "Bar Day of Week" },
+  { value: "CurrentTime", label: "Current Time (min)" },
+  { value: "CurrentHour", label: "Current Hour" },
+  { value: "CurrentMinute", label: "Current Minute" },
+  { value: "CurrentDayOfWeek", label: "Current Day of Week" },
+  { value: "CurrentMonth", label: "Current Month" },
+];
+
+export const CANDLE_PATTERN_OPTIONS: { value: CandlePatternType; label: string }[] = [
+  { value: "Doji", label: "Doji" },
+  { value: "Hammer", label: "Hammer" },
+  { value: "ShootingStar", label: "Shooting Star" },
+  { value: "BearishEngulfing", label: "Bearish Engulfing" },
+  { value: "BullishEngulfing", label: "Bullish Engulfing" },
+  { value: "DarkCloud", label: "Dark Cloud" },
+  { value: "PiercingLine", label: "Piercing Line" },
 ];
 
 /** Returns which parameter fields to show for a given indicator type. */
@@ -80,6 +133,57 @@ export function getIndicatorParamFields(type: IndicatorType): ParamField[] {
         { key: "maximum_factor", label: "Max", defaultValue: 0.2, min: 0.01, max: 1.0, step: 0.01 },
       ];
     case "VWAP":
+    case "AwesomeOscillator":
+    case "BarRange":
+    case "Fractal":
+    case "HeikenAshi":
+    case "TrueRange":
+    case "Pivots":
+      return [];
+    case "Aroon":
+    case "BiggestRange":
+    case "HighestInRange":
+    case "LowestInRange":
+    case "SmallestRange":
+    case "DeMarker":
+    case "Fibonacci":
+    case "GannHiLo":
+    case "HullMA":
+    case "LinearRegression":
+    case "Momentum":
+    case "StdDev":
+    case "Reflex":
+    case "UlcerIndex":
+    case "Vortex":
+      return [
+        { key: "period", label: "Period", defaultValue: 14, min: 1, max: 500, step: 1 },
+      ];
+    case "BearsPower":
+    case "BullsPower":
+      return [
+        { key: "period", label: "Period", defaultValue: 13, min: 1, max: 500, step: 1 },
+      ];
+    case "Ichimoku":
+      return [
+        { key: "fast_period", label: "Tenkan", defaultValue: 9, min: 1, max: 200, step: 1 },
+        { key: "slow_period", label: "Kijun", defaultValue: 26, min: 1, max: 200, step: 1 },
+        { key: "signal_period", label: "Senkou B", defaultValue: 52, min: 1, max: 200, step: 1 },
+      ];
+    case "KeltnerChannel":
+      return [
+        { key: "period", label: "Period", defaultValue: 20, min: 1, max: 500, step: 1 },
+        { key: "multiplier", label: "Mult", defaultValue: 1.5, min: 0.1, max: 10, step: 0.1 },
+      ];
+    case "LaguerreRSI":
+      return [
+        { key: "gamma", label: "Gamma", defaultValue: 0.8, min: 0.01, max: 0.99, step: 0.01 },
+      ];
+    case "SuperTrend":
+      return [
+        { key: "period", label: "Period", defaultValue: 10, min: 1, max: 500, step: 1 },
+        { key: "multiplier", label: "Mult", defaultValue: 3.0, min: 0.1, max: 10, step: 0.1 },
+      ];
+    default:
       return [];
   }
 }
@@ -105,6 +209,58 @@ export function getOutputFieldOptions(
         { value: "macd", label: "MACD Line" },
         { value: "signal", label: "Signal Line" },
         { value: "histogram", label: "Histogram" },
+      ];
+    case "Aroon":
+      return [
+        { value: "aroon_up", label: "Aroon Up" },
+        { value: "aroon_down", label: "Aroon Down" },
+      ];
+    case "Fractal":
+      return [
+        { value: "fractal_up", label: "Fractal Up" },
+        { value: "fractal_down", label: "Fractal Down" },
+      ];
+    case "HeikenAshi":
+      return [
+        { value: "ha_close", label: "HA Close" },
+        { value: "ha_open", label: "HA Open" },
+      ];
+    case "Vortex":
+      return [
+        { value: "vi_plus", label: "VI+" },
+        { value: "vi_minus", label: "VI-" },
+      ];
+    case "KeltnerChannel":
+      return [
+        { value: "upper", label: "Upper" },
+        { value: "middle", label: "Middle" },
+        { value: "lower", label: "Lower" },
+      ];
+    case "Ichimoku":
+      return [
+        { value: "tenkan", label: "Tenkan" },
+        { value: "kijun", label: "Kijun" },
+        { value: "senkou_a", label: "Senkou A" },
+        { value: "senkou_b", label: "Senkou B" },
+        { value: "chikou", label: "Chikou" },
+      ];
+    case "Fibonacci":
+      return [
+        { value: "level_236", label: "23.6%" },
+        { value: "level_382", label: "38.2%" },
+        { value: "level_500", label: "50.0%" },
+        { value: "level_618", label: "61.8%" },
+        { value: "level_786", label: "78.6%" },
+      ];
+    case "Pivots":
+      return [
+        { value: "pp", label: "Pivot" },
+        { value: "r1", label: "R1" },
+        { value: "r2", label: "R2" },
+        { value: "r3", label: "R3" },
+        { value: "s1", label: "S1" },
+        { value: "s2", label: "S2" },
+        { value: "s3", label: "S3" },
       ];
     default:
       return null;

@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700;800&display=swap');
 
 @tailwind base;
 @tailwind components;
@@ -8,9 +8,9 @@
   :root {
     --background: 0 0% 100%;
     --foreground: 222.2 84% 4.9%;
-    --card: 0 0% 100%;
+    --card: 0 0% 98%;
     --card-foreground: 222.2 84% 4.9%;
-    --primary: 221.2 83.2% 53.3%;
+    --primary: 152 60% 38%;
     --primary-foreground: 210 40% 98%;
     --secondary: 210 40% 96.1%;
     --secondary-foreground: 222.2 47.4% 11.2%;
@@ -20,34 +20,48 @@
     --accent-foreground: 222.2 47.4% 11.2%;
     --destructive: 0 84.2% 60.2%;
     --destructive-foreground: 210 40% 98%;
-    --success: 142 76% 36%;
+    --success: 152 60% 38%;
     --success-foreground: 210 40% 98%;
+    --warning: 38 92% 50%;
     --border: 214.3 31.8% 91.4%;
     --input: 214.3 31.8% 91.4%;
-    --ring: 221.2 83.2% 53.3%;
-    --radius: 0.5rem;
+    --ring: 152 60% 38%;
+    --radius: 0.375rem;
+
+    --chart-1: 152 60% 38%;
+    --chart-2: 210 80% 55%;
+    --chart-3: 0 72% 51%;
+    --chart-4: 38 92% 50%;
+    --chart-5: 280 65% 55%;
   }
 
   .dark {
-    --background: 220 15% 5%;
-    --foreground: 45 10% 85%;
-    --card: 220 12% 7%;
-    --card-foreground: 45 10% 85%;
-    --primary: 43 70% 50%;
-    --primary-foreground: 220 15% 5%;
-    --secondary: 220 10% 12%;
-    --secondary-foreground: 45 10% 80%;
-    --muted: 220 10% 12%;
-    --muted-foreground: 45 5% 50%;
-    --accent: 43 70% 50%;
-    --accent-foreground: 220 15% 5%;
-    --destructive: 0 62.8% 50.6%;
-    --destructive-foreground: 210 40% 98%;
-    --success: 142 70% 45%;
-    --success-foreground: 210 40% 98%;
-    --border: 43 20% 18%;
-    --input: 220 10% 14%;
-    --ring: 43 60% 45%;
+    --background: 0 0% 5%;
+    --foreground: 0 0% 85%;
+    --card: 0 0% 8.5%;
+    --card-foreground: 0 0% 85%;
+    --primary: 152 60% 42%;
+    --primary-foreground: 0 0% 5%;
+    --secondary: 0 0% 12%;
+    --secondary-foreground: 0 0% 70%;
+    --muted: 0 0% 12%;
+    --muted-foreground: 0 0% 45%;
+    --accent: 152 60% 42%;
+    --accent-foreground: 0 0% 5%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 98%;
+    --success: 152 60% 42%;
+    --success-foreground: 0 0% 98%;
+    --warning: 38 92% 50%;
+    --border: 0 0% 14%;
+    --input: 0 0% 10%;
+    --ring: 152 50% 40%;
+
+    --chart-1: 152 60% 42%;
+    --chart-2: 210 80% 55%;
+    --chart-3: 0 72% 51%;
+    --chart-4: 38 92% 50%;
+    --chart-5: 280 65% 55%;
   }
 }
 
@@ -57,10 +71,11 @@
   }
   body {
     @apply bg-background text-foreground;
-    font-family: 'JetBrains Mono', ui-monospace, 'Cascadia Code', 'Source Code Pro', monospace;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     margin: 0;
+    font-size: 14px;
   }
 }
 
@@ -75,22 +90,23 @@ textarea,
   user-select: text;
 }
 
+/* Scrollbar — ultra thin */
 .dark ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 4px;
+  height: 4px;
 }
 
 .dark ::-webkit-scrollbar-track {
-  background: hsl(220 15% 5%);
+  background: transparent;
 }
 
 .dark ::-webkit-scrollbar-thumb {
-  background: hsl(43 20% 20%);
-  border-radius: 3px;
+  background: hsl(0 0% 16%);
+  border-radius: 2px;
 }
 
 .dark ::-webkit-scrollbar-thumb:hover {
-  background: hsl(43 30% 30%);
+  background: hsl(0 0% 22%);
 }
 
 /* Hide number input spin buttons */
@@ -101,4 +117,15 @@ input[type="number"]::-webkit-outer-spin-button {
 }
 input[type="number"] {
   -moz-appearance: textfield;
+}
+
+/* Card hover glow — subtle */
+@layer utilities {
+  .card-glow {
+    transition: border-color 200ms ease, box-shadow 200ms ease;
+  }
+  .card-glow:hover {
+    border-color: hsl(var(--primary) / 0.12);
+    box-shadow: 0 0 16px hsl(var(--primary) / 0.03);
+  }
 }

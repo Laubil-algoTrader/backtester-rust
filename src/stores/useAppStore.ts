@@ -17,6 +17,8 @@ import type {
   TradingHours,
   CloseTradesAt,
   OosPeriod,
+  ParameterRange,
+  LicenseTier,
 } from "@/lib/types";
 
 // ── Default values ──
@@ -111,8 +113,10 @@ interface AppState {
 
   // Optimization
   optimizationResults: OptimizationResult[];
+  optimizationParamRanges: ParameterRange[];
   optimizationOosPeriods: OosPeriod[];
   setOptimizationResults: (results: OptimizationResult[]) => void;
+  setOptimizationParamRanges: (ranges: ParameterRange[]) => void;
   setOptimizationOosPeriods: (periods: OosPeriod[]) => void;
 
   // Active Downloads
@@ -127,6 +131,17 @@ interface AppState {
   progressPercent: number;
   setLoading: (loading: boolean, message?: string) => void;
   setProgress: (percent: number) => void;
+
+  // License
+  licenseTier: LicenseTier;
+  licenseUsername: string | null;
+  isLicenseChecked: boolean;
+  setLicenseInfo: (tier: LicenseTier, username: string | null) => void;
+  setLicenseChecked: (checked: boolean) => void;
+
+  // Language
+  language: "en" | "es";
+  setLanguage: (lang: "en" | "es") => void;
 
   // Theme
   darkMode: boolean;
@@ -235,8 +250,10 @@ export const useAppStore = create<AppState>((set) => ({
 
   // Optimization
   optimizationResults: [],
+  optimizationParamRanges: [],
   optimizationOosPeriods: [],
   setOptimizationResults: (results) => set({ optimizationResults: results }),
+  setOptimizationParamRanges: (ranges) => set({ optimizationParamRanges: ranges }),
   setOptimizationOosPeriods: (periods) => set({ optimizationOosPeriods: periods }),
 
   // Active Downloads
@@ -271,6 +288,20 @@ export const useAppStore = create<AppState>((set) => ({
   setLoading: (loading, message = "") =>
     set({ isLoading: loading, loadingMessage: message, progressPercent: 0 }),
   setProgress: (percent) => set({ progressPercent: percent }),
+
+  // License
+  licenseTier: "free",
+  licenseUsername: null,
+  isLicenseChecked: false,
+  setLicenseInfo: (tier, username) => set({ licenseTier: tier, licenseUsername: username }),
+  setLicenseChecked: (checked) => set({ isLicenseChecked: checked }),
+
+  // Language
+  language: (localStorage.getItem("lbquant-lang") as "en" | "es") || "en",
+  setLanguage: (lang) => {
+    import("i18next").then((i18n) => i18n.default.changeLanguage(lang));
+    set({ language: lang });
+  },
 
   // Theme
   darkMode: true,

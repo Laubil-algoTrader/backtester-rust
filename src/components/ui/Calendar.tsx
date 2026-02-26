@@ -108,7 +108,7 @@ export function Calendar({ selected, onSelect, defaultMonth }: CalendarProps) {
         <button
           type="button"
           onClick={handlePrevMonth}
-          className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+          className="inline-flex h-7 w-7 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
         >
           <ChevronLeft className="h-4 w-4" />
         </button>
@@ -144,7 +144,7 @@ export function Calendar({ selected, onSelect, defaultMonth }: CalendarProps) {
         <button
           type="button"
           onClick={handleNextMonth}
-          className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+          className="inline-flex h-7 w-7 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
         >
           <ChevronRight className="h-4 w-4" />
         </button>
@@ -155,7 +155,7 @@ export function Calendar({ selected, onSelect, defaultMonth }: CalendarProps) {
         {DAY_NAMES.map((d) => (
           <div
             key={d}
-            className="flex h-8 w-8 items-center justify-center text-[0.65rem] font-medium text-muted-foreground"
+            className="flex h-8 w-8 items-center justify-center text-xs font-medium text-muted-foreground"
           >
             {d}
           </div>
@@ -172,7 +172,7 @@ export function Calendar({ selected, onSelect, defaultMonth }: CalendarProps) {
               key={i}
               type="button"
               onClick={() => handleDayClick(cell)}
-              className={`flex h-8 w-8 items-center justify-center rounded-md text-xs transition-colors
+              className={`flex h-8 w-8 items-center justify-center rounded text-sm transition-colors
                 ${cell.outside ? "text-muted-foreground/30" : "text-foreground"}
                 ${sel ? "bg-primary text-primary-foreground hover:bg-primary" : "hover:bg-muted"}
                 ${today && !sel ? "font-bold text-primary" : ""}

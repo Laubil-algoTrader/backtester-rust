@@ -1,4 +1,5 @@
 import { useState, useMemo } from "react";
+import { useTranslation } from "react-i18next";
 import {
   ResponsiveContainer,
   ComposedChart,
@@ -12,6 +13,7 @@ import {
   ReferenceLine,
 } from "recharts";
 import type { EquityPoint } from "@/lib/types";
+import { GRID_COLOR, GRID_DASH, AXIS_TICK, AXIS_STROKE, TOOLTIP_STYLE, CHART_COLORS } from "@/lib/chartTheme";
 
 interface EquityMarker {
   date: string;
@@ -27,7 +29,6 @@ interface EquityCurveProps {
 interface ChartPoint {
   timestamp: string;
   equity: number;
-  /** Equity value at new-high points, undefined otherwise (so Recharts skips the dot) */
   newHigh: number | undefined;
 }
 
@@ -35,23 +36,21 @@ function extractYear(ts: string): string {
   return ts.slice(0, 4);
 }
 
-/** Custom green dot for new-high markers */
-function GreenDot(props: Record<string, unknown>) {
+function HighDot(props: Record<string, unknown>) {
   const { cx, cy, value } = props as { cx?: number; cy?: number; value?: number };
   if (cx == null || cy == null || value == null) return null;
-  return <circle cx={cx} cy={cy} r={3.5} fill="hsl(142 70% 50%)" stroke="hsl(142 70% 35%)" strokeWidth={1} />;
+  return <circle cx={cx} cy={cy} r={3.5} fill="hsl(217 90% 60%)" stroke="hsl(217 90% 42%)" strokeWidth={1} />;
 }
 
 export function EquityCurve({ data, initialCapital, markers = [] }: EquityCurveProps) {
+  const { t } = useTranslation("backtest");
   const [showStagnation, setShowStagnation] = useState(false);
   const [showNewHighs, setShowNewHighs] = useState(false);
 
-  // Downsample for performance
   const maxPoints = 1000;
   const step = Math.max(1, Math.floor(data.length / maxPoints));
   const sampled = step > 1 ? data.filter((_, i) => i % step === 0 || i === data.length - 1) : data;
 
-  // Enrich data: detect new highs and stagnation periods
   const { chartData, longestStag, longestStagDays } = useMemo(() => {
     let peak = -Infinity;
     const points: ChartPoint[] = [];
@@ -78,7 +77,6 @@ export function EquityCurve({ data, initialCapital, markers = [] }: EquityCurveP
         newHigh: isNew ? p.equity : undefined,
       });
     }
-    // Close final stagnation if still open
     if (stagnationStartIdx >= 0 && stagnationStartIdx < sampled.length - 1) {
       ranges.push({
         start: sampled[stagnationStartIdx].timestamp,
@@ -87,13 +85,11 @@ export function EquityCurve({ data, initialCapital, markers = [] }: EquityCurveP
       });
     }
 
-    // Find longest stagnation range
     let longest = { start: "", end: "", length: 0 };
     for (const r of ranges) {
       if (r.length > longest.length) longest = r;
     }
 
-    // Compute days for longest stagnation
     let days = 0;
     if (longest.start && longest.end) {
       const ms = new Date(longest.end).getTime() - new Date(longest.start).getTime();
@@ -109,17 +105,14 @@ export function EquityCurve({ data, initialCapital, markers = [] }: EquityCurveP
   const minEquity = Math.min(...equities);
   const maxEquity = Math.max(...equities);
 
-  // Compute gradient split: offset where initialCapital sits (0=top, 1=bottom)
   const range = maxEquity - minEquity;
   const splitOffset = range > 0
     ? Math.max(0, Math.min(1, (maxEquity - initialCapital) / range))
     : 0.5;
 
-  // All equity below initial capital → full red; all above → full blue
   const allAbove = minEquity >= initialCapital;
   const allBelow = maxEquity <= initialCapital;
 
-  // Year-based ticks
   const yearTicks = useMemo(() => {
     const seen = new Set<string>();
     const ticks: string[] = [];
@@ -133,11 +126,9 @@ export function EquityCurve({ data, initialCapital, markers = [] }: EquityCurveP
     return ticks;
   }, [chartData]);
 
-  // Resolve markers to nearest chart timestamps
   const resolvedMarkers = useMemo(() => {
     if (markers.length === 0 || chartData.length === 0) return [];
     return markers.map((m) => {
-      // Find first chart point whose timestamp starts with (or is >=) the marker date
       const target = m.date;
       let closest = chartData[0].timestamp;
       for (const p of chartData) {
@@ -153,105 +144,95 @@ export function EquityCurve({ data, initialCapital, markers = [] }: EquityCurveP
 
   return (
     <div>
-      {/* Toggles */}
       <div className="mb-2 flex items-center gap-4">
-        <label className="flex cursor-pointer items-center gap-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+        <label className="flex cursor-pointer items-center gap-1.5 text-sm text-muted-foreground">
           <input
             type="checkbox"
             checked={showStagnation}
             onChange={(e) => setShowStagnation(e.target.checked)}
             className="h-3 w-3 rounded border-border accent-red-500"
           />
-          Max Stagnation
+          {t("maxStagnation")}
         </label>
-        <label className="flex cursor-pointer items-center gap-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+        <label className="flex cursor-pointer items-center gap-1.5 text-sm text-muted-foreground">
           <input
             type="checkbox"
             checked={showNewHighs}
             onChange={(e) => setShowNewHighs(e.target.checked)}
             className="h-3 w-3 rounded border-border accent-emerald-500"
           />
-          New Highs
+          {t("newHighs")}
         </label>
       </div>
 
       <ResponsiveContainer width="100%" height={400}>
         <ComposedChart data={chartData} margin={{ top: 5, right: 20, bottom: 5, left: 10 }}>
           <defs>
-            {/* Stroke gradient: blue above initial capital, red below */}
             <linearGradient id="equityStrokeGrad" x1="0" y1="0" x2="0" y2="1">
               {allBelow ? (
                 <>
-                  <stop offset="0%" stopColor="hsl(0 70% 55%)" />
-                  <stop offset="100%" stopColor="hsl(0 70% 55%)" />
+                  <stop offset="0%" stopColor={CHART_COLORS.red} />
+                  <stop offset="100%" stopColor={CHART_COLORS.red} />
                 </>
               ) : allAbove ? (
                 <>
-                  <stop offset="0%" stopColor="hsl(210 80% 55%)" />
-                  <stop offset="100%" stopColor="hsl(210 80% 55%)" />
+                  <stop offset="0%" stopColor={CHART_COLORS.green} />
+                  <stop offset="100%" stopColor={CHART_COLORS.green} />
                 </>
               ) : (
                 <>
-                  <stop offset={`${(splitOffset * 100).toFixed(1)}%`} stopColor="hsl(210 80% 55%)" />
-                  <stop offset={`${(splitOffset * 100).toFixed(1)}%`} stopColor="hsl(0 70% 55%)" />
+                  <stop offset={`${(splitOffset * 100).toFixed(1)}%`} stopColor={CHART_COLORS.green} />
+                  <stop offset={`${(splitOffset * 100).toFixed(1)}%`} stopColor={CHART_COLORS.red} />
                 </>
               )}
             </linearGradient>
 
-            {/* Fill gradient: blue tint above, red tint below */}
             <linearGradient id="equityFillGrad" x1="0" y1="0" x2="0" y2="1">
               {allBelow ? (
                 <>
-                  <stop offset="0%" stopColor="hsl(0 70% 55%)" stopOpacity={0.25} />
-                  <stop offset="100%" stopColor="hsl(0 70% 55%)" stopOpacity={0.03} />
+                  <stop offset="0%" stopColor={CHART_COLORS.red} stopOpacity={0.25} />
+                  <stop offset="100%" stopColor={CHART_COLORS.red} stopOpacity={0.03} />
                 </>
               ) : allAbove ? (
                 <>
-                  <stop offset="0%" stopColor="hsl(210 80% 55%)" stopOpacity={0.25} />
-                  <stop offset="100%" stopColor="hsl(210 80% 55%)" stopOpacity={0.03} />
+                  <stop offset="0%" stopColor={CHART_COLORS.green} stopOpacity={0.3} />
+                  <stop offset="100%" stopColor={CHART_COLORS.green} stopOpacity={0.03} />
                 </>
               ) : (
                 <>
-                  <stop offset="0%" stopColor="hsl(210 80% 55%)" stopOpacity={0.25} />
-                  <stop offset={`${(splitOffset * 100).toFixed(1)}%`} stopColor="hsl(210 80% 55%)" stopOpacity={0.1} />
-                  <stop offset={`${(splitOffset * 100).toFixed(1)}%`} stopColor="hsl(0 70% 55%)" stopOpacity={0.1} />
-                  <stop offset="100%" stopColor="hsl(0 70% 55%)" stopOpacity={0.03} />
+                  <stop offset="0%" stopColor={CHART_COLORS.green} stopOpacity={0.3} />
+                  <stop offset={`${(splitOffset * 100).toFixed(1)}%`} stopColor={CHART_COLORS.green} stopOpacity={0.1} />
+                  <stop offset={`${(splitOffset * 100).toFixed(1)}%`} stopColor={CHART_COLORS.red} stopOpacity={0.1} />
+                  <stop offset="100%" stopColor={CHART_COLORS.red} stopOpacity={0.03} />
                 </>
               )}
             </linearGradient>
           </defs>
 
-          <CartesianGrid strokeDasharray="3 3" stroke="hsl(220 10% 14%)" />
+          <CartesianGrid strokeDasharray={GRID_DASH} stroke={GRID_COLOR} />
           <XAxis
             dataKey="timestamp"
             ticks={yearTicks}
             tickFormatter={(ts: string) => extractYear(ts)}
-            tick={{ fontSize: 10, fill: "hsl(45 5% 40%)" }}
-            stroke="hsl(220 10% 14%)"
+            tick={AXIS_TICK}
+            stroke={AXIS_STROKE}
           />
           <YAxis
             domain={["auto", "auto"]}
             tickFormatter={(v: number) => `$${v.toLocaleString()}`}
-            tick={{ fontSize: 10, fill: "hsl(45 5% 40%)" }}
-            stroke="hsl(220 10% 14%)"
+            tick={AXIS_TICK}
+            stroke={AXIS_STROKE}
             width={80}
           />
           <Tooltip
-            contentStyle={{
-              backgroundColor: "hsl(220 15% 7%)",
-              border: "1px solid hsl(43 20% 18%)",
-              borderRadius: 4,
-              fontSize: 11,
-              color: "hsl(45 10% 85%)",
-            }}
+            contentStyle={TOOLTIP_STYLE}
             labelFormatter={(label: string) => label}
             formatter={(value: number, name: string) => {
               if (name === "newHigh") return [null, null];
-              return [`$${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`, "Equity"];
+              return [`$${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`, t("equityCurve")];
             }}
           />
 
-          {/* Max stagnation band — dark red */}
           {showStagnation && longestStag.length > 0 && (
             <ReferenceArea
               x1={longestStag.start}
@@ -262,17 +243,15 @@ export function EquityCurve({ data, initialCapital, markers = [] }: EquityCurveP
             />
           )}
 
-          {/* Initial capital reference line */}
           {!allAbove && !allBelow && (
             <ReferenceLine
               y={initialCapital}
-              stroke="hsl(45 5% 30%)"
+              stroke="hsl(0 0% 25%)"
               strokeDasharray="4 4"
               strokeWidth={1}
             />
           )}
 
-          {/* Equity area with conditional coloring */}
           <Area
             type="monotone"
             dataKey="equity"
@@ -284,31 +263,29 @@ export function EquityCurve({ data, initialCapital, markers = [] }: EquityCurveP
             isAnimationActive={true}
           />
 
-          {/* IS/OOS boundary markers */}
           {resolvedMarkers.map((m, i) => (
             <ReferenceLine
               key={`marker-${i}`}
               x={m.timestamp}
-              stroke="hsl(38 80% 55%)"
+              stroke={CHART_COLORS.amber}
               strokeDasharray="6 3"
               strokeWidth={1.5}
               label={{
                 value: m.label,
                 position: "top",
-                fill: "hsl(38 80% 55%)",
-                fontSize: 10,
+                fill: CHART_COLORS.amber,
+                fontSize: 12,
                 fontWeight: 600,
               }}
             />
           ))}
 
-          {/* Green dots at new equity highs — rendered as a Line with dots, no connecting stroke */}
           {showNewHighs && (
             <Line
               type="monotone"
               dataKey="newHigh"
               stroke="none"
-              dot={<GreenDot />}
+              dot={<HighDot />}
               activeDot={false}
               isAnimationActive={false}
               connectNulls={false}
@@ -317,10 +294,9 @@ export function EquityCurve({ data, initialCapital, markers = [] }: EquityCurveP
         </ComposedChart>
       </ResponsiveContainer>
 
-      {/* Max stagnation label */}
       {showStagnation && longestStag.length > 0 && (
-        <p className="mt-1 text-center text-[10px] text-red-400/70">
-          Max stagnation: {longestStagDays} days ({longestStag.start.slice(0, 10)} — {longestStag.end.slice(0, 10)})
+        <p className="mt-1 text-center text-sm text-red-400/70">
+          {t("maxStagnationInfo", { days: longestStagDays, start: longestStag.start.slice(0, 10), end: longestStag.end.slice(0, 10) })}
         </p>
       )}
     </div>

@@ -50,6 +50,7 @@ pub fn generate_mql5(strategy: &Strategy) -> Result<CodeGenerationResult, AppErr
     mql5_lot_size(&mut out, strategy);
     mql5_sl_tp_helpers(&mut out, strategy);
     mql5_trailing_stop(&mut out, strategy);
+    mql5_time_helpers(&mut out, strategy);
 
     let ea_name = strategy.name.replace(|c: char| !c.is_alphanumeric() && c != '_' && c != '-', "_");
 
@@ -201,6 +202,33 @@ fn indicator_var_name(ind: &IndicatorConfig) -> String {
         IndicatorType::WilliamsR => "wpr",
         IndicatorType::ParabolicSAR => "sar",
         IndicatorType::VWAP => "vwap",
+        IndicatorType::Aroon => "aroon",
+        IndicatorType::AwesomeOscillator => "ao",
+        IndicatorType::BarRange => "barrange",
+        IndicatorType::BiggestRange => "bigrange",
+        IndicatorType::HighestInRange => "highest",
+        IndicatorType::LowestInRange => "lowest",
+        IndicatorType::SmallestRange => "smallrange",
+        IndicatorType::BearsPower => "bears",
+        IndicatorType::BullsPower => "bulls",
+        IndicatorType::DeMarker => "demarker",
+        IndicatorType::Fibonacci => "fibo",
+        IndicatorType::Fractal => "fractal",
+        IndicatorType::GannHiLo => "gannhilo",
+        IndicatorType::HeikenAshi => "ha",
+        IndicatorType::HullMA => "hma",
+        IndicatorType::Ichimoku => "ichi",
+        IndicatorType::KeltnerChannel => "kc",
+        IndicatorType::LaguerreRSI => "lrsi",
+        IndicatorType::LinearRegression => "linreg",
+        IndicatorType::Momentum => "mom",
+        IndicatorType::SuperTrend => "st",
+        IndicatorType::TrueRange => "tr",
+        IndicatorType::StdDev => "stddev",
+        IndicatorType::Reflex => "reflex",
+        IndicatorType::Pivots => "pivots",
+        IndicatorType::UlcerIndex => "ulcer",
+        IndicatorType::Vortex => "vortex",
     };
 
     let mut s = String::from(name);
@@ -213,6 +241,8 @@ fn indicator_var_name(ind: &IndicatorConfig) -> String {
     if let Some(v) = ind.params.std_dev { write!(s, "_sd{}", float_to_var(v)).ok(); }
     if let Some(v) = ind.params.acceleration_factor { write!(s, "_af{}", float_to_var(v)).ok(); }
     if let Some(v) = ind.params.maximum_factor { write!(s, "_mf{}", float_to_var(v)).ok(); }
+    if let Some(v) = ind.params.gamma { write!(s, "_g{}", float_to_var(v)).ok(); }
+    if let Some(v) = ind.params.multiplier { write!(s, "_m{}", float_to_var(v)).ok(); }
     s
 }
 
@@ -252,21 +282,65 @@ fn pine_output_suffix(ind: &IndicatorConfig) -> &str {
             "histogram" => "_hist",
             _ => "_line",
         },
-        IndicatorType::BollingerBands => match field {
+        IndicatorType::BollingerBands | IndicatorType::KeltnerChannel => match field {
             "upper" => "_upper",
             "lower" => "_lower",
-            _ => "_basis",
+            _ => "_middle",
         },
         IndicatorType::Stochastic => match field {
             "D" | "d" => "_d",
             _ => "_k",
+        },
+        IndicatorType::Aroon => match field {
+            "aroon_down" => "_down",
+            _ => "_up",
+        },
+        IndicatorType::Fractal => match field {
+            "fractal_down" => "_down",
+            _ => "_up",
+        },
+        IndicatorType::HeikenAshi => match field {
+            "ha_open" => "_open",
+            _ => "_close",
+        },
+        IndicatorType::Vortex => match field {
+            "vi_minus" => "_minus",
+            _ => "_plus",
+        },
+        IndicatorType::Ichimoku => match field {
+            "kijun" => "_kijun",
+            "senkou_a" => "_senkou_a",
+            "senkou_b" => "_senkou_b",
+            "chikou" => "_chikou",
+            _ => "_tenkan",
+        },
+        IndicatorType::Fibonacci => match field {
+            "level_382" => "_382",
+            "level_500" => "_500",
+            "level_618" => "_618",
+            "level_786" => "_786",
+            _ => "_236",
+        },
+        IndicatorType::Pivots => match field {
+            "r1" => "_r1",
+            "r2" => "_r2",
+            "r3" => "_r3",
+            "s1" => "_s1",
+            "s2" => "_s2",
+            "s3" => "_s3",
+            _ => "_pp",
         },
         _ => "",
     }
 }
 
 fn is_multi_output(ind_type: IndicatorType) -> bool {
-    matches!(ind_type, IndicatorType::MACD | IndicatorType::BollingerBands | IndicatorType::Stochastic)
+    matches!(ind_type,
+        IndicatorType::MACD | IndicatorType::BollingerBands | IndicatorType::Stochastic |
+        IndicatorType::Aroon | IndicatorType::Fractal | IndicatorType::HeikenAshi |
+        IndicatorType::Vortex | IndicatorType::KeltnerChannel | IndicatorType::Ichimoku |
+        IndicatorType::Fibonacci | IndicatorType::Pivots
+    )
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -351,8 +425,35 @@ fn mql5_inputs(out: &mut String, strategy: &Strategy, indicators: &[UniqueIndica
                 writeln!(out, "input double Inp_{}_af = {:.2};", ind.var_name, p.acceleration_factor.unwrap_or(0.02)).ok();
                 writeln!(out, "input double Inp_{}_max = {:.2};", ind.var_name, p.maximum_factor.unwrap_or(0.20)).ok();
             }
-            IndicatorType::VWAP => {
-                writeln!(out, "// NOTE: VWAP requires custom implementation in MQL5").ok();
+            IndicatorType::VWAP | IndicatorType::AwesomeOscillator |
+            IndicatorType::BarRange | IndicatorType::Fractal |
+            IndicatorType::HeikenAshi | IndicatorType::TrueRange |
+            IndicatorType::Pivots => {
+                writeln!(out, "// NOTE: {:?} requires custom implementation in MQL5", ind.config.indicator_type).ok();
+            }
+            IndicatorType::Ichimoku => {
+                writeln!(out, "input int    Inp_{}_tenkan = {};", ind.var_name, p.fast_period.unwrap_or(9)).ok();
+                writeln!(out, "input int    Inp_{}_kijun = {};", ind.var_name, p.slow_period.unwrap_or(26)).ok();
+                writeln!(out, "input int    Inp_{}_senkou = {};", ind.var_name, p.signal_period.unwrap_or(52)).ok();
+            }
+            IndicatorType::KeltnerChannel | IndicatorType::SuperTrend => {
+                if let Some(period) = p.period {
+                    writeln!(out, "input int    Inp_{}_period = {};", ind.var_name, period).ok();
+                }
+                if let Some(mult) = p.multiplier {
+                    writeln!(out, "input double Inp_{}_mult = {:.1};", ind.var_name, mult).ok();
+                }
+            }
+            IndicatorType::LaguerreRSI => {
+                if let Some(gamma) = p.gamma {
+                    writeln!(out, "input double Inp_{}_gamma = {:.2};", ind.var_name, gamma).ok();
+                }
+            }
+            _ => {
+                // Period-only indicators (Aroon, BiggestRange, HighestInRange, etc.)
+                if let Some(period) = p.period {
+                    writeln!(out, "input int    Inp_{}_period = {};", ind.var_name, period).ok();
+                }
             }
         }
     }
@@ -442,6 +543,37 @@ fn mql5_on_init(out: &mut String, indicators: &[UniqueIndicator]) {
             IndicatorType::VWAP => format!(
                 "iCustom(_Symbol, PERIOD_CURRENT, \"BT_VWAP\")"
             ),
+            IndicatorType::Ichimoku => format!(
+                "iCustom(_Symbol, PERIOD_CURRENT, \"BT_Ichimoku\", Inp_{0}_tenkan, Inp_{0}_kijun, Inp_{0}_senkou)",
+                ind.var_name
+            ),
+            IndicatorType::KeltnerChannel => format!(
+                "iCustom(_Symbol, PERIOD_CURRENT, \"BT_KeltnerChannel\", Inp_{0}_period, Inp_{0}_mult)",
+                ind.var_name
+            ),
+            IndicatorType::SuperTrend => format!(
+                "iCustom(_Symbol, PERIOD_CURRENT, \"BT_SuperTrend\", Inp_{0}_period, Inp_{0}_mult)",
+                ind.var_name
+            ),
+            IndicatorType::LaguerreRSI => format!(
+                "iCustom(_Symbol, PERIOD_CURRENT, \"BT_LaguerreRSI\", Inp_{}_gamma)",
+                ind.var_name
+            ),
+            _ => {
+                // Period-only or no-param indicators
+                let type_name = format!("{:?}", ind.config.indicator_type);
+                if ind.config.params.period.is_some() {
+                    format!(
+                        "iCustom(_Symbol, PERIOD_CURRENT, \"BT_{}\", Inp_{}_period)",
+                        type_name, ind.var_name
+                    )
+                } else {
+                    format!(
+                        "iCustom(_Symbol, PERIOD_CURRENT, \"BT_{}\")",
+                        type_name
+                    )
+                }
+            }
         };
 
         writeln!(out, "   {} = {};", ind.handle_name, call).ok();
@@ -697,9 +829,13 @@ fn collect_buffers_used(rules: &[Rule], ind: &UniqueIndicator) -> Vec<usize> {
 fn buffer_suffix(ind_type: IndicatorType, buf_idx: usize) -> &'static str {
     match ind_type {
         IndicatorType::MACD => match buf_idx { 1 => "_signal", 2 => "_hist", _ => "_line" },
-        IndicatorType::BollingerBands => match buf_idx { 1 => "_upper", 2 => "_lower", _ => "_basis" },
+        IndicatorType::BollingerBands | IndicatorType::KeltnerChannel => match buf_idx { 1 => "_upper", 2 => "_lower", _ => "_middle" },
         IndicatorType::Stochastic => match buf_idx { 1 => "_d", _ => "_k" },
         IndicatorType::ADX => match buf_idx { 1 => "_pdi", 2 => "_mdi", _ => "_val" },
+        IndicatorType::Aroon => match buf_idx { 1 => "_down", _ => "_up" },
+        IndicatorType::Fractal => match buf_idx { 1 => "_down", _ => "_up" },
+        IndicatorType::HeikenAshi => match buf_idx { 1 => "_open", _ => "_close" },
+        IndicatorType::Vortex => match buf_idx { 1 => "_minus", _ => "_plus" },
         _ => "_buf",
     }
 }
@@ -714,8 +850,18 @@ fn mql5_operand_expr(operand: &Operand, extra_shift: usize, indicators: &[Unique
                 PriceField::High => "iHigh",
                 PriceField::Low => "iLow",
                 PriceField::Close => "iClose",
+                PriceField::DailyOpen => "iOpen(_Symbol, PERIOD_D1, ",
+                PriceField::DailyHigh => "iHigh(_Symbol, PERIOD_D1, ",
+                PriceField::DailyLow => "iLow(_Symbol, PERIOD_D1, ",
+                PriceField::DailyClose => "iClose(_Symbol, PERIOD_D1, ",
             };
-            format!("{}(_Symbol, PERIOD_CURRENT, {})", func, offset)
+            match operand.price_field.unwrap_or(PriceField::Close) {
+                PriceField::DailyOpen | PriceField::DailyHigh |
+                PriceField::DailyLow | PriceField::DailyClose => {
+                    format!("{}{})", func, offset)
+                }
+                _ => format!("{}(_Symbol, PERIOD_CURRENT, {})", func, offset),
+            }
         }
         OperandType::Constant => {
             let v = operand.constant_value.unwrap_or(0.0);
@@ -737,6 +883,42 @@ fn mql5_operand_expr(operand: &Operand, extra_shift: usize, indicators: &[Unique
                 }
             } else {
                 "0 /* no indicator config */".into()
+            }
+        }
+        OperandType::BarTime => {
+            match operand.time_field {
+                Some(TimeField::CurrentBar) => format!("(Bars(_Symbol, PERIOD_CURRENT) - 1 - {})", offset),
+                Some(TimeField::BarTimeValue) | Some(TimeField::CurrentTime) =>
+                    format!("(BT_Hour(iTime(_Symbol,PERIOD_CURRENT,{o})) * 60 + BT_Minute(iTime(_Symbol,PERIOD_CURRENT,{o})))", o=offset),
+                Some(TimeField::BarHour) | Some(TimeField::CurrentHour) =>
+                    format!("BT_Hour(iTime(_Symbol,PERIOD_CURRENT,{}))", offset),
+                Some(TimeField::BarMinute) | Some(TimeField::CurrentMinute) =>
+                    format!("BT_Minute(iTime(_Symbol,PERIOD_CURRENT,{}))", offset),
+                Some(TimeField::BarDayOfWeek) | Some(TimeField::CurrentDayOfWeek) =>
+                    format!("BT_DayOfWeek(iTime(_Symbol,PERIOD_CURRENT,{}))", offset),
+                Some(TimeField::CurrentMonth) =>
+                    format!("BT_Month(iTime(_Symbol,PERIOD_CURRENT,{}))", offset),
+                None => "0 /* no time field */".into(),
+            }
+        }
+        OperandType::CandlePattern => {
+            let o = offset;
+            match operand.candle_pattern {
+                Some(CandlePatternType::Doji) =>
+                    format!("(MathAbs(iClose(_Symbol,PERIOD_CURRENT,{o})-iOpen(_Symbol,PERIOD_CURRENT,{o})) <= 0.1*(iHigh(_Symbol,PERIOD_CURRENT,{o})-iLow(_Symbol,PERIOD_CURRENT,{o})) ? 1.0 : 0.0)"),
+                Some(CandlePatternType::Hammer) =>
+                    format!("(MathMin(iOpen(_Symbol,PERIOD_CURRENT,{o}),iClose(_Symbol,PERIOD_CURRENT,{o}))-iLow(_Symbol,PERIOD_CURRENT,{o}) >= 2.0*MathAbs(iClose(_Symbol,PERIOD_CURRENT,{o})-iOpen(_Symbol,PERIOD_CURRENT,{o})) && iHigh(_Symbol,PERIOD_CURRENT,{o})-MathMax(iOpen(_Symbol,PERIOD_CURRENT,{o}),iClose(_Symbol,PERIOD_CURRENT,{o})) <= MathAbs(iClose(_Symbol,PERIOD_CURRENT,{o})-iOpen(_Symbol,PERIOD_CURRENT,{o})) ? 1.0 : 0.0)"),
+                Some(CandlePatternType::ShootingStar) =>
+                    format!("(iHigh(_Symbol,PERIOD_CURRENT,{o})-MathMax(iOpen(_Symbol,PERIOD_CURRENT,{o}),iClose(_Symbol,PERIOD_CURRENT,{o})) >= 2.0*MathAbs(iClose(_Symbol,PERIOD_CURRENT,{o})-iOpen(_Symbol,PERIOD_CURRENT,{o})) && MathMin(iOpen(_Symbol,PERIOD_CURRENT,{o}),iClose(_Symbol,PERIOD_CURRENT,{o}))-iLow(_Symbol,PERIOD_CURRENT,{o}) <= MathAbs(iClose(_Symbol,PERIOD_CURRENT,{o})-iOpen(_Symbol,PERIOD_CURRENT,{o})) ? 1.0 : 0.0)"),
+                Some(CandlePatternType::BullishEngulfing) =>
+                    format!("(iClose(_Symbol,PERIOD_CURRENT,{o}+1)<iOpen(_Symbol,PERIOD_CURRENT,{o}+1) && iClose(_Symbol,PERIOD_CURRENT,{o})>iOpen(_Symbol,PERIOD_CURRENT,{o}) && iOpen(_Symbol,PERIOD_CURRENT,{o})<=iClose(_Symbol,PERIOD_CURRENT,{o}+1) && iClose(_Symbol,PERIOD_CURRENT,{o})>=iOpen(_Symbol,PERIOD_CURRENT,{o}+1) ? 1.0 : 0.0)"),
+                Some(CandlePatternType::BearishEngulfing) =>
+                    format!("(iClose(_Symbol,PERIOD_CURRENT,{o}+1)>iOpen(_Symbol,PERIOD_CURRENT,{o}+1) && iClose(_Symbol,PERIOD_CURRENT,{o})<iOpen(_Symbol,PERIOD_CURRENT,{o}) && iOpen(_Symbol,PERIOD_CURRENT,{o})>=iClose(_Symbol,PERIOD_CURRENT,{o}+1) && iClose(_Symbol,PERIOD_CURRENT,{o})<=iOpen(_Symbol,PERIOD_CURRENT,{o}+1) ? 1.0 : 0.0)"),
+                Some(CandlePatternType::DarkCloud) =>
+                    format!("(iClose(_Symbol,PERIOD_CURRENT,{o}+1)>iOpen(_Symbol,PERIOD_CURRENT,{o}+1) && iClose(_Symbol,PERIOD_CURRENT,{o})<iOpen(_Symbol,PERIOD_CURRENT,{o}) && iOpen(_Symbol,PERIOD_CURRENT,{o})>iHigh(_Symbol,PERIOD_CURRENT,{o}+1) && iClose(_Symbol,PERIOD_CURRENT,{o})<(iOpen(_Symbol,PERIOD_CURRENT,{o}+1)+iClose(_Symbol,PERIOD_CURRENT,{o}+1))/2.0 ? 1.0 : 0.0)"),
+                Some(CandlePatternType::PiercingLine) =>
+                    format!("(iClose(_Symbol,PERIOD_CURRENT,{o}+1)<iOpen(_Symbol,PERIOD_CURRENT,{o}+1) && iClose(_Symbol,PERIOD_CURRENT,{o})>iOpen(_Symbol,PERIOD_CURRENT,{o}) && iOpen(_Symbol,PERIOD_CURRENT,{o})<iLow(_Symbol,PERIOD_CURRENT,{o}+1) && iClose(_Symbol,PERIOD_CURRENT,{o})>(iOpen(_Symbol,PERIOD_CURRENT,{o}+1)+iClose(_Symbol,PERIOD_CURRENT,{o}+1))/2.0 ? 1.0 : 0.0)"),
+                None => "0 /* no candle pattern */".into(),
             }
         }
     }
@@ -933,6 +1115,37 @@ fn mql5_trailing_stop(out: &mut String, strategy: &Strategy) {
     writeln!(out).ok();
 }
 
+/// Emit BT_Hour / BT_Minute / BT_DayOfWeek / BT_Month helpers
+/// when the strategy uses BarTime operands (MQL4's TimeHour etc. don't exist in MQL5).
+fn mql5_time_helpers(out: &mut String, strategy: &Strategy) {
+    let uses_bar_time = [
+        &strategy.long_entry_rules,
+        &strategy.short_entry_rules,
+        &strategy.long_exit_rules,
+        &strategy.short_exit_rules,
+    ]
+    .iter()
+    .any(|rules| {
+        rules.iter().any(|r| {
+            r.left_operand.operand_type == OperandType::BarTime
+                || r.right_operand.operand_type == OperandType::BarTime
+        })
+    });
+
+    if !uses_bar_time {
+        return;
+    }
+
+    writeln!(out, "//+------------------------------------------------------------------+").ok();
+    writeln!(out, "// Time helpers (MQL5 equivalents of MQL4 TimeHour etc.)").ok();
+    writeln!(out, "//+------------------------------------------------------------------+").ok();
+    writeln!(out, "int BT_Hour(datetime t) {{ MqlDateTime s; TimeToStruct(t,s); return s.hour; }}").ok();
+    writeln!(out, "int BT_Minute(datetime t) {{ MqlDateTime s; TimeToStruct(t,s); return s.min; }}").ok();
+    writeln!(out, "int BT_DayOfWeek(datetime t) {{ MqlDateTime s; TimeToStruct(t,s); return s.day_of_week; }}").ok();
+    writeln!(out, "int BT_Month(datetime t) {{ MqlDateTime s; TimeToStruct(t,s); return s.mon; }}").ok();
+    writeln!(out).ok();
+}
+
 // ══════════════════════════════════════════════════════════════
 // PineScript Generation
 // ══════════════════════════════════════════════════════════════
@@ -1019,7 +1232,34 @@ fn pine_inputs(out: &mut String, strategy: &Strategy, indicators: &[UniqueIndica
                 writeln!(out, "i_{}_af = input.float({:.2}, \"SAR Accel\")", ind.var_name, p.acceleration_factor.unwrap_or(0.02)).ok();
                 writeln!(out, "i_{}_max = input.float({:.2}, \"SAR Max\")", ind.var_name, p.maximum_factor.unwrap_or(0.20)).ok();
             }
-            IndicatorType::VWAP => {} // no params
+            IndicatorType::VWAP | IndicatorType::AwesomeOscillator |
+            IndicatorType::BarRange | IndicatorType::Fractal |
+            IndicatorType::HeikenAshi | IndicatorType::TrueRange |
+            IndicatorType::Pivots => {} // no params
+            IndicatorType::Ichimoku => {
+                writeln!(out, "i_{}_tenkan = input.int({}, \"Ichimoku Tenkan\")", ind.var_name, p.fast_period.unwrap_or(9)).ok();
+                writeln!(out, "i_{}_kijun = input.int({}, \"Ichimoku Kijun\")", ind.var_name, p.slow_period.unwrap_or(26)).ok();
+                writeln!(out, "i_{}_senkou = input.int({}, \"Ichimoku Senkou B\")", ind.var_name, p.signal_period.unwrap_or(52)).ok();
+            }
+            IndicatorType::KeltnerChannel | IndicatorType::SuperTrend => {
+                if let Some(period) = p.period {
+                    writeln!(out, "i_{}_period = input.int({}, \"{:?} Period\")", ind.var_name, period, ind.config.indicator_type).ok();
+                }
+                if let Some(mult) = p.multiplier {
+                    writeln!(out, "i_{}_mult = input.float({:.1}, \"{:?} Mult\")", ind.var_name, mult, ind.config.indicator_type).ok();
+                }
+            }
+            IndicatorType::LaguerreRSI => {
+                if let Some(gamma) = p.gamma {
+                    writeln!(out, "i_{}_gamma = input.float({:.2}, \"Laguerre Gamma\")", ind.var_name, gamma).ok();
+                }
+            }
+            _ => {
+                // Period-only indicators
+                if let Some(period) = p.period {
+                    writeln!(out, "i_{}_period = input.int({}, \"{:?} Period\")", ind.var_name, period, ind.config.indicator_type).ok();
+                }
+            }
         }
     }
 
@@ -1101,6 +1341,136 @@ fn pine_indicators(out: &mut String, indicators: &[UniqueIndicator]) {
             }
             IndicatorType::VWAP => {
                 writeln!(out, "{} = ta.vwap(hlc3)", ind.var_name).ok();
+            }
+            IndicatorType::Aroon => {
+                writeln!(out, "{0}_up = 100.0 * (i_{0}_period - ta.highestbars(high, i_{0}_period)) / i_{0}_period", ind.var_name).ok();
+                writeln!(out, "{0}_down = 100.0 * (i_{0}_period - ta.lowestbars(low, i_{0}_period)) / i_{0}_period", ind.var_name).ok();
+            }
+            IndicatorType::AwesomeOscillator => {
+                writeln!(out, "{} = ta.sma(hl2, 5) - ta.sma(hl2, 34)", ind.var_name).ok();
+            }
+            IndicatorType::BarRange => {
+                writeln!(out, "{} = high - low", ind.var_name).ok();
+            }
+            IndicatorType::BiggestRange => {
+                writeln!(out, "{0} = ta.highest(high - low, i_{0}_period)", ind.var_name).ok();
+            }
+            IndicatorType::HighestInRange => {
+                writeln!(out, "{0} = ta.highest(high, i_{0}_period)", ind.var_name).ok();
+            }
+            IndicatorType::LowestInRange => {
+                writeln!(out, "{0} = ta.lowest(low, i_{0}_period)", ind.var_name).ok();
+            }
+            IndicatorType::SmallestRange => {
+                writeln!(out, "{0} = ta.lowest(high - low, i_{0}_period)", ind.var_name).ok();
+            }
+            IndicatorType::BearsPower => {
+                writeln!(out, "{0} = low - ta.ema(close, i_{0}_period)", ind.var_name).ok();
+            }
+            IndicatorType::BullsPower => {
+                writeln!(out, "{0} = high - ta.ema(close, i_{0}_period)", ind.var_name).ok();
+            }
+            IndicatorType::DeMarker => {
+                writeln!(out, "// DeMarker (custom calculation)").ok();
+                writeln!(out, "{0}_demax = math.max(high - high[1], 0)", ind.var_name).ok();
+                writeln!(out, "{0}_demin = math.max(low[1] - low, 0)", ind.var_name).ok();
+                writeln!(out, "{0}_sma_max = ta.sma({0}_demax, i_{0}_period)", ind.var_name).ok();
+                writeln!(out, "{0}_sma_min = ta.sma({0}_demin, i_{0}_period)", ind.var_name).ok();
+                writeln!(out, "{0} = {0}_sma_max / ({0}_sma_max + {0}_sma_min)", ind.var_name).ok();
+            }
+            IndicatorType::Fibonacci => {
+                writeln!(out, "// Fibonacci retracement levels over period").ok();
+                writeln!(out, "{0}_hh = ta.highest(high, i_{0}_period)", ind.var_name).ok();
+                writeln!(out, "{0}_ll = ta.lowest(low, i_{0}_period)", ind.var_name).ok();
+                writeln!(out, "{0}_range = {0}_hh - {0}_ll", ind.var_name).ok();
+                writeln!(out, "{0}_236 = {0}_hh - {0}_range * 0.236", ind.var_name).ok();
+                writeln!(out, "{0}_382 = {0}_hh - {0}_range * 0.382", ind.var_name).ok();
+                writeln!(out, "{0}_500 = {0}_hh - {0}_range * 0.500", ind.var_name).ok();
+                writeln!(out, "{0}_618 = {0}_hh - {0}_range * 0.618", ind.var_name).ok();
+                writeln!(out, "{0}_786 = {0}_hh - {0}_range * 0.786", ind.var_name).ok();
+            }
+            IndicatorType::Fractal => {
+                writeln!(out, "// Fractals (Williams 5-bar)").ok();
+                writeln!(out, "{0}_up = (high[2] > high[4] and high[2] > high[3] and high[2] > high[1] and high[2] > high[0]) ? high[2] : na", ind.var_name).ok();
+                writeln!(out, "{0}_down = (low[2] < low[4] and low[2] < low[3] and low[2] < low[1] and low[2] < low[0]) ? low[2] : na", ind.var_name).ok();
+            }
+            IndicatorType::GannHiLo => {
+                writeln!(out, "// Gann HiLo Activator").ok();
+                writeln!(out, "{0}_sma_h = ta.sma(high, i_{0}_period)", ind.var_name).ok();
+                writeln!(out, "{0}_sma_l = ta.sma(low, i_{0}_period)", ind.var_name).ok();
+                writeln!(out, "{0} = close > {0}_sma_h[1] ? {0}_sma_l : {0}_sma_h", ind.var_name).ok();
+            }
+            IndicatorType::HeikenAshi => {
+                writeln!(out, "// Heiken Ashi").ok();
+                writeln!(out, "{0}_close = (open + high + low + close) / 4", ind.var_name).ok();
+                writeln!(out, "var float {0}_open = na", ind.var_name).ok();
+                writeln!(out, "{0}_open := na({0}_open[1]) ? open : ({0}_open[1] + {0}_close[1]) / 2", ind.var_name).ok();
+            }
+            IndicatorType::HullMA => {
+                writeln!(out, "{0} = ta.hma(close, i_{0}_period)", ind.var_name).ok();
+            }
+            IndicatorType::Ichimoku => {
+                writeln!(out, "// Ichimoku").ok();
+                writeln!(out, "{0}_tenkan = (ta.highest(high, i_{0}_tenkan) + ta.lowest(low, i_{0}_tenkan)) / 2", ind.var_name).ok();
+                writeln!(out, "{0}_kijun = (ta.highest(high, i_{0}_kijun) + ta.lowest(low, i_{0}_kijun)) / 2", ind.var_name).ok();
+                writeln!(out, "{0}_senkou_a = ({0}_tenkan + {0}_kijun) / 2", ind.var_name).ok();
+                writeln!(out, "{0}_senkou_b = (ta.highest(high, i_{0}_senkou) + ta.lowest(low, i_{0}_senkou)) / 2", ind.var_name).ok();
+                writeln!(out, "{0}_chikou = close", ind.var_name).ok();
+            }
+            IndicatorType::KeltnerChannel => {
+                writeln!(out, "// Keltner Channel").ok();
+                writeln!(out, "{0}_middle = ta.ema(close, i_{0}_period)", ind.var_name).ok();
+                writeln!(out, "{0}_atr = ta.atr(i_{0}_period)", ind.var_name).ok();
+                writeln!(out, "{0}_upper = {0}_middle + i_{0}_mult * {0}_atr", ind.var_name).ok();
+                writeln!(out, "{0}_lower = {0}_middle - i_{0}_mult * {0}_atr", ind.var_name).ok();
+            }
+            IndicatorType::LaguerreRSI => {
+                writeln!(out, "// Laguerre RSI (custom calculation)").ok();
+                writeln!(out, "var float {0}_l0 = 0.0, var float {0}_l1 = 0.0, var float {0}_l2 = 0.0, var float {0}_l3 = 0.0", ind.var_name).ok();
+                writeln!(out, "{0}_l0 := (1.0 - i_{0}_gamma) * close + i_{0}_gamma * nz({0}_l0[1])", ind.var_name).ok();
+                writeln!(out, "{0}_l1 := -i_{0}_gamma * {0}_l0 + nz({0}_l0[1]) + i_{0}_gamma * nz({0}_l1[1])", ind.var_name).ok();
+                writeln!(out, "{0}_l2 := -i_{0}_gamma * {0}_l1 + nz({0}_l1[1]) + i_{0}_gamma * nz({0}_l2[1])", ind.var_name).ok();
+                writeln!(out, "{0}_l3 := -i_{0}_gamma * {0}_l2 + nz({0}_l2[1]) + i_{0}_gamma * nz({0}_l3[1])", ind.var_name).ok();
+                writeln!(out, "{0}_cu = ({0}_l0 > {0}_l1 ? {0}_l0 - {0}_l1 : 0) + ({0}_l1 > {0}_l2 ? {0}_l1 - {0}_l2 : 0) + ({0}_l2 > {0}_l3 ? {0}_l2 - {0}_l3 : 0)", ind.var_name).ok();
+                writeln!(out, "{0}_cd = ({0}_l1 > {0}_l0 ? {0}_l1 - {0}_l0 : 0) + ({0}_l2 > {0}_l1 ? {0}_l2 - {0}_l1 : 0) + ({0}_l3 > {0}_l2 ? {0}_l3 - {0}_l2 : 0)", ind.var_name).ok();
+                writeln!(out, "{0} = {0}_cu + {0}_cd != 0 ? {0}_cu / ({0}_cu + {0}_cd) : 0", ind.var_name).ok();
+            }
+            IndicatorType::LinearRegression => {
+                writeln!(out, "{0} = ta.linreg(close, i_{0}_period, 0)", ind.var_name).ok();
+            }
+            IndicatorType::Momentum => {
+                writeln!(out, "{0} = ta.mom(close, i_{0}_period)", ind.var_name).ok();
+            }
+            IndicatorType::SuperTrend => {
+                writeln!(out, "[{0}, {0}_dir] = ta.supertrend(i_{0}_mult, i_{0}_period)", ind.var_name).ok();
+            }
+            IndicatorType::TrueRange => {
+                writeln!(out, "{} = ta.tr(true)", ind.var_name).ok();
+            }
+            IndicatorType::StdDev => {
+                writeln!(out, "{0} = ta.stdev(close, i_{0}_period)", ind.var_name).ok();
+            }
+            IndicatorType::Reflex => {
+                writeln!(out, "// Reflex (Ehlers) — approximated with custom calc").ok();
+                writeln!(out, "{0} = 2 * ta.sma(close, i_{0}_period) - ta.sma(ta.sma(close, i_{0}_period), i_{0}_period)", ind.var_name).ok();
+            }
+            IndicatorType::Pivots => {
+                writeln!(out, "// Classic Pivots from prior daily bar").ok();
+                writeln!(out, "[{0}_pp, {0}_r1, {0}_s1, {0}_r2, {0}_s2, {0}_r3, {0}_s3] = request.security(syminfo.tickerid, \"D\", [(high[1]+low[1]+close[1])/3, 2*(high[1]+low[1]+close[1])/3 - low[1], 2*(high[1]+low[1]+close[1])/3 - high[1], (high[1]+low[1]+close[1])/3 + high[1] - low[1], (high[1]+low[1]+close[1])/3 - high[1] + low[1], 2*((high[1]+low[1]+close[1])/3 - low[1]) + (high[1]+low[1]+close[1])/3, 2*((high[1]+low[1]+close[1])/3 - high[1]) + (high[1]+low[1]+close[1])/3])", ind.var_name).ok();
+            }
+            IndicatorType::UlcerIndex => {
+                writeln!(out, "// Ulcer Index").ok();
+                writeln!(out, "{0}_hh = ta.highest(close, i_{0}_period)", ind.var_name).ok();
+                writeln!(out, "{0}_pct_dd = 100 * (close - {0}_hh) / {0}_hh", ind.var_name).ok();
+                writeln!(out, "{0} = math.sqrt(ta.sma({0}_pct_dd * {0}_pct_dd, i_{0}_period))", ind.var_name).ok();
+            }
+            IndicatorType::Vortex => {
+                writeln!(out, "// Vortex Indicator").ok();
+                writeln!(out, "{0}_vm_plus = math.abs(high - low[1])", ind.var_name).ok();
+                writeln!(out, "{0}_vm_minus = math.abs(low - high[1])", ind.var_name).ok();
+                writeln!(out, "{0}_tr = ta.tr(true)", ind.var_name).ok();
+                writeln!(out, "{0}_plus = ta.sum({0}_vm_plus, i_{0}_period) / ta.sum({0}_tr, i_{0}_period)", ind.var_name).ok();
+                writeln!(out, "{0}_minus = ta.sum({0}_vm_minus, i_{0}_period) / ta.sum({0}_tr, i_{0}_period)", ind.var_name).ok();
             }
         }
     }
@@ -1234,6 +1604,10 @@ fn pine_operand_expr(operand: &Operand, extra_offset: usize) -> String {
                 PriceField::High => "high",
                 PriceField::Low => "low",
                 PriceField::Close => "close",
+                PriceField::DailyOpen => "request.security(syminfo.tickerid, \"D\", open)",
+                PriceField::DailyHigh => "request.security(syminfo.tickerid, \"D\", high)",
+                PriceField::DailyLow => "request.security(syminfo.tickerid, \"D\", low)",
+                PriceField::DailyClose => "request.security(syminfo.tickerid, \"D\", close[1])",
             };
             format!("{}{}", field, offset_str)
         }
@@ -1256,6 +1630,50 @@ fn pine_operand_expr(operand: &Operand, extra_offset: usize) -> String {
                 format!("{}{}{}", var, suffix, offset_str)
             } else {
                 "na".into()
+            }
+        }
+        OperandType::BarTime => {
+            match operand.time_field {
+                Some(TimeField::CurrentBar) => format!("bar_index{}", offset_str),
+                Some(TimeField::BarTimeValue) | Some(TimeField::CurrentTime) =>
+                    format!("(hour{os} * 60 + minute{os})", os=offset_str),
+                Some(TimeField::BarHour) | Some(TimeField::CurrentHour) =>
+                    format!("hour{}", offset_str),
+                Some(TimeField::BarMinute) | Some(TimeField::CurrentMinute) =>
+                    format!("minute{}", offset_str),
+                Some(TimeField::BarDayOfWeek) | Some(TimeField::CurrentDayOfWeek) =>
+                    format!("dayofweek{}", offset_str),
+                Some(TimeField::CurrentMonth) =>
+                    format!("month{}", offset_str),
+                None => "na".into(),
+            }
+        }
+        OperandType::CandlePattern => {
+            let os = &offset_str;
+            match operand.candle_pattern {
+                Some(CandlePatternType::Doji) =>
+                    format!("(math.abs(close{os}-open{os}) <= 0.1*(high{os}-low{os}) ? 1.0 : 0.0)"),
+                Some(CandlePatternType::Hammer) =>
+                    format!("(math.min(open{os},close{os})-low{os} >= 2.0*math.abs(close{os}-open{os}) and high{os}-math.max(open{os},close{os}) <= math.abs(close{os}-open{os}) ? 1.0 : 0.0)"),
+                Some(CandlePatternType::ShootingStar) =>
+                    format!("(high{os}-math.max(open{os},close{os}) >= 2.0*math.abs(close{os}-open{os}) and math.min(open{os},close{os})-low{os} <= math.abs(close{os}-open{os}) ? 1.0 : 0.0)"),
+                Some(CandlePatternType::BullishEngulfing) => {
+                    let p = if offset_str.is_empty() { "[1]".to_string() } else { format!("[{}]", operand.offset.unwrap_or(0) + 1) };
+                    format!("(close{p}<open{p} and close{os}>open{os} and open{os}<=close{p} and close{os}>=open{p} ? 1.0 : 0.0)")
+                }
+                Some(CandlePatternType::BearishEngulfing) => {
+                    let p = if offset_str.is_empty() { "[1]".to_string() } else { format!("[{}]", operand.offset.unwrap_or(0) + 1) };
+                    format!("(close{p}>open{p} and close{os}<open{os} and open{os}>=close{p} and close{os}<=open{p} ? 1.0 : 0.0)")
+                }
+                Some(CandlePatternType::DarkCloud) => {
+                    let p = if offset_str.is_empty() { "[1]".to_string() } else { format!("[{}]", operand.offset.unwrap_or(0) + 1) };
+                    format!("(close{p}>open{p} and close{os}<open{os} and open{os}>high{p} and close{os}<(open{p}+close{p})/2.0 ? 1.0 : 0.0)")
+                }
+                Some(CandlePatternType::PiercingLine) => {
+                    let p = if offset_str.is_empty() { "[1]".to_string() } else { format!("[{}]", operand.offset.unwrap_or(0) + 1) };
+                    format!("(close{p}<open{p} and close{os}>open{os} and open{os}<low{p} and close{os}>(open{p}+close{p})/2.0 ? 1.0 : 0.0)")
+                }
+                None => "na".into(),
             }
         }
     }
@@ -1455,6 +1873,8 @@ fn generate_custom_indicator(ind_type: IndicatorType) -> Option<(String, String)
         IndicatorType::WilliamsR => ("BT_WilliamsR.mq5".into(), gen_mql5_williams_r()),
         IndicatorType::ParabolicSAR => ("BT_ParabolicSAR.mq5".into(), gen_mql5_parabolic_sar()),
         IndicatorType::VWAP => ("BT_VWAP.mq5".into(), gen_mql5_vwap()),
+        // New indicators — custom MQL5 indicator files not yet generated
+        _ => return None,
     };
     Some((filename, code))
 }
@@ -2782,6 +3202,8 @@ mod tests {
                         price_field: Some(PriceField::Close),
                         indicator: None,
                         constant_value: None,
+                        time_field: None,
+                        candle_pattern: None,
                         offset: None,
                     },
                     comparator: Comparator::CrossAbove,
@@ -2794,6 +3216,8 @@ mod tests {
                         }),
                         price_field: None,
                         constant_value: None,
+                        time_field: None,
+                        candle_pattern: None,
                         offset: None,
                     },
                     logical_operator: Some(LogicalOperator::And),
@@ -2809,6 +3233,8 @@ mod tests {
                         }),
                         price_field: None,
                         constant_value: None,
+                        time_field: None,
+                        candle_pattern: None,
                         offset: None,
                     },
                     comparator: Comparator::GreaterThan,
@@ -2817,6 +3243,8 @@ mod tests {
                         constant_value: Some(50.0),
                         indicator: None,
                         price_field: None,
+                        time_field: None,
+                        candle_pattern: None,
                         offset: None,
                     },
                     logical_operator: None,
@@ -2930,6 +3358,8 @@ mod tests {
                 }),
                 price_field: None,
                 constant_value: None,
+                time_field: None,
+                candle_pattern: None,
                 offset: None,
             },
             comparator: Comparator::GreaterThan,
@@ -2938,6 +3368,8 @@ mod tests {
                 constant_value: Some(0.0),
                 indicator: None,
                 price_field: None,
+                time_field: None,
+                candle_pattern: None,
                 offset: None,
             },
             logical_operator: None,

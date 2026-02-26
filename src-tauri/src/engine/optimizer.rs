@@ -11,7 +11,7 @@ use crate::errors::AppError;
 use crate::models::candle::Candle;
 use crate::models::config::InstrumentConfig;
 use crate::models::result::{
-    BacktestMetrics, GeneticAlgorithmConfig, ObjectiveFunction, OptimizationResult,
+    BacktestMetrics, EquityPoint, GeneticAlgorithmConfig, ObjectiveFunction, OptimizationResult,
     ParameterRange,
 };
 use crate::models::strategy::{
@@ -116,22 +116,31 @@ pub fn apply_params(strategy: &Strategy, ranges: &[ParameterRange], values: &[f6
                 };
 
                 if let Some(rule) = rule {
-                    let updated = match range.operand_side.as_str() {
-                        "left" => set_indicator_param(&mut rule.left_operand.indicator, &range.param_name, val),
-                        "right" => set_indicator_param(&mut rule.right_operand.indicator, &range.param_name, val),
-                        _ => {
-                            set_indicator_param(&mut rule.left_operand.indicator, &range.param_name, val)
-                                || set_indicator_param(&mut rule.right_operand.indicator, &range.param_name, val)
-                        }
-                    };
+                    if range.param_name == "constant_value" {
+                        // Constant (nivel) optimization
+                        let operand = match range.operand_side.as_str() {
+                            "left" => &mut rule.left_operand,
+                            _ => &mut rule.right_operand,
+                        };
+                        operand.constant_value = Some(val);
+                    } else {
+                        let updated = match range.operand_side.as_str() {
+                            "left" => set_indicator_param(&mut rule.left_operand.indicator, &range.param_name, val),
+                            "right" => set_indicator_param(&mut rule.right_operand.indicator, &range.param_name, val),
+                            _ => {
+                                set_indicator_param(&mut rule.left_operand.indicator, &range.param_name, val)
+                                    || set_indicator_param(&mut rule.right_operand.indicator, &range.param_name, val)
+                            }
+                        };
 
-                    if !updated {
-                        tracing::warn!(
-                            "Could not apply param '{}' to rule index {} in group '{}'",
-                            range.param_name,
-                            range.rule_index,
-                            source
-                        );
+                        if !updated {
+                            tracing::warn!(
+                                "Could not apply param '{}' to rule index {} in group '{}'",
+                                range.param_name,
+                                range.rule_index,
+                                source
+                            );
+                        }
                     }
                 } else {
                     tracing::warn!(
@@ -198,6 +207,14 @@ fn set_param(params: &mut IndicatorParams, name: &str, value: f64) -> bool {
             params.maximum_factor = Some(value);
             true
         }
+        "gamma" => {
+            params.gamma = Some(value);
+            true
+        }
+        "multiplier" => {
+            params.multiplier = Some(value);
+            true
+        }
         _ => false,
     }
 }
@@ -216,6 +233,29 @@ fn extract_objective(metrics: &BacktestMetrics, objective: &ObjectiveFunction) -
     }
 }
 
+/// Downsample an equity curve to at most `max_points` for sparkline display.
+fn downsample_equity(curve: &[EquityPoint], max_points: usize) -> Vec<EquityPoint> {
+    if curve.len() <= max_points {
+        return curve.to_vec();
+    }
+    let step = curve.len() as f64 / max_points as f64;
+    let mut result = Vec::with_capacity(max_points);
+    for i in 0..max_points {
+        let idx = (i as f64 * step) as usize;
+        result.push(curve[idx].clone());
+    }
+    // Always include the last point
+    if let Some(last) = curve.last() {
+        if result.last().map(|p| &p.timestamp) != Some(&last.timestamp) {
+            result.push(last.clone());
+        }
+    }
+    result
+}
+
+/// Maximum number of equity points to keep per optimization result sparkline.
+const SPARKLINE_MAX_POINTS: usize = 60;
+
 /// Build an OptimizationResult from backtest metrics and parameter values.
 /// Uses the first objective as the primary `objective_value`.
 fn build_result(
@@ -223,6 +263,7 @@ fn build_result(
     values: &[f64],
     metrics: &BacktestMetrics,
     objectives: &[ObjectiveFunction],
+    equity_curve: &[EquityPoint],
 ) -> OptimizationResult {
     let mut params = HashMap::new();
     for (range, &val) in ranges.iter().zip(values.iter()) {
@@ -242,6 +283,7 @@ fn build_result(
         stagnation_bars: metrics.stagnation_bars,
         ulcer_index_pct: metrics.ulcer_index_pct,
         oos_results: Vec::new(),
+        equity_curve: downsample_equity(equity_curve, SPARKLINE_MAX_POINTS),
     }
 }
 
@@ -353,7 +395,7 @@ pub fn run_grid_search(
 
             match result {
                 Ok(bt) => {
-                    let opt_result = build_result(ranges, values, &bt.metrics, objectives);
+                    let opt_result = build_result(ranges, values, &bt.metrics, objectives, &bt.equity_curve);
 
                     // Update best
                     {
@@ -500,7 +542,7 @@ pub fn run_genetic_algorithm(
 
                 match result {
                     Ok(bt) => {
-                        let opt_result = build_result(ranges, &ind.genes, &bt.metrics, objectives);
+                        let opt_result = build_result(ranges, &ind.genes, &bt.metrics, objectives, &bt.equity_curve);
                         let fitness = opt_result.objective_value;
                         Some((fitness, opt_result))
                     }
@@ -674,6 +716,7 @@ fn build_failed_result(ranges: &[ParameterRange], values: &[f64]) -> Optimizatio
         stagnation_bars: 0,
         ulcer_index_pct: 0.0,
         oos_results: Vec::new(),
+        equity_curve: Vec::new(),
     }
 }
 

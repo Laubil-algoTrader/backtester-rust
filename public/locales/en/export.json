@@ -1,0 +1,32 @@
+{
+  "title": "Export Strategy Code",
+  "untitled": "Untitled Strategy",
+  "regenerate": "Regenerate",
+  "copy": "Copy",
+  "copied": "Copied",
+  "downloadAll": "Download All ({{count}} files)",
+  "noRulesError": "No entry rules defined. Create a strategy first.",
+  "noCodeYet": "No code generated yet. Create a strategy with entry rules first.",
+  "expertAdvisor": "Expert Advisor",
+  "strategyScript": "Strategy Script",
+  "customIndicator": "Custom Indicator",
+  "lines": "lines",
+  "download": "Download",
+  "downloadExt": "Download .{{ext}}",
+  "mql5Notes": {
+    "title": "MQL5 Notes:",
+    "note1": "All indicators use custom implementations matching the backtester engine exactly",
+    "note2": "Place the BT_*.mq5 indicator files in your MQL5/Indicators/ folder",
+    "note3": "Compile all indicator files and the EA in MetaEditor before using",
+    "note4": "Adjust the Magic Number input to avoid conflicts with other EAs",
+    "note5": "Test in Strategy Tester before deploying to a live account"
+  },
+  "pineNotes": {
+    "title": "Pine Script Notes:",
+    "note1": "Copy the code to TradingView's Pine Editor and add to chart",
+    "note2": "Commission and slippage are configured in the strategy() declaration",
+    "note3": "Position sizing may need manual adjustment for your account size",
+    "note4": "ADX uses ta.dmi() which may behave slightly differently",
+    "note5": "Backtest results will differ due to platform differences in order execution"
+  }
+}

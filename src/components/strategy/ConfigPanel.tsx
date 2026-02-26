@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import type {
   PositionSizing,
   PositionSizingType,
@@ -45,40 +46,40 @@ interface ConfigPanelProps {
   onCloseTradesAtChange: (ct: CloseTradesAt | undefined) => void;
 }
 
-const SIZING_TYPE_OPTIONS: { value: PositionSizingType; label: string }[] = [
-  { value: "FixedLots", label: "Fixed Lots" },
-  { value: "FixedAmount", label: "Fixed Amount" },
-  { value: "PercentEquity", label: "% Equity" },
-  { value: "RiskBased", label: "Risk Based" },
+const SIZING_TYPE_OPTIONS: { value: PositionSizingType; labelKey: string }[] = [
+  { value: "FixedLots", labelKey: "config.fixedLots" },
+  { value: "FixedAmount", labelKey: "config.fixedAmount" },
+  { value: "PercentEquity", labelKey: "config.percentEquity" },
+  { value: "RiskBased", labelKey: "config.riskBased" },
 ];
 
-const SIZING_VALUE_LABELS: Record<PositionSizingType, string> = {
-  FixedLots: "Lots",
-  FixedAmount: "Amount ($)",
-  PercentEquity: "Equity (%)",
-  RiskBased: "Risk (%)",
+const SIZING_VALUE_LABEL_KEYS: Record<PositionSizingType, string> = {
+  FixedLots: "config.lots",
+  FixedAmount: "config.amount",
+  PercentEquity: "config.equityPct",
+  RiskBased: "config.riskPct",
 };
 
-const SL_TYPE_OPTIONS: { value: StopLossType; label: string }[] = [
-  { value: "Pips", label: "Pips" },
-  { value: "Percentage", label: "Percentage" },
-  { value: "ATR", label: "ATR Multiplier" },
+const SL_TYPE_OPTIONS: { value: StopLossType; labelKey: string }[] = [
+  { value: "Pips", labelKey: "config.pips" },
+  { value: "Percentage", labelKey: "config.percentage" },
+  { value: "ATR", labelKey: "config.atrMultiplier" },
 ];
 
-const TP_TYPE_OPTIONS: { value: TakeProfitType; label: string }[] = [
-  { value: "Pips", label: "Pips" },
-  { value: "RiskReward", label: "Risk:Reward" },
-  { value: "ATR", label: "ATR Multiplier" },
+const TP_TYPE_OPTIONS: { value: TakeProfitType; labelKey: string }[] = [
+  { value: "Pips", labelKey: "config.pips" },
+  { value: "RiskReward", labelKey: "config.riskReward" },
+  { value: "ATR", labelKey: "config.atrMultiplier" },
 ];
 
-const TS_TYPE_OPTIONS: { value: TrailingStopType; label: string }[] = [
-  { value: "ATR", label: "ATR Multiplier" },
-  { value: "RiskReward", label: "Risk:Reward" },
+const TS_TYPE_OPTIONS: { value: TrailingStopType; labelKey: string }[] = [
+  { value: "ATR", labelKey: "config.atrMultiplier" },
+  { value: "RiskReward", labelKey: "config.riskReward" },
 ];
 
-const COMMISSION_TYPE_OPTIONS: { value: CommissionType; label: string }[] = [
-  { value: "FixedPerLot", label: "Fixed/Lot" },
-  { value: "Percentage", label: "Percentage" },
+const COMMISSION_TYPE_OPTIONS: { value: CommissionType; labelKey: string }[] = [
+  { value: "FixedPerLot", labelKey: "config.fixedPerLot" },
+  { value: "Percentage", labelKey: "config.percentage" },
 ];
 
 function LabeledInput({
@@ -97,10 +98,10 @@ function LabeledInput({
   const floor = min ?? 0;
   return (
     <div className="space-y-1">
-      <label className="text-xs text-muted-foreground">{label}</label>
+      <label className="text-sm text-muted-foreground">{label}</label>
       <Input
         type="number"
-        className="h-8 text-xs"
+        className="h-9 text-sm"
         min={floor}
         step={step ?? "any"}
         value={value}
@@ -123,7 +124,7 @@ function ToggleCheckbox({
   onChange: (checked: boolean) => void;
 }) {
   return (
-    <label className="flex cursor-pointer items-center gap-2 text-xs">
+    <label className="flex cursor-pointer items-center gap-2 text-sm">
       <input
         type="checkbox"
         checked={checked}
@@ -155,15 +156,17 @@ export function ConfigPanel({
   onMaxDailyTradesChange,
   onCloseTradesAtChange,
 }: ConfigPanelProps) {
+  const { t } = useTranslation("strategy");
+
   return (
     <Tabs defaultValue="sizing" className="w-full">
       <TabsList className="grid w-full grid-cols-3 lg:grid-cols-6">
-        <TabsTrigger value="sizing" className="text-xs">Size</TabsTrigger>
-        <TabsTrigger value="sl" className="text-xs">SL</TabsTrigger>
-        <TabsTrigger value="tp" className="text-xs">TP</TabsTrigger>
-        <TabsTrigger value="trail" className="text-xs">Trail</TabsTrigger>
-        <TabsTrigger value="costs" className="text-xs">Costs</TabsTrigger>
-        <TabsTrigger value="filters" className="text-xs">Filters</TabsTrigger>
+        <TabsTrigger value="sizing" className="text-sm">{t("config.size")}</TabsTrigger>
+        <TabsTrigger value="sl" className="text-sm">{t("config.sl")}</TabsTrigger>
+        <TabsTrigger value="tp" className="text-sm">{t("config.tp")}</TabsTrigger>
+        <TabsTrigger value="trail" className="text-sm">{t("config.trail")}</TabsTrigger>
+        <TabsTrigger value="costs" className="text-sm">{t("config.costs")}</TabsTrigger>
+        <TabsTrigger value="filters" className="text-sm">{t("config.filters")}</TabsTrigger>
       </TabsList>
 
       {/* Position Sizing */}
@@ -177,19 +180,19 @@ export function ConfigPanel({
             })
           }
         >
-          <SelectTrigger className="h-8 text-xs">
+          <SelectTrigger className="h-9 text-sm">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
             {SIZING_TYPE_OPTIONS.map((opt) => (
               <SelectItem key={opt.value} value={opt.value}>
-                {opt.label}
+                {t(opt.labelKey)}
               </SelectItem>
             ))}
           </SelectContent>
         </Select>
         <LabeledInput
-          label={SIZING_VALUE_LABELS[positionSizing.sizing_type]}
+          label={t(SIZING_VALUE_LABEL_KEYS[positionSizing.sizing_type])}
           value={positionSizing.value}
           onChange={(value) =>
             onPositionSizingChange({ ...positionSizing, value })
@@ -200,7 +203,7 @@ export function ConfigPanel({
       {/* Stop Loss */}
       <TabsContent value="sl" className="space-y-3 pt-2">
         <ToggleCheckbox
-          label="Enable Stop Loss"
+          label={t("config.enableStopLoss")}
           checked={!!stopLoss}
           onChange={(checked) =>
             onStopLossChange(
@@ -221,20 +224,20 @@ export function ConfigPanel({
                 onStopLossChange(newSl);
               }}
             >
-              <SelectTrigger className="h-8 text-xs">
+              <SelectTrigger className="h-9 text-sm">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
                 {SL_TYPE_OPTIONS.map((opt) => (
                   <SelectItem key={opt.value} value={opt.value}>
-                    {opt.label}
+                    {t(opt.labelKey)}
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
             {stopLoss.sl_type === "ATR" && (
               <LabeledInput
-                label="ATR Period"
+                label={t("config.atrPeriod")}
                 value={stopLoss.atr_period ?? 14}
                 onChange={(atr_period) =>
                   onStopLossChange({ ...stopLoss, atr_period })
@@ -244,7 +247,7 @@ export function ConfigPanel({
               />
             )}
             <LabeledInput
-              label={stopLoss.sl_type === "ATR" ? "Multiplier" : "Value"}
+              label={stopLoss.sl_type === "ATR" ? t("config.multiplier") : t("config.value")}
               value={stopLoss.value}
               onChange={(value) =>
                 onStopLossChange({ ...stopLoss, value })
@@ -257,7 +260,7 @@ export function ConfigPanel({
       {/* Take Profit */}
       <TabsContent value="tp" className="space-y-3 pt-2">
         <ToggleCheckbox
-          label="Enable Take Profit"
+          label={t("config.enableTakeProfit")}
           checked={!!takeProfit}
           onChange={(checked) =>
             onTakeProfitChange(
@@ -278,20 +281,20 @@ export function ConfigPanel({
                 onTakeProfitChange(newTp);
               }}
             >
-              <SelectTrigger className="h-8 text-xs">
+              <SelectTrigger className="h-9 text-sm">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
                 {TP_TYPE_OPTIONS.map((opt) => (
                   <SelectItem key={opt.value} value={opt.value}>
-                    {opt.label}
+                    {t(opt.labelKey)}
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
             {takeProfit.tp_type === "ATR" && (
               <LabeledInput
-                label="ATR Period"
+                label={t("config.atrPeriod")}
                 value={takeProfit.atr_period ?? 14}
                 onChange={(atr_period) =>
                   onTakeProfitChange({ ...takeProfit, atr_period })
@@ -301,7 +304,7 @@ export function ConfigPanel({
               />
             )}
             <LabeledInput
-              label={takeProfit.tp_type === "ATR" ? "Multiplier" : "Value"}
+              label={takeProfit.tp_type === "ATR" ? t("config.multiplier") : t("config.value")}
               value={takeProfit.value}
               onChange={(value) =>
                 onTakeProfitChange({ ...takeProfit, value })
@@ -314,7 +317,7 @@ export function ConfigPanel({
       {/* Trailing Stop */}
       <TabsContent value="trail" className="space-y-3 pt-2">
         <ToggleCheckbox
-          label="Enable Trailing Stop"
+          label={t("config.enableTrailingStop")}
           checked={!!trailingStop}
           onChange={(checked) =>
             onTrailingStopChange(
@@ -335,20 +338,20 @@ export function ConfigPanel({
                 onTrailingStopChange(newTs);
               }}
             >
-              <SelectTrigger className="h-8 text-xs">
+              <SelectTrigger className="h-9 text-sm">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
                 {TS_TYPE_OPTIONS.map((opt) => (
                   <SelectItem key={opt.value} value={opt.value}>
-                    {opt.label}
+                    {t(opt.labelKey)}
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
             {trailingStop.ts_type === "ATR" && (
               <LabeledInput
-                label="ATR Period"
+                label={t("config.atrPeriod")}
                 value={trailingStop.atr_period ?? 14}
                 onChange={(atr_period) =>
                   onTrailingStopChange({ ...trailingStop, atr_period })
@@ -358,7 +361,7 @@ export function ConfigPanel({
               />
             )}
             <LabeledInput
-              label={trailingStop.ts_type === "ATR" ? "Multiplier" : "Value"}
+              label={trailingStop.ts_type === "ATR" ? t("config.multiplier") : t("config.value")}
               value={trailingStop.value}
               onChange={(value) =>
                 onTrailingStopChange({ ...trailingStop, value })
@@ -371,14 +374,14 @@ export function ConfigPanel({
       {/* Costs */}
       <TabsContent value="costs" className="space-y-3 pt-2">
         <LabeledInput
-          label="Spread (pips)"
+          label={t("config.spreadPips")}
           value={tradingCosts.spread_pips}
           onChange={(spread_pips) =>
             onTradingCostsChange({ ...tradingCosts, spread_pips })
           }
         />
         <div className="space-y-1">
-          <label className="text-xs text-muted-foreground">Commission Type</label>
+          <label className="text-sm text-muted-foreground">{t("config.commissionType")}</label>
           <Select
             value={tradingCosts.commission_type}
             onValueChange={(v) =>
@@ -388,34 +391,34 @@ export function ConfigPanel({
               })
             }
           >
-            <SelectTrigger className="h-8 text-xs">
+            <SelectTrigger className="h-9 text-sm">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
               {COMMISSION_TYPE_OPTIONS.map((opt) => (
                 <SelectItem key={opt.value} value={opt.value}>
-                  {opt.label}
+                  {t(opt.labelKey)}
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
         </div>
         <LabeledInput
-          label="Commission"
+          label={t("config.commission")}
           value={tradingCosts.commission_value}
           onChange={(commission_value) =>
             onTradingCostsChange({ ...tradingCosts, commission_value })
           }
         />
         <LabeledInput
-          label="Slippage (pips)"
+          label={t("config.slippagePips")}
           value={tradingCosts.slippage_pips}
           onChange={(slippage_pips) =>
             onTradingCostsChange({ ...tradingCosts, slippage_pips })
           }
         />
         <ToggleCheckbox
-          label="Random slippage"
+          label={t("config.randomSlippage")}
           checked={tradingCosts.slippage_random}
           onChange={(slippage_random) =>
             onTradingCostsChange({ ...tradingCosts, slippage_random })
@@ -427,17 +430,17 @@ export function ConfigPanel({
       <TabsContent value="filters" className="space-y-4 pt-2">
         {/* Direction */}
         <div className="space-y-1">
-          <label className="text-xs text-muted-foreground">Direction</label>
+          <label className="text-sm text-muted-foreground">{t("config.direction")}</label>
           <div className="flex gap-1">
             {(["Long", "Short", "Both"] as TradeDirection[]).map((dir) => (
               <Button
                 key={dir}
                 variant={tradeDirection === dir ? "default" : "outline"}
                 size="sm"
-                className="flex-1 text-xs"
+                className="flex-1 text-sm"
                 onClick={() => onTradeDirectionChange(dir)}
               >
-                {dir === "Both" ? "Both" : `${dir} Only`}
+                {dir === "Both" ? t("config.both") : dir === "Long" ? t("config.longOnly") : t("config.shortOnly")}
               </Button>
             ))}
           </div>
@@ -446,7 +449,7 @@ export function ConfigPanel({
         {/* Trading Hours */}
         <div className="space-y-2">
           <ToggleCheckbox
-            label="Limit Trading Hours"
+            label={t("config.limitTradingHours")}
             checked={!!tradingHours}
             onChange={(checked) =>
               onTradingHoursChange(
@@ -459,11 +462,11 @@ export function ConfigPanel({
           {tradingHours && (
             <div className="grid grid-cols-2 gap-2">
               <div className="space-y-1">
-                <label className="text-xs text-muted-foreground">Start</label>
+                <label className="text-sm text-muted-foreground">{t("config.start")}</label>
                 <div className="flex items-center gap-1">
                   <Input
                     type="number"
-                    className="h-8 w-14 text-xs"
+                    className="h-9 w-16 text-sm"
                     min={0}
                     max={23}
                     value={tradingHours.start_hour}
@@ -472,10 +475,10 @@ export function ConfigPanel({
                       onTradingHoursChange({ ...tradingHours, start_hour: v });
                     }}
                   />
-                  <span className="text-xs text-muted-foreground">:</span>
+                  <span className="text-sm text-muted-foreground">:</span>
                   <Input
                     type="number"
-                    className="h-8 w-14 text-xs"
+                    className="h-9 w-16 text-sm"
                     min={0}
                     max={59}
                     value={tradingHours.start_minute}
@@ -487,11 +490,11 @@ export function ConfigPanel({
                 </div>
               </div>
               <div className="space-y-1">
-                <label className="text-xs text-muted-foreground">End</label>
+                <label className="text-sm text-muted-foreground">{t("config.end")}</label>
                 <div className="flex items-center gap-1">
                   <Input
                     type="number"
-                    className="h-8 w-14 text-xs"
+                    className="h-9 w-16 text-sm"
                     min={0}
                     max={23}
                     value={tradingHours.end_hour}
@@ -500,10 +503,10 @@ export function ConfigPanel({
                       onTradingHoursChange({ ...tradingHours, end_hour: v });
                     }}
                   />
-                  <span className="text-xs text-muted-foreground">:</span>
+                  <span className="text-sm text-muted-foreground">:</span>
                   <Input
                     type="number"
-                    className="h-8 w-14 text-xs"
+                    className="h-9 w-16 text-sm"
                     min={0}
                     max={59}
                     value={tradingHours.end_minute}
@@ -521,7 +524,7 @@ export function ConfigPanel({
         {/* Max Daily Trades */}
         <div className="space-y-2">
           <ToggleCheckbox
-            label="Limit Daily Trades"
+            label={t("config.limitDailyTrades")}
             checked={maxDailyTrades !== undefined}
             onChange={(checked) =>
               onMaxDailyTradesChange(checked ? 5 : undefined)
@@ -529,7 +532,7 @@ export function ConfigPanel({
           />
           {maxDailyTrades !== undefined && (
             <LabeledInput
-              label="Max trades per day"
+              label={t("config.maxTradesPerDay")}
               value={maxDailyTrades}
               onChange={(v) => onMaxDailyTradesChange(Math.max(1, Math.round(v)))}
               min={1}
@@ -541,7 +544,7 @@ export function ConfigPanel({
         {/* Close Trades At */}
         <div className="space-y-2">
           <ToggleCheckbox
-            label="Close Trades At"
+            label={t("config.closeTradesAt")}
             checked={!!closeTradesAt}
             onChange={(checked) =>
               onCloseTradesAtChange(
@@ -551,11 +554,11 @@ export function ConfigPanel({
           />
           {closeTradesAt && (
             <div className="space-y-1">
-              <label className="text-xs text-muted-foreground">Close time</label>
+              <label className="text-sm text-muted-foreground">{t("config.closeTime")}</label>
               <div className="flex items-center gap-1">
                 <Input
                   type="number"
-                  className="h-8 w-14 text-xs"
+                  className="h-9 w-16 text-sm"
                   min={0}
                   max={23}
                   value={closeTradesAt.hour}
@@ -564,10 +567,10 @@ export function ConfigPanel({
                     onCloseTradesAtChange({ ...closeTradesAt, hour: v });
                   }}
                 />
-                <span className="text-xs text-muted-foreground">:</span>
+                <span className="text-sm text-muted-foreground">:</span>
                 <Input
                   type="number"
-                  className="h-8 w-14 text-xs"
+                  className="h-9 w-16 text-sm"
                   min={0}
                   max={59}
                   value={closeTradesAt.minute}

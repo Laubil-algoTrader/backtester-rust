@@ -1,5 +1,7 @@
 import { useState, useMemo } from "react";
+import { useTranslation } from "react-i18next";
 import type { OptimizationResult, ParameterRange } from "@/lib/types";
+import { useAppStore } from "@/stores/useAppStore";
 import {
   Table,
   TableHeader,
@@ -10,9 +12,31 @@ import {
 } from "@/components/ui/Table";
 import { Button } from "@/components/ui/Button";
 import { ArrowUpDown, Check } from "lucide-react";
+import { SparklineChart } from "@/components/backtest/SparklineChart";
 
 type SortKey = string;
 type SortDir = "asc" | "desc";
+
+/** Heatmap background — maps a normalized 0..1 value to a subtle bg color.
+ *  0 = deep red, 0.5 = dark yellow/neutral, 1 = emerald green.
+ *  Similar to Bloomberg Historical Yields table styling. */
+function heatmapBg(val: number, min: number, max: number): string | undefined {
+  if (max === min) return undefined;
+  const t = Math.max(0, Math.min(1, (val - min) / (max - min)));
+  if (t < 0.33) {
+    // Red zone
+    const opacity = 0.08 + (0.33 - t) * 0.3;
+    return `rgba(220, 38, 38, ${opacity.toFixed(3)})`;
+  } else if (t < 0.66) {
+    // Yellow/neutral zone
+    const opacity = 0.03;
+    return `rgba(202, 138, 4, ${opacity.toFixed(3)})`;
+  } else {
+    // Green zone
+    const opacity = 0.08 + (t - 0.66) * 0.3;
+    return `rgba(16, 185, 129, ${opacity.toFixed(3)})`;
+  }
+}
 
 interface ResultsTableProps {
   results: OptimizationResult[];
@@ -27,10 +51,18 @@ export function ResultsTable({
   onApply,
   isMultiObjective = false,
 }: ResultsTableProps) {
+  const { t } = useTranslation("optimization");
   const [sortKey, setSortKey] = useState<SortKey>(isMultiObjective ? "composite_score" : "objective_value");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
+  const storedRanges = useAppStore((s) => s.optimizationParamRanges);
 
-  const paramNames = parameterRanges.map((r) => r.display_name);
+  // Derive param names: prefer explicit ranges, fallback to stored ranges, then extract from results
+  const paramNames = useMemo(() => {
+    if (parameterRanges.length > 0) return parameterRanges.map((r) => r.display_name);
+    if (storedRanges.length > 0) return storedRanges.map((r) => r.display_name);
+    if (results.length > 0) return Object.keys(results[0].params);
+    return [];
+  }, [parameterRanges, storedRanges, results]);
 
   // Detect OOS labels from first result
   const oosLabels = useMemo(() => {
@@ -89,16 +121,16 @@ export function ResultsTable({
   if (results.length === 0) {
     return (
       <p className="py-8 text-center text-sm text-muted-foreground">
-        No optimization results yet.
+        {t("noResults")}
       </p>
     );
   }
 
   const fixedColumns: { key: SortKey; label: string; format: (v: number) => string }[] = [
     ...(isMultiObjective
-      ? [{ key: "composite_score" as SortKey, label: "COMPOSITE", format: (v: number) => v.toFixed(3) }]
+      ? [{ key: "composite_score" as SortKey, label: t("table.composite"), format: (v: number) => v.toFixed(3) }]
       : []),
-    { key: "objective_value", label: "OBJECTIVE", format: (v) => v.toFixed(2) },
+    { key: "objective_value", label: t("table.objective"), format: (v) => v.toFixed(2) },
     { key: "total_return_pct", label: "IS RET%", format: (v) => `${v.toFixed(2)}%` },
     { key: "sharpe_ratio", label: "IS SHARPE", format: (v) => v.toFixed(2) },
     { key: "max_drawdown_pct", label: "IS DD%", format: (v) => `${v.toFixed(2)}%` },
@@ -118,9 +150,41 @@ export function ResultsTable({
     oosColumns.push({ key: `oos_${i}_max_drawdown_pct`, label: `${short} DD%`, format: (v) => `${v.toFixed(2)}%`, oosIdx: i, field: "max_drawdown_pct" });
   }
 
+  // Heatmap keys: columns that get background coloring
+  const heatmapKeys = new Set(["total_return_pct", "sharpe_ratio", "profit_factor", "return_dd_ratio"]);
+  // Inverted: lower is better (drawdown)
+  const invertedKeys = new Set(["max_drawdown_pct", "ulcer_index_pct", "stagnation_bars"]);
+
+  // Pre-compute min/max for heatmap columns
+  const colRanges = useMemo(() => {
+    const ranges: Record<string, { min: number; max: number }> = {};
+    const keys = [...heatmapKeys, ...invertedKeys];
+    for (const key of keys) {
+      let min = Infinity;
+      let max = -Infinity;
+      for (const r of results) {
+        const v = (r as unknown as Record<string, number>)[key] ?? 0;
+        if (v < min) min = v;
+        if (v > max) max = v;
+      }
+      ranges[key] = { min, max };
+    }
+    return ranges;
+  }, [results]);
+
+  const getCellBg = (key: string, val: number): string | undefined => {
+    const range = colRanges[key];
+    if (!range) return undefined;
+    if (invertedKeys.has(key)) {
+      // Invert: lower value = green, higher = red
+      return heatmapBg(val, range.max, range.min);
+    }
+    return heatmapBg(val, range.min, range.max);
+  };
+
   const SortableHead = ({ sortKeyVal, label }: { sortKeyVal: string; label: string }) => (
     <TableHead
-      className="cursor-pointer select-none whitespace-nowrap text-right text-[10px] tracking-widest"
+      className="cursor-pointer select-none whitespace-nowrap text-right text-xs"
       onClick={() => handleSort(sortKeyVal)}
     >
       <span className="inline-flex items-center gap-1">
@@ -135,7 +199,8 @@ export function ResultsTable({
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead className="w-10 text-[10px] tracking-widest">#</TableHead>
+            <TableHead className="w-10 text-xs">#</TableHead>
+            <TableHead className="w-24 text-xs">Equity</TableHead>
             {paramNames.map((name) => (
               <SortableHead key={name} sortKeyVal={name} label={name.length > 20 ? name.slice(0, 20) + "..." : name} />
             ))}
@@ -145,7 +210,7 @@ export function ResultsTable({
             {hasOos && oosColumns.map((col) => (
               <TableHead
                 key={col.key}
-                className="cursor-pointer select-none whitespace-nowrap border-l border-border/30 text-right text-[10px] tracking-widest text-amber-400/70"
+                className="cursor-pointer select-none whitespace-nowrap border-l border-border/30 text-right text-xs text-amber-400/70"
                 onClick={() => handleSort(col.key)}
               >
                 <span className="inline-flex items-center gap-1">
@@ -154,7 +219,7 @@ export function ResultsTable({
                 </span>
               </TableHead>
             ))}
-            <TableHead className="w-16 text-[10px] tracking-widest">APPLY</TableHead>
+            <TableHead className="w-16 text-xs">APPLY</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -163,11 +228,23 @@ export function ResultsTable({
               key={idx}
               className={idx === 0 ? "bg-emerald-500/[0.03]" : ""}
             >
-              <TableCell className="text-xs text-muted-foreground">
+              <TableCell className="text-sm font-mono text-muted-foreground">
                 {idx + 1}
               </TableCell>
+              <TableCell className="p-1">
+                {result.equity_curve && result.equity_curve.length > 2 ? (
+                  <SparklineChart
+                    data={result.equity_curve.map((p) => ({ value: p.equity }))}
+                    color={result.total_return_pct >= 0 ? "green" : "red"}
+                    height={32}
+                    id={`opt-eq-${idx}`}
+                  />
+                ) : (
+                  <span className="text-xs text-muted-foreground">—</span>
+                )}
+              </TableCell>
               {paramNames.map((name) => (
-                <TableCell key={name} className="text-right text-xs">
+                <TableCell key={name} className="text-right text-sm font-mono">
                   {(result.params[name] ?? 0).toFixed(
                     Number.isInteger(result.params[name]) ? 0 : 2
                   )}
@@ -175,18 +252,12 @@ export function ResultsTable({
               ))}
               {fixedColumns.map((col) => {
                 const val = (result as unknown as Record<string, number>)[col.key] ?? 0;
-                const isPositive = col.key === "total_return_pct" ? val > 0 : col.key === "sharpe_ratio" ? val > 0 : false;
-                const isNegative = col.key === "total_return_pct" ? val < 0 : false;
+                const bg = getCellBg(col.key, val);
                 return (
                   <TableCell
                     key={col.key}
-                    className={`text-right text-xs ${
-                      isPositive
-                        ? "text-emerald-400"
-                        : isNegative
-                          ? "text-red-400"
-                          : ""
-                    }`}
+                    className="text-right text-sm font-mono"
+                    style={bg ? { backgroundColor: bg } : undefined}
                   >
                     {col.format(val)}
                   </TableCell>
@@ -195,18 +266,10 @@ export function ResultsTable({
               {hasOos && oosColumns.map((col) => {
                 const oos = result.oos_results[col.oosIdx];
                 const val = oos ? (oos as unknown as Record<string, number>)[col.field] ?? 0 : 0;
-                const isReturnCol = col.field === "total_return_pct";
-                const isSharpeCol = col.field === "sharpe_ratio";
                 return (
                   <TableCell
                     key={col.key}
-                    className={`border-l border-border/10 text-right text-xs ${
-                      isReturnCol && val > 0 ? "text-emerald-400" :
-                      isReturnCol && val < 0 ? "text-red-400" :
-                      isSharpeCol && val > 0 ? "text-emerald-400" :
-                      isSharpeCol && val < 0 ? "text-red-400" :
-                      ""
-                    }`}
+                    className="border-l border-border/10 text-right text-sm font-mono"
                   >
                     {col.format(val)}
                   </TableCell>

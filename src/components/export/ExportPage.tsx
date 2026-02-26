@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { useTranslation } from "react-i18next";
 import { Copy, Check, Download, Code2, RefreshCw, FileCode2, FolderDown } from "lucide-react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeTextFile, mkdir } from "@tauri-apps/plugin-fs";
@@ -7,10 +8,20 @@ import { useAppStore } from "@/stores/useAppStore";
 import { generateStrategyCode } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import type { Strategy, CodeFile, CodeGenerationResult } from "@/lib/types";
+import { ProGate } from "@/components/auth/ProGate";
 
 type Language = "mql5" | "pinescript";
 
 export function ExportPage() {
+  return (
+    <ProGate feature="export">
+      <ExportPageContent />
+    </ProGate>
+  );
+}
+
+function ExportPageContent() {
+  const { t } = useTranslation("export");
   const currentStrategy = useAppStore((s) => s.currentStrategy);
   const [language, setLanguage] = useState<Language>("mql5");
   const [result, setResult] = useState<CodeGenerationResult | null>(null);
@@ -26,7 +37,7 @@ export function ExportPage() {
   const generate = useCallback(async () => {
     if (!hasRules) {
       setResult(null);
-      setError("No entry rules defined. Create a strategy first.");
+      setError(t("noRulesError"));
       return;
     }
     setIsGenerating(true);
@@ -130,12 +141,12 @@ export function ExportPage() {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Code2 className="h-4 w-4 text-primary" />
-          <h2 className="text-xs font-semibold uppercase tracking-widest">
-            Export Strategy Code
+          <h2 className="text-2xl font-bold">
+            {t("title")}
           </h2>
         </div>
-        <div className="text-[10px] text-muted-foreground">
-          {currentStrategy.name || "Untitled Strategy"}
+        <div className="text-sm text-muted-foreground">
+          {currentStrategy.name || t("untitled")}
         </div>
       </div>
 
@@ -144,7 +155,7 @@ export function ExportPage() {
         <button
           onClick={() => setLanguage("mql5")}
           className={cn(
-            "rounded px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider transition-colors",
+            "rounded px-3 py-1.5 text-sm font-medium transition-colors",
             language === "mql5"
               ? "bg-primary text-primary-foreground"
               : "bg-muted text-muted-foreground hover:text-foreground"
@@ -155,7 +166,7 @@ export function ExportPage() {
         <button
           onClick={() => setLanguage("pinescript")}
           className={cn(
-            "rounded px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider transition-colors",
+            "rounded px-3 py-1.5 text-sm font-medium transition-colors",
             language === "pinescript"
               ? "bg-primary text-primary-foreground"
               : "bg-muted text-muted-foreground hover:text-foreground"
@@ -168,42 +179,42 @@ export function ExportPage() {
           <button
             onClick={generate}
             disabled={isGenerating || !hasRules}
-            className="flex items-center gap-1 rounded px-2 py-1.5 text-[10px] text-muted-foreground transition-colors hover:text-foreground disabled:opacity-40"
+            className="flex items-center gap-1 rounded px-2 py-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground disabled:opacity-40"
           >
             <RefreshCw
               className={cn("h-3 w-3", isGenerating && "animate-spin")}
             />
-            Regenerate
+            {t("regenerate")}
           </button>
           <button
             onClick={handleCopy}
             disabled={!selectedFile}
-            className="flex items-center gap-1 rounded bg-muted px-2.5 py-1.5 text-[10px] font-medium transition-colors hover:bg-muted/80 disabled:opacity-40"
+            className="flex items-center gap-1 rounded bg-muted px-2.5 py-1.5 text-sm font-medium transition-colors hover:bg-muted/80 disabled:opacity-40"
           >
             {copied ? (
               <Check className="h-3 w-3 text-green-500" />
             ) : (
               <Copy className="h-3 w-3" />
             )}
-            {copied ? "Copied" : "Copy"}
+            {copied ? t("copied") : t("copy")}
           </button>
           {totalFiles > 1 ? (
             <button
               onClick={handleDownloadAll}
               disabled={!result}
-              className="flex items-center gap-1 rounded bg-primary px-2.5 py-1.5 text-[10px] font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-40"
+              className="flex items-center gap-1 rounded bg-primary px-2.5 py-1.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-40"
             >
               <FolderDown className="h-3 w-3" />
-              Download All ({totalFiles} files)
+              {t("downloadAll", { count: totalFiles })}
             </button>
           ) : (
             <button
               onClick={handleDownloadCurrent}
               disabled={!selectedFile}
-              className="flex items-center gap-1 rounded bg-primary px-2.5 py-1.5 text-[10px] font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-40"
+              className="flex items-center gap-1 rounded bg-primary px-2.5 py-1.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-40"
             >
               <Download className="h-3 w-3" />
-              Download .{language === "mql5" ? "mq5" : "pine"}
+              {t("downloadExt", { ext: language === "mql5" ? "mq5" : "pine" })}
             </button>
           )}
         </div>
@@ -219,7 +230,7 @@ export function ExportPage() {
                 setSelectedFileIdx(result.files.indexOf(mainFile))
               }
               className={cn(
-                "flex items-center gap-1.5 rounded px-2.5 py-1 text-[10px] font-medium transition-colors",
+                "flex items-center gap-1.5 rounded px-2.5 py-1 text-sm font-medium transition-colors",
                 selectedFile === mainFile
                   ? "bg-primary/15 text-primary ring-1 ring-primary/30"
                   : "bg-muted text-muted-foreground hover:text-foreground"
@@ -227,7 +238,7 @@ export function ExportPage() {
             >
               <Code2 className="h-3 w-3" />
               {mainFile.filename}
-              <span className="rounded bg-primary/10 px-1 text-[8px] text-primary">
+              <span className="rounded bg-primary/10 px-1 text-[10px] text-primary">
                 EA
               </span>
             </button>
@@ -240,7 +251,7 @@ export function ExportPage() {
                 key={file.filename}
                 onClick={() => setSelectedFileIdx(idx)}
                 className={cn(
-                  "flex items-center gap-1.5 rounded px-2.5 py-1 text-[10px] font-medium transition-colors",
+                  "flex items-center gap-1.5 rounded px-2.5 py-1 text-sm font-medium transition-colors",
                   selectedFileIdx === idx
                     ? "bg-primary/15 text-primary ring-1 ring-primary/30"
                     : "bg-muted text-muted-foreground hover:text-foreground"
@@ -262,16 +273,16 @@ export function ExportPage() {
               {selectedFile
                 ? selectedFile.is_main
                   ? language === "mql5"
-                    ? "Expert Advisor"
-                    : "Strategy Script"
-                  : `Custom Indicator — ${selectedFile.filename.replace(".mq5", "")}`
+                    ? t("expertAdvisor")
+                    : t("strategyScript")
+                  : `${t("customIndicator")} — ${selectedFile.filename.replace(".mq5", "")}`
                 : language === "mql5"
-                  ? "Expert Advisor"
-                  : "Strategy Script"}
+                  ? t("expertAdvisor")
+                  : t("strategyScript")}
             </CardTitle>
             {selectedFile && (
-              <span className="text-[10px] text-muted-foreground">
-                {lineCount} lines
+              <span className="text-sm text-muted-foreground">
+                {lineCount} {t("lines")}
               </span>
             )}
           </div>
@@ -284,17 +295,17 @@ export function ExportPage() {
           ) : error ? (
             <div className="flex h-64 flex-col items-center justify-center gap-2 text-muted-foreground">
               <Code2 className="h-8 w-8 opacity-40" />
-              <p className="text-xs">{error}</p>
+              <p className="text-sm">{error}</p>
             </div>
           ) : selectedFile ? (
-            <pre className="h-full overflow-auto rounded-md border border-border/40 bg-zinc-950 p-4 text-[11px] leading-relaxed text-zinc-300">
+            <pre className="h-full overflow-auto rounded border border-border/40 bg-zinc-950 p-4 font-mono text-sm leading-relaxed text-zinc-300">
               <code>{selectedFile.code}</code>
             </pre>
           ) : (
             <div className="flex h-64 flex-col items-center justify-center gap-2 text-muted-foreground">
               <Code2 className="h-8 w-8 opacity-40" />
-              <p className="text-xs">
-                No code generated yet. Create a strategy with entry rules first.
+              <p className="text-sm">
+                {t("noCodeYet")}
               </p>
             </div>
           )}
@@ -305,60 +316,29 @@ export function ExportPage() {
       <Card>
         <CardContent className="py-3">
           {language === "mql5" ? (
-            <div className="space-y-1 text-[10px] text-muted-foreground">
+            <div className="space-y-1 text-sm text-muted-foreground">
               <p className="font-medium text-foreground/70">
-                MQL5 Notes:
+                {t("mql5Notes.title")}
               </p>
               <ul className="list-inside list-disc space-y-0.5 pl-1">
-                <li>
-                  All indicators use custom implementations matching the
-                  backtester engine exactly
-                </li>
-                <li>
-                  Place the BT_*.mq5 indicator files in your{" "}
-                  <code className="rounded bg-muted px-1">
-                    MQL5/Indicators/
-                  </code>{" "}
-                  folder
-                </li>
-                <li>
-                  Compile all indicator files and the EA in MetaEditor before
-                  using
-                </li>
-                <li>
-                  Adjust the Magic Number input to avoid conflicts with other
-                  EAs
-                </li>
-                <li>
-                  Test in Strategy Tester before deploying to a live account
-                </li>
+                <li>{t("mql5Notes.note1")}</li>
+                <li>{t("mql5Notes.note2")}</li>
+                <li>{t("mql5Notes.note3")}</li>
+                <li>{t("mql5Notes.note4")}</li>
+                <li>{t("mql5Notes.note5")}</li>
               </ul>
             </div>
           ) : (
-            <div className="space-y-1 text-[10px] text-muted-foreground">
+            <div className="space-y-1 text-sm text-muted-foreground">
               <p className="font-medium text-foreground/70">
-                Pine Script Notes:
+                {t("pineNotes.title")}
               </p>
               <ul className="list-inside list-disc space-y-0.5 pl-1">
-                <li>
-                  Copy the code to TradingView&apos;s Pine Editor and add to
-                  chart
-                </li>
-                <li>
-                  Commission and slippage are configured in the strategy()
-                  declaration
-                </li>
-                <li>
-                  Position sizing may need manual adjustment for your account
-                  size
-                </li>
-                <li>
-                  ADX uses ta.dmi() which may behave slightly differently
-                </li>
-                <li>
-                  Backtest results will differ due to platform differences in
-                  order execution
-                </li>
+                <li>{t("pineNotes.note1")}</li>
+                <li>{t("pineNotes.note2")}</li>
+                <li>{t("pineNotes.note3")}</li>
+                <li>{t("pineNotes.note4")}</li>
+                <li>{t("pineNotes.note5")}</li>
               </ul>
             </div>
           )}

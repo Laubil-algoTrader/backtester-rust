@@ -19,19 +19,19 @@ export function Header() {
   const selectedSymbol = symbols.find((s) => s.id === selectedSymbolId);
 
   return (
-    <header className="flex h-11 items-center justify-between border-b border-border/60 bg-card px-4">
+    <header className="flex h-10 items-center justify-between border-b border-border/30 bg-background px-4">
       <div className="flex items-center gap-3">
-        <h1 className="text-xs font-bold uppercase tracking-widest text-primary">
+        <h1 className="text-sm font-bold uppercase tracking-[0.2em] text-primary">
           Backtester
         </h1>
-        <span className="text-border">|</span>
-        <span className="text-[11px] uppercase tracking-wider text-muted-foreground">
+        <span className="text-muted-foreground/30">|</span>
+        <span className="text-sm uppercase tracking-wider text-muted-foreground">
           {sectionTitles[activeSection]}
         </span>
         {selectedSymbol && (
           <>
-            <span className="text-border">|</span>
-            <span className="rounded border border-primary/40 px-2 py-0.5 text-[11px] font-medium text-primary">
+            <span className="text-muted-foreground/30">|</span>
+            <span className="rounded border border-primary/20 bg-primary/5 px-2 py-0.5 text-sm font-semibold text-primary">
               {selectedSymbol.name}
             </span>
           </>

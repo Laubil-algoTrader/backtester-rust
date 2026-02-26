@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef } from "react";
+import { useTranslation } from "react-i18next";
 import { useAppStore } from "@/stores/useAppStore";
 import { runBacktest } from "@/lib/tauri";
 import type { ParameterRange, Strategy, BacktestConfig } from "@/lib/types";
@@ -6,8 +7,18 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { OptimizerPanel } from "./OptimizerPanel";
 import { ParameterRanges } from "./ParameterRanges";
 import { ResultsTable } from "./ResultsTable";
+import { ProGate } from "@/components/auth/ProGate";
 
 export function OptimizationPage() {
+  return (
+    <ProGate feature="optimization">
+      <OptimizationPageContent />
+    </ProGate>
+  );
+}
+
+function OptimizationPageContent() {
+  const { t } = useTranslation("optimization");
   const {
     optimizationResults,
     currentStrategy,
@@ -32,18 +43,21 @@ export function OptimizationPage() {
     leverage,
     backtestPrecision,
     optimizationOosPeriods,
+    optimizationParamRanges,
+    setOptimizationParamRanges,
   } = useAppStore();
 
   const [applyError, setApplyError] = useState<string | null>(null);
 
-  const [parameterRanges, setParameterRanges] = useState<ParameterRange[]>([]);
+  const [parameterRanges, setParameterRanges] = useState<ParameterRange[]>(optimizationParamRanges);
   // Keep a ref always in sync so handleApplyParams never has stale ranges
   const rangesRef = useRef<ParameterRange[]>(parameterRanges);
   rangesRef.current = parameterRanges;
 
   const handleRangesChange = useCallback((ranges: ParameterRange[]) => {
     setParameterRanges(ranges);
-  }, []);
+    setOptimizationParamRanges(ranges);
+  }, [setOptimizationParamRanges]);
 
   /** Apply optimization result params back into the current strategy, then auto-run backtest. */
   const handleApplyParams = useCallback(
@@ -97,7 +111,10 @@ export function OptimizationPage() {
 
           const side = range.operand_side === "right" ? "right_operand" : "left_operand";
           const operand = rules[idx][side];
-          if (operand.operand_type === "Indicator" && operand.indicator) {
+          if (range.param_name === "constant_value") {
+            // Constant (nivel) optimization
+            operand.constant_value = value;
+          } else if (operand.operand_type === "Indicator" && operand.indicator) {
             const isInt = ["period", "fast_period", "slow_period", "signal_period", "k_period", "d_period"].includes(range.param_name);
             (operand.indicator.params as Record<string, number>)[range.param_name] = isInt ? Math.round(value) : value;
           }
@@ -117,7 +134,7 @@ export function OptimizationPage() {
       // Auto-run backtest with applied params on the FULL date range (IS + OOS)
       if (!selectedSymbolId) return;
       setApplyError(null);
-      setLoading(true, "Running backtest with optimized params...");
+      setLoading(true, t("runningWithParams"));
       setBacktestResults(null);
 
       // Compute full date range: IS start → last OOS end (or IS end if no OOS)
@@ -182,16 +199,16 @@ export function OptimizationPage() {
   );
 
   return (
-    <div className="space-y-4">
-      <h2 className="text-xs font-semibold uppercase tracking-[0.15em] text-primary">Optimization</h2>
+    <div className="mx-auto max-w-[1400px] space-y-4">
+      <h2 className="text-2xl font-bold text-foreground">{t("title")}</h2>
 
-      {/* Configuration panel */}
+      {/* Configuration panel (actions bar + 2-column cards) */}
       <OptimizerPanel parameterRanges={parameterRanges} />
 
       {/* Parameter ranges selection */}
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-[11px] uppercase tracking-[0.15em]">Parameter Ranges</CardTitle>
+          <CardTitle className="text-sm">{t("parameterRanges")}</CardTitle>
         </CardHeader>
         <CardContent>
           <ParameterRanges onChange={handleRangesChange} />
@@ -200,34 +217,31 @@ export function OptimizationPage() {
 
       {/* Error from auto-backtest */}
       {applyError && (
-        <div className="rounded-md border border-destructive/50 bg-destructive/10 p-3">
-          <p className="text-xs text-destructive">{applyError}</p>
+        <div className="rounded border border-destructive/50 bg-destructive/10 p-3">
+          <p className="text-sm text-destructive">{applyError}</p>
         </div>
       )}
 
       {/* Results (only shown when there are results) */}
       {optimizationResults.length > 0 && (
-        <>
-          {/* Results table */}
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-[11px] uppercase tracking-[0.15em]">
-                Top Results ({optimizationResults.length})
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <ResultsTable
-                results={optimizationResults}
-                parameterRanges={parameterRanges}
-                onApply={handleApplyParams}
-                isMultiObjective={
-                  optimizationResults.length > 0 &&
-                  optimizationResults[0].composite_score !== optimizationResults[0].objective_value
-                }
-              />
-            </CardContent>
-          </Card>
-        </>
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-sm">
+              {t("topResults")} ({optimizationResults.length})
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <ResultsTable
+              results={optimizationResults}
+              parameterRanges={parameterRanges}
+              onApply={handleApplyParams}
+              isMultiObjective={
+                optimizationResults.length > 0 &&
+                optimizationResults[0].composite_score !== optimizationResults[0].objective_value
+              }
+            />
+          </CardContent>
+        </Card>
       )}
     </div>
   );

@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { useAppStore } from "@/stores/useAppStore";
 import { exportTradesCsv, exportReportHtml } from "@/lib/tauri";
 import { save } from "@tauri-apps/plugin-dialog";
@@ -13,6 +14,7 @@ import { MonthlyReturns } from "./MonthlyReturns";
 import { TradesList } from "./TradesList";
 
 export function BacktestPage() {
+  const { t } = useTranslation("backtest");
   const { backtestResults, initialCapital, equityMarkers } = useAppStore();
 
   const handleExportTrades = async () => {
@@ -38,14 +40,14 @@ export function BacktestPage() {
   };
 
   return (
-    <div className="space-y-4">
+    <div className="mx-auto max-w-[1400px] space-y-4">
       <BacktestPanel />
 
       {!backtestResults && (
         <div className="py-12 text-center">
           <BarChart3 className="mx-auto mb-3 h-10 w-10 text-muted-foreground/30" />
-          <p className="text-xs uppercase tracking-wider text-muted-foreground">
-            Configure and run a backtest to see results here.
+          <p className="text-sm text-muted-foreground">
+            {t("noResults")}
           </p>
         </div>
       )}
@@ -54,27 +56,25 @@ export function BacktestPage() {
         <>
           <Card>
             <CardHeader className="flex flex-row items-center justify-between pb-3">
-              <CardTitle className="text-[11px] uppercase tracking-[0.15em]">
-                Performance Metrics
-              </CardTitle>
+              <CardTitle>{t("performanceMetrics")}</CardTitle>
               <div className="flex gap-2">
                 <Button
                   variant="outline"
                   size="sm"
-                  className="h-7 text-[10px] uppercase tracking-wider"
+                  className="h-8 text-sm"
                   onClick={handleExportTrades}
                 >
-                  <Download className="mr-1 h-3 w-3" />
-                  Export Trades
+                  <Download className="mr-1.5 h-3.5 w-3.5" />
+                  {t("exportTrades")}
                 </Button>
                 <Button
                   variant="outline"
                   size="sm"
-                  className="h-7 text-[10px] uppercase tracking-wider"
+                  className="h-8 text-sm"
                   onClick={handleExportReport}
                 >
-                  <FileSpreadsheet className="mr-1 h-3 w-3" />
-                  Export Report
+                  <FileSpreadsheet className="mr-1.5 h-3.5 w-3.5" />
+                  {t("exportReport")}
                 </Button>
               </div>
             </CardHeader>
@@ -83,36 +83,30 @@ export function BacktestPage() {
             </CardContent>
           </Card>
 
-          {/* Equity + Drawdown stacked */}
           <Card>
             <CardHeader className="pb-2">
-              <CardTitle className="text-[11px] uppercase tracking-[0.15em]">
-                Equity Curve
-              </CardTitle>
+              <CardTitle>{t("equityCurve")}</CardTitle>
             </CardHeader>
             <CardContent className="pb-2">
               <EquityCurve data={backtestResults.equity_curve} initialCapital={initialCapital} markers={equityMarkers} />
             </CardContent>
             <CardHeader className="pb-2 pt-0">
-              <CardTitle className="text-[11px] uppercase tracking-[0.15em]">
-                Drawdown
-              </CardTitle>
+              <CardTitle>{t("drawdown")}</CardTitle>
             </CardHeader>
             <CardContent>
               <DrawdownChart data={backtestResults.drawdown_curve} />
             </CardContent>
           </Card>
 
-          {/* Returns + Trades in tabs */}
           <Card>
             <CardContent className="pt-6">
               <Tabs defaultValue="monthly">
                 <TabsList>
-                  <TabsTrigger value="monthly" className="text-[10px] uppercase tracking-wider">
-                    Monthly Performance (%)
+                  <TabsTrigger value="monthly">
+                    {t("monthlyPerformance")}
                   </TabsTrigger>
-                  <TabsTrigger value="trades" className="text-[10px] uppercase tracking-wider">
-                    Trades ({backtestResults.trades.length})
+                  <TabsTrigger value="trades">
+                    {t("trades")} ({backtestResults.trades.length})
                   </TabsTrigger>
                 </TabsList>
 

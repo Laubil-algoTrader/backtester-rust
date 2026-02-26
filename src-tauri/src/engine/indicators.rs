@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::errors::AppError;
 use crate::models::candle::Candle;
 use crate::models::strategy::{IndicatorConfig, IndicatorType};
@@ -11,6 +13,8 @@ pub struct IndicatorOutput {
     pub secondary: Option<Vec<f64>>,
     /// Tertiary output (e.g. MACD histogram, Bollinger lower).
     pub tertiary: Option<Vec<f64>>,
+    /// Extra named outputs for indicators with >3 outputs (e.g. Ichimoku, Pivots).
+    pub extra: Option<HashMap<String, Vec<f64>>>,
 }
 
 /// Compute an indicator from candle data based on its configuration.
@@ -30,6 +34,7 @@ pub fn compute_indicator(
     let high: Vec<f64> = candles.iter().map(|c| c.high).collect();
     let low: Vec<f64> = candles.iter().map(|c| c.low).collect();
     let volume: Vec<f64> = candles.iter().map(|c| c.volume).collect();
+    let open: Vec<f64> = candles.iter().map(|c| c.open).collect();
 
     match config.indicator_type {
         IndicatorType::SMA => {
@@ -39,6 +44,7 @@ pub fn compute_indicator(
                 primary: sma(&close, period),
                 secondary: None,
                 tertiary: None,
+                extra: None,
             })
         }
         IndicatorType::EMA => {
@@ -48,6 +54,7 @@ pub fn compute_indicator(
                 primary: ema(&close, period),
                 secondary: None,
                 tertiary: None,
+                extra: None,
             })
         }
         IndicatorType::RSI => {
@@ -57,6 +64,7 @@ pub fn compute_indicator(
                 primary: rsi(&close, period),
                 secondary: None,
                 tertiary: None,
+                extra: None,
             })
         }
         IndicatorType::MACD => {
@@ -78,6 +86,7 @@ pub fn compute_indicator(
                 primary: macd_line,
                 secondary: Some(signal_line),
                 tertiary: Some(histogram),
+                extra: None,
             })
         }
         IndicatorType::BollingerBands => {
@@ -89,6 +98,7 @@ pub fn compute_indicator(
                 primary: middle,
                 secondary: Some(upper),
                 tertiary: Some(lower),
+                extra: None,
             })
         }
         IndicatorType::ATR => {
@@ -98,6 +108,7 @@ pub fn compute_indicator(
                 primary: atr(&high, &low, &close, period),
                 secondary: None,
                 tertiary: None,
+                extra: None,
             })
         }
         IndicatorType::Stochastic => {
@@ -115,6 +126,7 @@ pub fn compute_indicator(
                 primary: k,
                 secondary: Some(d),
                 tertiary: None,
+                extra: None,
             })
         }
         IndicatorType::ADX => {
@@ -124,6 +136,7 @@ pub fn compute_indicator(
                 primary: adx(&high, &low, &close, period),
                 secondary: None,
                 tertiary: None,
+                extra: None,
             })
         }
         IndicatorType::CCI => {
@@ -133,6 +146,7 @@ pub fn compute_indicator(
                 primary: cci(&high, &low, &close, period),
                 secondary: None,
                 tertiary: None,
+                extra: None,
             })
         }
         IndicatorType::ROC => {
@@ -142,6 +156,7 @@ pub fn compute_indicator(
                 primary: roc(&close, period),
                 secondary: None,
                 tertiary: None,
+                extra: None,
             })
         }
         IndicatorType::WilliamsR => {
@@ -151,6 +166,7 @@ pub fn compute_indicator(
                 primary: williams_r(&high, &low, &close, period),
                 secondary: None,
                 tertiary: None,
+                extra: None,
             })
         }
         IndicatorType::ParabolicSAR => {
@@ -161,6 +177,7 @@ pub fn compute_indicator(
                 primary: parabolic_sar(&high, &low, af, max_af),
                 secondary: None,
                 tertiary: None,
+                extra: None,
             })
         }
         IndicatorType::VWAP => {
@@ -169,7 +186,147 @@ pub fn compute_indicator(
                 primary: vwap(&high, &low, &close, &volume, candles),
                 secondary: None,
                 tertiary: None,
+                extra: None,
             })
+        }
+        IndicatorType::Aroon => {
+            let period = require_period(&config.params)?;
+            check_data_len(len, period + 1)?;
+            let (up, down) = aroon(&high, &low, period);
+            Ok(IndicatorOutput { primary: up, secondary: Some(down), tertiary: None, extra: None })
+        }
+        IndicatorType::AwesomeOscillator => {
+            check_data_len(len, 34)?;
+            Ok(IndicatorOutput { primary: awesome_oscillator(&high, &low), secondary: None, tertiary: None, extra: None })
+        }
+        IndicatorType::BarRange => {
+            Ok(IndicatorOutput { primary: bar_range(&high, &low), secondary: None, tertiary: None, extra: None })
+        }
+        IndicatorType::BiggestRange => {
+            let period = require_period(&config.params)?;
+            check_data_len(len, period)?;
+            Ok(IndicatorOutput { primary: biggest_range(&high, &low, period), secondary: None, tertiary: None, extra: None })
+        }
+        IndicatorType::HighestInRange => {
+            let period = require_period(&config.params)?;
+            check_data_len(len, period)?;
+            Ok(IndicatorOutput { primary: highest_in_range(&high, period), secondary: None, tertiary: None, extra: None })
+        }
+        IndicatorType::LowestInRange => {
+            let period = require_period(&config.params)?;
+            check_data_len(len, period)?;
+            Ok(IndicatorOutput { primary: lowest_in_range(&low, period), secondary: None, tertiary: None, extra: None })
+        }
+        IndicatorType::SmallestRange => {
+            let period = require_period(&config.params)?;
+            check_data_len(len, period)?;
+            Ok(IndicatorOutput { primary: smallest_range(&high, &low, period), secondary: None, tertiary: None, extra: None })
+        }
+        IndicatorType::BearsPower => {
+            let period = require_period(&config.params)?;
+            check_data_len(len, period)?;
+            Ok(IndicatorOutput { primary: bears_power(&low, &close, period), secondary: None, tertiary: None, extra: None })
+        }
+        IndicatorType::BullsPower => {
+            let period = require_period(&config.params)?;
+            check_data_len(len, period)?;
+            Ok(IndicatorOutput { primary: bulls_power(&high, &close, period), secondary: None, tertiary: None, extra: None })
+        }
+        IndicatorType::DeMarker => {
+            let period = require_period(&config.params)?;
+            check_data_len(len, period + 1)?;
+            Ok(IndicatorOutput { primary: demarker(&high, &low, period), secondary: None, tertiary: None, extra: None })
+        }
+        IndicatorType::Fibonacci => {
+            let period = require_period(&config.params)?;
+            check_data_len(len, period)?;
+            let extra = fibonacci(&high, &low, period);
+            let primary = extra.get("level_500").cloned().unwrap_or_else(|| vec![f64::NAN; len]);
+            Ok(IndicatorOutput { primary, secondary: None, tertiary: None, extra: Some(extra) })
+        }
+        IndicatorType::Fractal => {
+            check_data_len(len, 5)?;
+            let (up, down) = fractal(&high, &low);
+            Ok(IndicatorOutput { primary: up, secondary: Some(down), tertiary: None, extra: None })
+        }
+        IndicatorType::GannHiLo => {
+            let period = require_period(&config.params)?;
+            check_data_len(len, period)?;
+            Ok(IndicatorOutput { primary: gann_hilo(&high, &low, &close, period), secondary: None, tertiary: None, extra: None })
+        }
+        IndicatorType::HeikenAshi => {
+            let (ha_close, ha_open) = heiken_ashi(&open, &high, &low, &close);
+            Ok(IndicatorOutput { primary: ha_close, secondary: Some(ha_open), tertiary: None, extra: None })
+        }
+        IndicatorType::HullMA => {
+            let period = require_period(&config.params)?;
+            check_data_len(len, period)?;
+            Ok(IndicatorOutput { primary: hull_ma(&close, period), secondary: None, tertiary: None, extra: None })
+        }
+        IndicatorType::Ichimoku => {
+            let fast = config.params.fast_period.unwrap_or(9);
+            let slow = config.params.slow_period.unwrap_or(26);
+            let senkou_b_period = config.params.signal_period.unwrap_or(52);
+            check_data_len(len, senkou_b_period + slow)?;
+            let extra = ichimoku(&high, &low, &close, fast, slow, senkou_b_period);
+            let primary = extra.get("tenkan").cloned().unwrap_or_else(|| vec![f64::NAN; len]);
+            Ok(IndicatorOutput { primary, secondary: None, tertiary: None, extra: Some(extra) })
+        }
+        IndicatorType::KeltnerChannel => {
+            let period = require_period(&config.params)?;
+            let mult = config.params.multiplier.unwrap_or(1.5);
+            check_data_len(len, period + 1)?;
+            let (upper, middle, lower) = keltner_channel(&high, &low, &close, period, mult);
+            Ok(IndicatorOutput { primary: middle, secondary: Some(upper), tertiary: Some(lower), extra: None })
+        }
+        IndicatorType::LaguerreRSI => {
+            let gamma = config.params.gamma.unwrap_or(0.8);
+            Ok(IndicatorOutput { primary: laguerre_rsi(&close, gamma), secondary: None, tertiary: None, extra: None })
+        }
+        IndicatorType::LinearRegression => {
+            let period = require_period(&config.params)?;
+            check_data_len(len, period)?;
+            Ok(IndicatorOutput { primary: linear_regression(&close, period), secondary: None, tertiary: None, extra: None })
+        }
+        IndicatorType::Momentum => {
+            let period = require_period(&config.params)?;
+            check_data_len(len, period + 1)?;
+            Ok(IndicatorOutput { primary: momentum(&close, period), secondary: None, tertiary: None, extra: None })
+        }
+        IndicatorType::SuperTrend => {
+            let period = require_period(&config.params)?;
+            let mult = config.params.multiplier.unwrap_or(3.0);
+            check_data_len(len, period + 1)?;
+            Ok(IndicatorOutput { primary: supertrend(&high, &low, &close, period, mult), secondary: None, tertiary: None, extra: None })
+        }
+        IndicatorType::TrueRange => {
+            Ok(IndicatorOutput { primary: true_range(&high, &low, &close), secondary: None, tertiary: None, extra: None })
+        }
+        IndicatorType::StdDev => {
+            let period = require_period(&config.params)?;
+            check_data_len(len, period)?;
+            Ok(IndicatorOutput { primary: std_dev(&close, period), secondary: None, tertiary: None, extra: None })
+        }
+        IndicatorType::Reflex => {
+            let period = require_period(&config.params)?;
+            check_data_len(len, period + 2)?;
+            Ok(IndicatorOutput { primary: reflex(&close, period), secondary: None, tertiary: None, extra: None })
+        }
+        IndicatorType::Pivots => {
+            let extra = pivots(candles);
+            let primary = extra.get("pp").cloned().unwrap_or_else(|| vec![f64::NAN; len]);
+            Ok(IndicatorOutput { primary, secondary: None, tertiary: None, extra: Some(extra) })
+        }
+        IndicatorType::UlcerIndex => {
+            let period = require_period(&config.params)?;
+            check_data_len(len, period)?;
+            Ok(IndicatorOutput { primary: ulcer_index(&close, period), secondary: None, tertiary: None, extra: None })
+        }
+        IndicatorType::Vortex => {
+            let period = require_period(&config.params)?;
+            check_data_len(len, period + 1)?;
+            let (vi_plus, vi_minus) = vortex(&high, &low, &close, period);
+            Ok(IndicatorOutput { primary: vi_plus, secondary: Some(vi_minus), tertiary: None, extra: None })
         }
     }
 }
@@ -704,6 +861,785 @@ pub fn vwap(
         };
     }
     result
+}
+
+// ── WMA (helper for Hull MA) ──
+
+/// Weighted Moving Average. First `period-1` values are NaN.
+fn wma(data: &[f64], period: usize) -> Vec<f64> {
+    let len = data.len();
+    let mut result = vec![f64::NAN; len];
+    if period == 0 || len < period {
+        return result;
+    }
+    let denom = (period * (period + 1)) as f64 / 2.0;
+    for i in (period - 1)..len {
+        let mut sum = 0.0;
+        let mut all_valid = true;
+        for j in 0..period {
+            let idx = i + 1 - period + j;
+            if data[idx].is_nan() {
+                all_valid = false;
+                break;
+            }
+            sum += data[idx] * (j + 1) as f64;
+        }
+        if all_valid {
+            result[i] = sum / denom;
+        }
+    }
+    result
+}
+
+// ── Aroon ──
+
+/// Aroon Up/Down oscillator. Returns (aroon_up, aroon_down).
+fn aroon(high: &[f64], low: &[f64], period: usize) -> (Vec<f64>, Vec<f64>) {
+    let len = high.len();
+    let mut up = vec![f64::NAN; len];
+    let mut down = vec![f64::NAN; len];
+    for i in period..len {
+        let start = i - period;
+        let mut max_idx = start;
+        let mut min_idx = start;
+        for j in start..=i {
+            if high[j] >= high[max_idx] {
+                max_idx = j;
+            }
+            if low[j] <= low[min_idx] {
+                min_idx = j;
+            }
+        }
+        up[i] = ((period as f64 - (i - max_idx) as f64) / period as f64) * 100.0;
+        down[i] = ((period as f64 - (i - min_idx) as f64) / period as f64) * 100.0;
+    }
+    (up, down)
+}
+
+// ── Awesome Oscillator ──
+
+/// Awesome Oscillator = SMA(midpoint, 5) - SMA(midpoint, 34).
+fn awesome_oscillator(high: &[f64], low: &[f64]) -> Vec<f64> {
+    let len = high.len();
+    let midpoint: Vec<f64> = (0..len).map(|i| (high[i] + low[i]) / 2.0).collect();
+    let sma5 = sma(&midpoint, 5);
+    let sma34 = sma(&midpoint, 34);
+    let mut result = vec![f64::NAN; len];
+    for i in 0..len {
+        if !sma5[i].is_nan() && !sma34[i].is_nan() {
+            result[i] = sma5[i] - sma34[i];
+        }
+    }
+    result
+}
+
+// ── BarRange ──
+
+/// Bar Range = High - Low for each bar.
+fn bar_range(high: &[f64], low: &[f64]) -> Vec<f64> {
+    high.iter().zip(low.iter()).map(|(h, l)| h - l).collect()
+}
+
+// ── BiggestRange ──
+
+/// Biggest bar range (H-L) over a rolling window of `period` bars.
+fn biggest_range(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
+    let len = high.len();
+    let mut result = vec![f64::NAN; len];
+    for i in (period - 1)..len {
+        let mut max_range = f64::NEG_INFINITY;
+        for j in (i + 1 - period)..=i {
+            max_range = max_range.max(high[j] - low[j]);
+        }
+        result[i] = max_range;
+    }
+    result
+}
+
+// ── HighestInRange ──
+
+/// Highest high over a rolling window of `period` bars.
+fn highest_in_range(high: &[f64], period: usize) -> Vec<f64> {
+    let len = high.len();
+    let mut result = vec![f64::NAN; len];
+    for i in (period - 1)..len {
+        let mut max_val = f64::NEG_INFINITY;
+        for j in (i + 1 - period)..=i {
+            max_val = max_val.max(high[j]);
+        }
+        result[i] = max_val;
+    }
+    result
+}
+
+// ── LowestInRange ──
+
+/// Lowest low over a rolling window of `period` bars.
+fn lowest_in_range(low: &[f64], period: usize) -> Vec<f64> {
+    let len = low.len();
+    let mut result = vec![f64::NAN; len];
+    for i in (period - 1)..len {
+        let mut min_val = f64::INFINITY;
+        for j in (i + 1 - period)..=i {
+            min_val = min_val.min(low[j]);
+        }
+        result[i] = min_val;
+    }
+    result
+}
+
+// ── SmallestRange ──
+
+/// Smallest bar range (H-L) over a rolling window of `period` bars.
+fn smallest_range(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
+    let len = high.len();
+    let mut result = vec![f64::NAN; len];
+    for i in (period - 1)..len {
+        let mut min_range = f64::INFINITY;
+        for j in (i + 1 - period)..=i {
+            min_range = min_range.min(high[j] - low[j]);
+        }
+        result[i] = min_range;
+    }
+    result
+}
+
+// ── Bears Power ──
+
+/// Bears Power = Low - EMA(Close, period).
+fn bears_power(low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
+    let ema_vals = ema(close, period);
+    low.iter()
+        .zip(ema_vals.iter())
+        .map(|(l, e)| if e.is_nan() { f64::NAN } else { l - e })
+        .collect()
+}
+
+// ── Bulls Power ──
+
+/// Bulls Power = High - EMA(Close, period).
+fn bulls_power(high: &[f64], close: &[f64], period: usize) -> Vec<f64> {
+    let ema_vals = ema(close, period);
+    high.iter()
+        .zip(ema_vals.iter())
+        .map(|(h, e)| if e.is_nan() { f64::NAN } else { h - e })
+        .collect()
+}
+
+// ── DeMarker ──
+
+/// DeMarker oscillator (0..1 range).
+fn demarker(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
+    let len = high.len();
+    let mut de_max = vec![f64::NAN; len];
+    let mut de_min = vec![f64::NAN; len];
+
+    for i in 1..len {
+        de_max[i] = (high[i] - high[i - 1]).max(0.0);
+        de_min[i] = (low[i - 1] - low[i]).max(0.0);
+    }
+
+    let sma_max = sma_on_slice(&de_max, period);
+    let sma_min = sma_on_slice(&de_min, period);
+
+    let mut result = vec![f64::NAN; len];
+    for i in 0..len {
+        if !sma_max[i].is_nan() && !sma_min[i].is_nan() {
+            let total = sma_max[i] + sma_min[i];
+            result[i] = if total == 0.0 { 0.5 } else { sma_max[i] / total };
+        }
+    }
+    result
+}
+
+// ── Fibonacci Retracement ──
+
+/// Rolling Fibonacci retracement levels from HH/LL over `period` bars.
+/// Returns extra map with keys: level_236, level_382, level_500, level_618, level_786.
+fn fibonacci(high: &[f64], low: &[f64], period: usize) -> HashMap<String, Vec<f64>> {
+    let len = high.len();
+    let mut level_236 = vec![f64::NAN; len];
+    let mut level_382 = vec![f64::NAN; len];
+    let mut level_500 = vec![f64::NAN; len];
+    let mut level_618 = vec![f64::NAN; len];
+    let mut level_786 = vec![f64::NAN; len];
+
+    for i in (period - 1)..len {
+        let mut hh = f64::NEG_INFINITY;
+        let mut ll = f64::INFINITY;
+        for j in (i + 1 - period)..=i {
+            hh = hh.max(high[j]);
+            ll = ll.min(low[j]);
+        }
+        let range = hh - ll;
+        level_236[i] = hh - range * 0.236;
+        level_382[i] = hh - range * 0.382;
+        level_500[i] = hh - range * 0.500;
+        level_618[i] = hh - range * 0.618;
+        level_786[i] = hh - range * 0.786;
+    }
+
+    let mut map = HashMap::new();
+    map.insert("level_236".to_string(), level_236);
+    map.insert("level_382".to_string(), level_382);
+    map.insert("level_500".to_string(), level_500);
+    map.insert("level_618".to_string(), level_618);
+    map.insert("level_786".to_string(), level_786);
+    map
+}
+
+// ── Fractal ──
+
+/// Williams 5-bar fractal. Returns (fractal_up, fractal_down).
+/// Values are the price level of the fractal, or NaN if no fractal.
+/// Confirmed 2 bars after the peak/trough.
+fn fractal(high: &[f64], low: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    let len = high.len();
+    let mut up = vec![f64::NAN; len];
+    let mut down = vec![f64::NAN; len];
+
+    for i in 4..len {
+        let mid = i - 2;
+        if high[mid] > high[mid - 2]
+            && high[mid] > high[mid - 1]
+            && high[mid] > high[mid + 1]
+            && high[mid] > high[mid + 2]
+        {
+            up[i] = high[mid];
+        }
+        if low[mid] < low[mid - 2]
+            && low[mid] < low[mid - 1]
+            && low[mid] < low[mid + 1]
+            && low[mid] < low[mid + 2]
+        {
+            down[i] = low[mid];
+        }
+    }
+
+    (up, down)
+}
+
+// ── Gann HiLo Activator ──
+
+/// Gann HiLo Activator. Outputs SMA(low) when bullish, SMA(high) when bearish.
+fn gann_hilo(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
+    let sma_h = sma(high, period);
+    let sma_l = sma(low, period);
+    let len = high.len();
+    let mut result = vec![f64::NAN; len];
+    let mut is_bullish = true;
+
+    for i in (period - 1)..len {
+        if sma_h[i].is_nan() || sma_l[i].is_nan() {
+            continue;
+        }
+        if close[i] > sma_h[i] {
+            is_bullish = true;
+        } else if close[i] < sma_l[i] {
+            is_bullish = false;
+        }
+        result[i] = if is_bullish { sma_l[i] } else { sma_h[i] };
+    }
+    result
+}
+
+// ── Heiken Ashi ──
+
+/// Heiken Ashi candles. Returns (ha_close, ha_open).
+fn heiken_ashi(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+) -> (Vec<f64>, Vec<f64>) {
+    let len = open.len();
+    let mut ha_close = vec![f64::NAN; len];
+    let mut ha_open = vec![f64::NAN; len];
+    if len == 0 {
+        return (ha_close, ha_open);
+    }
+
+    ha_close[0] = (open[0] + high[0] + low[0] + close[0]) / 4.0;
+    ha_open[0] = (open[0] + close[0]) / 2.0;
+
+    for i in 1..len {
+        ha_close[i] = (open[i] + high[i] + low[i] + close[i]) / 4.0;
+        ha_open[i] = (ha_open[i - 1] + ha_close[i - 1]) / 2.0;
+    }
+
+    (ha_close, ha_open)
+}
+
+// ── Hull Moving Average ──
+
+/// Hull MA = WMA(2*WMA(n/2) - WMA(n), sqrt(n)).
+fn hull_ma(close: &[f64], period: usize) -> Vec<f64> {
+    let half = (period / 2).max(1);
+    let sqrt_p = ((period as f64).sqrt() as usize).max(1);
+
+    let wma_half = wma(close, half);
+    let wma_full = wma(close, period);
+
+    let len = close.len();
+    let mut diff = vec![f64::NAN; len];
+    for i in 0..len {
+        if !wma_half[i].is_nan() && !wma_full[i].is_nan() {
+            diff[i] = 2.0 * wma_half[i] - wma_full[i];
+        }
+    }
+
+    wma(&diff, sqrt_p)
+}
+
+// ── Ichimoku ──
+
+/// Ichimoku Kinko Hyo. Returns extra map with keys: tenkan, kijun, senkou_a, senkou_b, chikou.
+fn ichimoku(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    tenkan_period: usize,
+    kijun_period: usize,
+    senkou_b_period: usize,
+) -> HashMap<String, Vec<f64>> {
+    let len = high.len();
+
+    // Helper: midpoint of highest high and lowest low over a period
+    let midpoint = |period: usize| -> Vec<f64> {
+        let mut result = vec![f64::NAN; len];
+        if period == 0 {
+            return result;
+        }
+        for i in (period - 1)..len {
+            let mut hh = f64::NEG_INFINITY;
+            let mut ll = f64::INFINITY;
+            for j in (i + 1 - period)..=i {
+                hh = hh.max(high[j]);
+                ll = ll.min(low[j]);
+            }
+            result[i] = (hh + ll) / 2.0;
+        }
+        result
+    };
+
+    let tenkan = midpoint(tenkan_period);
+    let kijun = midpoint(kijun_period);
+
+    // Senkou Span A: projected forward kijun_period bars
+    // senkou_a[i] = (tenkan[i - kijun_period] + kijun[i - kijun_period]) / 2
+    let mut senkou_a = vec![f64::NAN; len];
+    for i in kijun_period..len {
+        let src = i - kijun_period;
+        if !tenkan[src].is_nan() && !kijun[src].is_nan() {
+            senkou_a[i] = (tenkan[src] + kijun[src]) / 2.0;
+        }
+    }
+
+    // Senkou Span B: projected forward kijun_period bars
+    let senkou_b_raw = midpoint(senkou_b_period);
+    let mut senkou_b = vec![f64::NAN; len];
+    for i in kijun_period..len {
+        let src = i - kijun_period;
+        if !senkou_b_raw[src].is_nan() {
+            senkou_b[i] = senkou_b_raw[src];
+        }
+    }
+
+    // Chikou = close (no look-ahead for backtesting)
+    let chikou = close.to_vec();
+
+    let mut map = HashMap::new();
+    map.insert("tenkan".to_string(), tenkan);
+    map.insert("kijun".to_string(), kijun);
+    map.insert("senkou_a".to_string(), senkou_a);
+    map.insert("senkou_b".to_string(), senkou_b);
+    map.insert("chikou".to_string(), chikou);
+    map
+}
+
+// ── Keltner Channel ──
+
+/// Keltner Channel: returns (upper, middle, lower).
+fn keltner_channel(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    multiplier: f64,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let middle = ema(close, period);
+    let atr_vals = atr(high, low, close, period);
+    let len = close.len();
+    let mut upper = vec![f64::NAN; len];
+    let mut lower = vec![f64::NAN; len];
+
+    for i in 0..len {
+        if !middle[i].is_nan() && !atr_vals[i].is_nan() {
+            upper[i] = middle[i] + multiplier * atr_vals[i];
+            lower[i] = middle[i] - multiplier * atr_vals[i];
+        }
+    }
+
+    (upper, middle, lower)
+}
+
+// ── Laguerre RSI ──
+
+/// Laguerre RSI (0..1 range). Uses gamma smoothing parameter.
+fn laguerre_rsi(close: &[f64], gamma: f64) -> Vec<f64> {
+    let len = close.len();
+    let mut result = vec![f64::NAN; len];
+    if len == 0 {
+        return result;
+    }
+
+    let mut l0 = 0.0f64;
+    let mut l1 = 0.0f64;
+    let mut l2 = 0.0f64;
+    let mut l3 = 0.0f64;
+
+    for i in 0..len {
+        let prev_l0 = l0;
+        let prev_l1 = l1;
+        let prev_l2 = l2;
+
+        l0 = (1.0 - gamma) * close[i] + gamma * prev_l0;
+        l1 = -gamma * l0 + prev_l0 + gamma * prev_l1;
+        l2 = -gamma * l1 + prev_l1 + gamma * prev_l2;
+        l3 = -gamma * l2 + prev_l2 + gamma * l3;
+
+        let mut cu = 0.0;
+        let mut cd = 0.0;
+
+        if l0 >= l1 { cu += l0 - l1; } else { cd += l1 - l0; }
+        if l1 >= l2 { cu += l1 - l2; } else { cd += l2 - l1; }
+        if l2 >= l3 { cu += l2 - l3; } else { cd += l3 - l2; }
+
+        let total = cu + cd;
+        result[i] = if total != 0.0 { cu / total } else { 0.0 };
+    }
+    result
+}
+
+// ── Linear Regression ──
+
+/// Linear Regression fitted value at last bar of rolling window.
+fn linear_regression(close: &[f64], period: usize) -> Vec<f64> {
+    let len = close.len();
+    let mut result = vec![f64::NAN; len];
+
+    for i in (period - 1)..len {
+        let window = &close[i + 1 - period..=i];
+        let n = period as f64;
+        let mut sum_x = 0.0;
+        let mut sum_y = 0.0;
+        let mut sum_xy = 0.0;
+        let mut sum_x2 = 0.0;
+
+        for (j, &y) in window.iter().enumerate() {
+            let x = j as f64;
+            sum_x += x;
+            sum_y += y;
+            sum_xy += x * y;
+            sum_x2 += x * x;
+        }
+
+        let denom = n * sum_x2 - sum_x * sum_x;
+        if denom != 0.0 {
+            let b = (n * sum_xy - sum_x * sum_y) / denom;
+            let a = (sum_y - b * sum_x) / n;
+            result[i] = a + b * (n - 1.0);
+        }
+    }
+    result
+}
+
+// ── Momentum ──
+
+/// Momentum = Close - Close[period].
+fn momentum(close: &[f64], period: usize) -> Vec<f64> {
+    let len = close.len();
+    let mut result = vec![f64::NAN; len];
+    for i in period..len {
+        result[i] = close[i] - close[i - period];
+    }
+    result
+}
+
+// ── SuperTrend ──
+
+/// SuperTrend indicator. Outputs the SuperTrend line (lower band when bullish, upper when bearish).
+fn supertrend(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    multiplier: f64,
+) -> Vec<f64> {
+    let len = high.len();
+    let atr_vals = atr(high, low, close, period);
+    let mut result = vec![f64::NAN; len];
+    let mut final_upper = vec![f64::NAN; len];
+    let mut final_lower = vec![f64::NAN; len];
+    let mut supertrend_is_upper = false;
+
+    let first_valid = period - 1;
+    if first_valid >= len {
+        return result;
+    }
+
+    for i in first_valid..len {
+        if atr_vals[i].is_nan() {
+            continue;
+        }
+
+        let hl2 = (high[i] + low[i]) / 2.0;
+        let basic_upper = hl2 + multiplier * atr_vals[i];
+        let basic_lower = hl2 - multiplier * atr_vals[i];
+
+        if i == first_valid {
+            final_upper[i] = basic_upper;
+            final_lower[i] = basic_lower;
+            supertrend_is_upper = close[i] <= basic_upper;
+            result[i] = if supertrend_is_upper {
+                final_upper[i]
+            } else {
+                final_lower[i]
+            };
+            continue;
+        }
+
+        final_upper[i] =
+            if basic_upper < final_upper[i - 1] || close[i - 1] > final_upper[i - 1] {
+                basic_upper
+            } else {
+                final_upper[i - 1]
+            };
+
+        final_lower[i] =
+            if basic_lower > final_lower[i - 1] || close[i - 1] < final_lower[i - 1] {
+                basic_lower
+            } else {
+                final_lower[i - 1]
+            };
+
+        if supertrend_is_upper {
+            if close[i] > final_upper[i] {
+                supertrend_is_upper = false;
+            }
+        } else if close[i] < final_lower[i] {
+            supertrend_is_upper = true;
+        }
+
+        result[i] = if supertrend_is_upper {
+            final_upper[i]
+        } else {
+            final_lower[i]
+        };
+    }
+    result
+}
+
+// ── True Range ──
+
+/// True Range = max(H-L, |H-prevC|, |L-prevC|). First bar = H-L.
+fn true_range(high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
+    let len = high.len();
+    let mut result = vec![f64::NAN; len];
+    if len == 0 {
+        return result;
+    }
+    result[0] = high[0] - low[0];
+    for i in 1..len {
+        let hl = high[i] - low[i];
+        let hc = (high[i] - close[i - 1]).abs();
+        let lc = (low[i] - close[i - 1]).abs();
+        result[i] = hl.max(hc).max(lc);
+    }
+    result
+}
+
+// ── Standard Deviation ──
+
+/// Rolling standard deviation of close over `period` bars.
+fn std_dev(close: &[f64], period: usize) -> Vec<f64> {
+    let len = close.len();
+    let mut result = vec![f64::NAN; len];
+    for i in (period - 1)..len {
+        let window = &close[i + 1 - period..=i];
+        let mean = window.iter().sum::<f64>() / period as f64;
+        let variance = window.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / period as f64;
+        result[i] = variance.sqrt();
+    }
+    result
+}
+
+// ── Reflex ──
+
+/// Ehlers Reflex indicator. Super Smoother + cycle measurement.
+fn reflex(close: &[f64], period: usize) -> Vec<f64> {
+    let len = close.len();
+    let mut result = vec![f64::NAN; len];
+    if len < 3 {
+        return result;
+    }
+
+    let pi = std::f64::consts::PI;
+    let sqrt2 = std::f64::consts::SQRT_2;
+    let a1 = (-sqrt2 * pi / period as f64).exp();
+    let coeff2 = 2.0 * a1 * (sqrt2 * pi / period as f64).cos();
+    let coeff3 = -(a1 * a1);
+    let coeff1 = 1.0 - coeff2 - coeff3;
+
+    // Super Smoother filter
+    let mut filt = vec![0.0f64; len];
+    filt[0] = close[0];
+    filt[1] = close[1];
+    for i in 2..len {
+        filt[i] = coeff1 * (close[i] + close[i - 1]) / 2.0 + coeff2 * filt[i - 1]
+            + coeff3 * filt[i - 2];
+    }
+
+    // Reflex computation
+    let mut ms = 0.0f64;
+    for i in period..len {
+        let slope = (filt[i - period] - filt[i]) / period as f64;
+        let mut sum = 0.0;
+        for j in 1..=period {
+            sum += (filt[i] + j as f64 * slope) - filt[i - j];
+        }
+        sum /= period as f64;
+        ms = 0.04 * sum * sum + 0.96 * ms;
+        result[i] = if ms > 0.0 { sum / ms.sqrt() } else { 0.0 };
+    }
+    result
+}
+
+// ── Pivots ──
+
+/// Classic pivot points from previous day's HLC.
+/// Returns extra map: pp, r1, r2, r3, s1, s2, s3.
+fn pivots(candles: &[Candle]) -> HashMap<String, Vec<f64>> {
+    let len = candles.len();
+    let mut pp = vec![f64::NAN; len];
+    let mut r1 = vec![f64::NAN; len];
+    let mut r2 = vec![f64::NAN; len];
+    let mut r3 = vec![f64::NAN; len];
+    let mut s1 = vec![f64::NAN; len];
+    let mut s2 = vec![f64::NAN; len];
+    let mut s3 = vec![f64::NAN; len];
+
+    let mut prev_day_high = f64::NAN;
+    let mut prev_day_low = f64::NAN;
+    let mut prev_day_close = f64::NAN;
+
+    let mut current_day_high = f64::NEG_INFINITY;
+    let mut current_day_low = f64::INFINITY;
+    let mut current_day_close = 0.0f64;
+    let mut prev_date = String::new();
+    let mut day_started = false;
+
+    for i in 0..len {
+        let current_date = if candles[i].datetime.len() >= 10 {
+            &candles[i].datetime[..10]
+        } else {
+            &candles[i].datetime
+        };
+
+        if current_date != prev_date {
+            if day_started {
+                prev_day_high = current_day_high;
+                prev_day_low = current_day_low;
+                prev_day_close = current_day_close;
+            }
+            current_day_high = candles[i].high;
+            current_day_low = candles[i].low;
+            current_day_close = candles[i].close;
+            prev_date = current_date.to_string();
+            day_started = true;
+        } else {
+            current_day_high = current_day_high.max(candles[i].high);
+            current_day_low = current_day_low.min(candles[i].low);
+            current_day_close = candles[i].close;
+        }
+
+        if !prev_day_high.is_nan() {
+            let pivot = (prev_day_high + prev_day_low + prev_day_close) / 3.0;
+            pp[i] = pivot;
+            r1[i] = 2.0 * pivot - prev_day_low;
+            s1[i] = 2.0 * pivot - prev_day_high;
+            r2[i] = pivot + (prev_day_high - prev_day_low);
+            s2[i] = pivot - (prev_day_high - prev_day_low);
+            r3[i] = prev_day_high + 2.0 * (pivot - prev_day_low);
+            s3[i] = prev_day_low - 2.0 * (prev_day_high - pivot);
+        }
+    }
+
+    let mut map = HashMap::new();
+    map.insert("pp".to_string(), pp);
+    map.insert("r1".to_string(), r1);
+    map.insert("r2".to_string(), r2);
+    map.insert("r3".to_string(), r3);
+    map.insert("s1".to_string(), s1);
+    map.insert("s2".to_string(), s2);
+    map.insert("s3".to_string(), s3);
+    map
+}
+
+// ── Ulcer Index ──
+
+/// Ulcer Index = RMS of percentage drawdown from rolling max.
+fn ulcer_index(close: &[f64], period: usize) -> Vec<f64> {
+    let len = close.len();
+    let mut result = vec![f64::NAN; len];
+
+    for i in (period - 1)..len {
+        let window = &close[i + 1 - period..=i];
+        let mut max_close = f64::NEG_INFINITY;
+        let mut sum_sq = 0.0;
+        for &val in window {
+            max_close = max_close.max(val);
+            let pct_dd = (val - max_close) / max_close * 100.0;
+            sum_sq += pct_dd * pct_dd;
+        }
+        result[i] = (sum_sq / period as f64).sqrt();
+    }
+    result
+}
+
+// ── Vortex ──
+
+/// Vortex indicator. Returns (VI+, VI-).
+fn vortex(high: &[f64], low: &[f64], close: &[f64], period: usize) -> (Vec<f64>, Vec<f64>) {
+    let len = high.len();
+    let mut vi_plus = vec![f64::NAN; len];
+    let mut vi_minus = vec![f64::NAN; len];
+
+    let mut vm_plus = vec![0.0f64; len];
+    let mut vm_minus = vec![0.0f64; len];
+    let mut tr = vec![0.0f64; len];
+
+    tr[0] = high[0] - low[0];
+    for i in 1..len {
+        vm_plus[i] = (high[i] - low[i - 1]).abs();
+        vm_minus[i] = (low[i] - high[i - 1]).abs();
+        let hl = high[i] - low[i];
+        let hc = (high[i] - close[i - 1]).abs();
+        let lc = (low[i] - close[i - 1]).abs();
+        tr[i] = hl.max(hc).max(lc);
+    }
+
+    for i in period..len {
+        let sum_vm_plus: f64 = vm_plus[(i + 1 - period)..=i].iter().sum();
+        let sum_vm_minus: f64 = vm_minus[(i + 1 - period)..=i].iter().sum();
+        let sum_tr: f64 = tr[(i + 1 - period)..=i].iter().sum();
+        if sum_tr != 0.0 {
+            vi_plus[i] = sum_vm_plus / sum_tr;
+            vi_minus[i] = sum_vm_minus / sum_tr;
+        }
+    }
+
+    (vi_plus, vi_minus)
 }
 
 // ══════════════════════════════════════════════════════════════

@@ -1,4 +1,5 @@
 import { useState, useMemo } from "react";
+import { useTranslation } from "react-i18next";
 import type { TradeResult } from "@/lib/types";
 import {
   Table,
@@ -16,25 +17,26 @@ const PAGE_SIZE = 20;
 type SortKey = keyof TradeResult;
 type SortDir = "asc" | "desc";
 
-const COLUMNS: { key: SortKey; label: string; align?: "right" }[] = [
-  { key: "direction", label: "DIR" },
-  { key: "entry_time", label: "ENTRY TIME" },
-  { key: "entry_price", label: "ENTRY", align: "right" },
-  { key: "exit_time", label: "EXIT TIME" },
-  { key: "exit_price", label: "EXIT", align: "right" },
-  { key: "lots", label: "LOTS", align: "right" },
-  { key: "pnl", label: "P&L", align: "right" },
-  { key: "pnl_pips", label: "PIPS", align: "right" },
-  { key: "commission", label: "COMM", align: "right" },
-  { key: "close_reason", label: "REASON" },
-  { key: "duration_time", label: "DURATION" },
-];
-
 interface TradesListProps {
   trades: TradeResult[];
 }
 
 export function TradesList({ trades }: TradesListProps) {
+  const { t } = useTranslation("backtest");
+
+  const COLUMNS: { key: SortKey; label: string; align?: "right" }[] = useMemo(() => [
+    { key: "direction", label: t("columns.dir") },
+    { key: "entry_time", label: t("columns.entryTime") },
+    { key: "entry_price", label: t("columns.entry"), align: "right" },
+    { key: "exit_time", label: t("columns.exitTime") },
+    { key: "exit_price", label: t("columns.exit"), align: "right" },
+    { key: "lots", label: t("columns.lots"), align: "right" },
+    { key: "pnl", label: t("columns.pnl"), align: "right" },
+    { key: "pnl_pips", label: t("columns.pips"), align: "right" },
+    { key: "commission", label: t("columns.comm"), align: "right" },
+    { key: "close_reason", label: t("columns.reason") },
+    { key: "duration_time", label: t("columns.duration") },
+  ], [t]);
   const [page, setPage] = useState(0);
   const [sortKey, setSortKey] = useState<SortKey>("entry_time");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
@@ -70,8 +72,8 @@ export function TradesList({ trades }: TradesListProps) {
 
   if (trades.length === 0) {
     return (
-      <p className="py-8 text-center text-xs uppercase tracking-wider text-muted-foreground">
-        No trades to display.
+      <p className="py-8 text-center text-sm text-muted-foreground">
+        {t("noTrades")}
       </p>
     );
   }
@@ -81,11 +83,11 @@ export function TradesList({ trades }: TradesListProps) {
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead className="w-10 text-[10px] tracking-widest">#</TableHead>
+            <TableHead className="w-10 text-xs">#</TableHead>
             {COLUMNS.map((col) => (
               <TableHead
                 key={col.key}
-                className={`cursor-pointer select-none whitespace-nowrap text-[10px] tracking-widest ${
+                className={`cursor-pointer select-none whitespace-nowrap text-xs ${
                   col.align === "right" ? "text-right" : ""
                 }`}
                 onClick={() => handleSort(col.key)}
@@ -110,10 +112,10 @@ export function TradesList({ trades }: TradesListProps) {
                 : "";
             return (
               <TableRow key={trade.id} className={rowClass}>
-                <TableCell className="text-[11px] tabular-nums text-muted-foreground">
+                <TableCell className="text-sm font-mono tabular-nums text-muted-foreground">
                   {page * PAGE_SIZE + idx + 1}
                 </TableCell>
-                <TableCell className="text-[11px]">
+                <TableCell className="text-sm font-mono">
                   <span
                     className={
                       trade.direction === "Long"
@@ -124,28 +126,28 @@ export function TradesList({ trades }: TradesListProps) {
                     {trade.direction}
                   </span>
                 </TableCell>
-                <TableCell className="text-[11px] tabular-nums">{trade.entry_time.slice(0, 16)}</TableCell>
-                <TableCell className="text-right text-[11px] tabular-nums">{trade.entry_price.toFixed(5)}</TableCell>
-                <TableCell className="text-[11px] tabular-nums">{trade.exit_time.slice(0, 16)}</TableCell>
-                <TableCell className="text-right text-[11px] tabular-nums">{trade.exit_price.toFixed(5)}</TableCell>
-                <TableCell className="text-right text-[11px] tabular-nums">{trade.lots.toFixed(2)}</TableCell>
+                <TableCell className="text-sm font-mono tabular-nums">{trade.entry_time.slice(0, 16)}</TableCell>
+                <TableCell className="text-right text-sm font-mono tabular-nums">{trade.entry_price.toFixed(5)}</TableCell>
+                <TableCell className="text-sm font-mono tabular-nums">{trade.exit_time.slice(0, 16)}</TableCell>
+                <TableCell className="text-right text-sm font-mono tabular-nums">{trade.exit_price.toFixed(5)}</TableCell>
+                <TableCell className="text-right text-sm font-mono tabular-nums">{trade.lots.toFixed(2)}</TableCell>
                 <TableCell
-                  className={`text-right text-[11px] font-medium tabular-nums ${
+                  className={`text-right text-sm font-mono font-medium tabular-nums ${
                     isWin ? "text-emerald-400" : trade.pnl < 0 ? "text-red-400" : ""
                   }`}
                 >
                   {isWin ? "+" : ""}${trade.pnl.toFixed(2)}
                 </TableCell>
                 <TableCell
-                  className={`text-right text-[11px] tabular-nums ${
+                  className={`text-right text-sm font-mono tabular-nums ${
                     isWin ? "text-emerald-400" : trade.pnl < 0 ? "text-red-400" : ""
                   }`}
                 >
                   {trade.pnl_pips.toFixed(1)}
                 </TableCell>
-                <TableCell className="text-right text-[11px] tabular-nums">${trade.commission.toFixed(2)}</TableCell>
-                <TableCell className="text-[11px]">{trade.close_reason}</TableCell>
-                <TableCell className="text-[11px] tabular-nums">{trade.duration_time}</TableCell>
+                <TableCell className="text-right text-sm font-mono tabular-nums">${trade.commission.toFixed(2)}</TableCell>
+                <TableCell className="text-sm font-mono">{trade.close_reason}</TableCell>
+                <TableCell className="text-sm font-mono tabular-nums">{trade.duration_time}</TableCell>
               </TableRow>
             );
           })}
@@ -154,8 +156,8 @@ export function TradesList({ trades }: TradesListProps) {
 
       {/* Pagination */}
       <div className="flex items-center justify-between">
-        <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
-          {trades.length} trade{trades.length !== 1 ? "s" : ""} total
+        <span className="text-sm text-muted-foreground">
+          {trades.length} {t("total")}
         </span>
         <div className="flex items-center gap-2">
           <Button
@@ -166,7 +168,7 @@ export function TradesList({ trades }: TradesListProps) {
           >
             <ChevronLeft className="h-4 w-4" />
           </Button>
-          <span className="text-[11px] tabular-nums text-muted-foreground">
+          <span className="text-sm font-mono tabular-nums text-muted-foreground">
             {page + 1} / {totalPages}
           </span>
           <Button

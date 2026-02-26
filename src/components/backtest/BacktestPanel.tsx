@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { listen } from "@tauri-apps/api/event";
 import { useAppStore } from "@/stores/useAppStore";
 import { runBacktest, cancelBacktest } from "@/lib/tauri";
@@ -41,6 +42,8 @@ const TIMEFRAME_LABELS: Record<string, string> = {
 };
 
 export function BacktestPanel() {
+  const { t } = useTranslation("backtest");
+  const { t: tc } = useTranslation("common");
   const {
     symbols,
     selectedSymbolId,
@@ -128,16 +131,16 @@ export function BacktestPanel() {
   });
 
   const validate = (): string | null => {
-    if (!selectedSymbolId) return "Select a symbol first.";
+    if (!selectedSymbolId) return t("selectSymbolFirst");
     if ((currentStrategy.long_entry_rules.length === 0 && currentStrategy.short_entry_rules.length === 0))
-      return "Add at least one entry rule.";
-    if (initialCapital <= 0) return "Capital must be greater than 0.";
+      return t("addEntryRule");
+    if (initialCapital <= 0) return t("capitalPositive");
     if (
       backtestStartDate &&
       backtestEndDate &&
       backtestStartDate >= backtestEndDate
     )
-      return "Start date must be before end date.";
+      return t("dateOrder");
     return null;
   };
 
@@ -149,7 +152,7 @@ export function BacktestPanel() {
     }
     if (!selectedSymbolId) return;
     setError(null);
-    setLoading(true, "Running backtest...");
+    setLoading(true, t("runningBacktest"));
     setBacktestResults(null);
     setEquityMarkers([]);
     setEta("");
@@ -204,8 +207,10 @@ export function BacktestPanel() {
       const results = await runBacktest(strategy, config);
       setBacktestResults(results);
     } catch (err) {
-      const msg = typeof err === "string" ? err : String(err);
-      if (!msg.includes("Cancelled")) {
+      const msg = typeof err === "string" ? err : err instanceof Error ? err.message : JSON.stringify(err);
+      if (msg.includes("Cancelled") || msg.includes("cancelled") || msg.includes("cancel")) {
+        setError(tc("stoppedByUser"));
+      } else {
         setError(msg);
       }
     } finally {
@@ -226,141 +231,141 @@ export function BacktestPanel() {
   };
 
   return (
-    <Card>
-      <CardHeader className="pb-3">
-        <CardTitle className="text-[11px] uppercase tracking-[0.15em]">Backtest Configuration</CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
-          {/* Symbol */}
-          <div className="space-y-1">
-            <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Symbol</label>
-            <Select
-              value={selectedSymbolId ?? ""}
-              onValueChange={setSelectedSymbolId}
-            >
-              <SelectTrigger className="h-8 text-xs">
-                <SelectValue placeholder="Select symbol" />
-              </SelectTrigger>
-              <SelectContent>
-                {symbols.map((s) => (
-                  <SelectItem key={s.id} value={s.id}>
-                    {s.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
+    <>
+      {/* Actions bar */}
+      <div className="flex items-center gap-3">
+        {!isLoading ? (
+          <Button size="sm" onClick={handleRun} disabled={!canRun}>
+            <Play className="mr-1.5 h-4 w-4" />
+            {t("runBacktest")}
+          </Button>
+        ) : (
+          <Button
+            size="sm"
+            variant="destructive"
+            onClick={handleCancel}
+          >
+            <Square className="mr-1.5 h-4 w-4" />
+            {tc("buttons.cancel")}
+          </Button>
+        )}
 
-          {/* Timeframe */}
-          <div className="space-y-1">
-            <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Timeframe</label>
-            <Select
-              value={selectedTimeframe}
-              onValueChange={(v) => setSelectedTimeframe(v as Timeframe)}
-            >
-              <SelectTrigger className="h-8 text-xs">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {availableTimeframes.map((tf) => (
-                  <SelectItem key={tf} value={tf}>
-                    {TIMEFRAME_LABELS[tf] ?? tf}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          {/* Precision */}
-          <div className="space-y-1">
-            <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Precision</label>
-            <Select
-              value={backtestPrecision}
-              onValueChange={(v) => setBacktestPrecision(v as BacktestPrecision)}
-            >
-              <SelectTrigger className="h-8 text-xs">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {availablePrecisions.map((p) => (
-                  <SelectItem key={p} value={p}>
-                    {PRECISION_LABELS[p]}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          {/* Start Date */}
-          <div className="space-y-1">
-            <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Start Date</label>
-            <DatePicker
-              value={backtestStartDate.slice(0, 10)}
-              onChange={(v) => setBacktestStartDate(v)}
-            />
-          </div>
-
-          {/* End Date */}
-          <div className="space-y-1">
-            <label className="text-[10px] uppercase tracking-wider text-muted-foreground">End Date</label>
-            <DatePicker
-              value={backtestEndDate.slice(0, 10)}
-              onChange={(v) => setBacktestEndDate(v)}
-            />
-          </div>
-
-          {/* Capital */}
-          <div className="space-y-1">
-            <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Capital ($)</label>
-            <Input
-              type="number"
-              className="h-8 text-xs"
-              min={0}
-              step="any"
-              value={initialCapital}
-              onChange={(e) => setInitialCapital(Number(e.target.value))}
-            />
-          </div>
-
-        </div>
-
-        {/* Actions */}
-        <div className="flex items-center gap-3">
-          {!isLoading ? (
-            <Button size="sm" onClick={handleRun} disabled={!canRun}>
-              <Play className="mr-1.5 h-4 w-4" />
-              Run Backtest
-            </Button>
-          ) : (
-            <Button
-              size="sm"
-              variant="destructive"
-              onClick={handleCancel}
-            >
-              <Square className="mr-1.5 h-4 w-4" />
-              Cancel
-            </Button>
-          )}
-
-          {isLoading && (
-            <div className="flex flex-1 items-center gap-2">
-              <Progress value={progressPercent} className="flex-1" />
-              <span className="text-xs text-muted-foreground">
-                {progressPercent}%{eta && <> | ETA: {eta}</>}
-              </span>
-            </div>
-          )}
-        </div>
-
-        {/* Error */}
-        {error && (
-          <div className="flex items-start gap-2 rounded-md border border-destructive/50 bg-destructive/10 p-3">
-            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
-            <p className="text-xs text-destructive">{error}</p>
+        {isLoading && (
+          <div className="flex flex-1 items-center gap-2">
+            <Progress value={progressPercent} className="flex-1" />
+            <span className="whitespace-nowrap text-sm text-muted-foreground">
+              {progressPercent}%{eta && <> | ETA: {eta}</>}
+            </span>
           </div>
         )}
-      </CardContent>
-    </Card>
+      </div>
+
+      {/* Error */}
+      {error && (
+        <div className="flex items-start gap-2 rounded border border-destructive/50 bg-destructive/10 p-3">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
+          <p className="text-sm text-destructive">{error}</p>
+        </div>
+      )}
+
+      {/* Configuration card */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm">{t("config")}</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {/* Row 1: Symbol + Timeframe + Precision */}
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
+            <div className="space-y-1">
+              <label className="text-sm text-muted-foreground">{t("symbol")}</label>
+              <Select
+                value={selectedSymbolId ?? ""}
+                onValueChange={setSelectedSymbolId}
+              >
+                <SelectTrigger className="h-9 text-sm">
+                  <SelectValue placeholder={t("selectSymbol")} />
+                </SelectTrigger>
+                <SelectContent>
+                  {symbols.map((s) => (
+                    <SelectItem key={s.id} value={s.id}>
+                      {s.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-sm text-muted-foreground">{t("timeframe")}</label>
+              <Select
+                value={selectedTimeframe}
+                onValueChange={(v) => setSelectedTimeframe(v as Timeframe)}
+              >
+                <SelectTrigger className="h-9 text-sm">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {availableTimeframes.map((tf) => (
+                    <SelectItem key={tf} value={tf}>
+                      {TIMEFRAME_LABELS[tf] ?? tf}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-sm text-muted-foreground">{t("precision")}</label>
+              <Select
+                value={backtestPrecision}
+                onValueChange={(v) => setBacktestPrecision(v as BacktestPrecision)}
+              >
+                <SelectTrigger className="h-9 text-sm">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {availablePrecisions.map((p) => (
+                    <SelectItem key={p} value={p}>
+                      {PRECISION_LABELS[p]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+
+          {/* Row 2: Start Date + End Date + Capital */}
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
+            <div className="space-y-1">
+              <label className="text-sm text-muted-foreground">{t("startDate")}</label>
+              <DatePicker
+                value={backtestStartDate.slice(0, 10)}
+                onChange={(v) => setBacktestStartDate(v)}
+              />
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-sm text-muted-foreground">{t("endDate")}</label>
+              <DatePicker
+                value={backtestEndDate.slice(0, 10)}
+                onChange={(v) => setBacktestEndDate(v)}
+              />
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-sm text-muted-foreground">{t("capital")}</label>
+              <Input
+                type="number"
+                className="h-9 text-sm"
+                min={0}
+                step="any"
+                value={initialCapital}
+                onChange={(e) => setInitialCapital(Number(e.target.value))}
+              />
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+    </>
   );
 }

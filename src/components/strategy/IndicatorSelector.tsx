@@ -41,7 +41,7 @@ export function IndicatorSelector({ value, onChange }: IndicatorSelectorProps) {
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       <Select value={value.indicator_type} onValueChange={handleTypeChange}>
-        <SelectTrigger className="h-8 w-[160px] text-xs">
+        <SelectTrigger className="h-8 w-[160px] text-sm">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
@@ -55,10 +55,10 @@ export function IndicatorSelector({ value, onChange }: IndicatorSelectorProps) {
 
       {paramFields.map((field) => (
         <div key={field.key} className="flex items-center gap-1">
-          <span className="text-xs text-muted-foreground">{field.label}:</span>
+          <span className="text-sm text-muted-foreground">{field.label}:</span>
           <Input
             type="number"
-            className="h-8 w-[60px] text-xs"
+            className="h-8 w-[60px] text-sm"
             min={field.min}
             max={field.max}
             step={field.step}
@@ -73,7 +73,7 @@ export function IndicatorSelector({ value, onChange }: IndicatorSelectorProps) {
           value={value.output_field ?? outputFields[0].value}
           onValueChange={handleOutputFieldChange}
         >
-          <SelectTrigger className="h-8 w-[100px] text-xs">
+          <SelectTrigger className="h-8 w-[100px] text-sm">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>

@@ -29,7 +29,7 @@ pub struct SavedCredentials {
     pub license_key: String,
 }
 
-const VALIDATION_API: &str = "https://lbquant-web.vercel.app/api/license/validate";
+const VALIDATION_API: &str = "https://lb-quant.com/api/license/validate";
 
 /// API response from the validation endpoint.
 #[derive(Debug, Deserialize)]
@@ -60,7 +60,7 @@ pub async fn validate_license(username: &str, license_key: &str) -> LicenseRespo
         return LicenseResponse {
             valid: false,
             tier: LicenseTier::Free,
-            message: Some("License key is required. Get one free at lbquant-web.vercel.app/register".to_string()),
+            message: Some("License key is required. Create a free account at lb-quant.com/register".to_string()),
         };
     }
 

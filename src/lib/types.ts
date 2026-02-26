@@ -175,7 +175,34 @@ export type IndicatorType =
   | "ROC"
   | "WilliamsR"
   | "ParabolicSAR"
-  | "VWAP";
+  | "VWAP"
+  | "Aroon"
+  | "AwesomeOscillator"
+  | "BarRange"
+  | "BiggestRange"
+  | "HighestInRange"
+  | "LowestInRange"
+  | "SmallestRange"
+  | "BearsPower"
+  | "BullsPower"
+  | "DeMarker"
+  | "Fibonacci"
+  | "Fractal"
+  | "GannHiLo"
+  | "HeikenAshi"
+  | "HullMA"
+  | "Ichimoku"
+  | "KeltnerChannel"
+  | "LaguerreRSI"
+  | "LinearRegression"
+  | "Momentum"
+  | "SuperTrend"
+  | "TrueRange"
+  | "StdDev"
+  | "Reflex"
+  | "Pivots"
+  | "UlcerIndex"
+  | "Vortex";
 
 export interface IndicatorParams {
   period?: number;
@@ -187,6 +214,8 @@ export interface IndicatorParams {
   d_period?: number;
   acceleration_factor?: number;
   maximum_factor?: number;
+  gamma?: number;
+  multiplier?: number;
 }
 
 export interface IndicatorConfig {
@@ -208,15 +237,38 @@ export type Comparator =
 
 export type LogicalOperator = "AND" | "OR";
 
-export type OperandType = "Indicator" | "Price" | "Constant";
+export type OperandType = "Indicator" | "Price" | "Constant" | "BarTime" | "CandlePattern";
 
-export type PriceField = "Open" | "High" | "Low" | "Close";
+export type PriceField = "Open" | "High" | "Low" | "Close" | "DailyOpen" | "DailyHigh" | "DailyLow" | "DailyClose";
+
+export type TimeField =
+  | "CurrentBar"
+  | "BarTimeValue"
+  | "BarHour"
+  | "BarMinute"
+  | "BarDayOfWeek"
+  | "CurrentTime"
+  | "CurrentHour"
+  | "CurrentMinute"
+  | "CurrentDayOfWeek"
+  | "CurrentMonth";
+
+export type CandlePatternType =
+  | "Doji"
+  | "Hammer"
+  | "ShootingStar"
+  | "BearishEngulfing"
+  | "BullishEngulfing"
+  | "DarkCloud"
+  | "PiercingLine";
 
 export interface Operand {
   operand_type: OperandType;
   indicator?: IndicatorConfig;
   price_field?: PriceField;
   constant_value?: number;
+  time_field?: TimeField;
+  candle_pattern?: CandlePatternType;
   offset?: number; // N bars back
 }
 
@@ -516,6 +568,7 @@ export interface OptimizationResult {
   stagnation_bars: number;
   ulcer_index_pct: number;
   oos_results: OosResult[];
+  equity_curve: EquityPoint[];
 }
 
 // ── Progress Events ──
@@ -561,3 +614,18 @@ export interface CodeGenerationResult {
 // ── App Section ──
 
 export type AppSection = "data" | "strategy" | "backtest" | "optimization" | "export";
+
+// ── License ──
+
+export type LicenseTier = "free" | "pro";
+
+export interface LicenseResponse {
+  valid: boolean;
+  tier: LicenseTier;
+  message?: string;
+}
+
+export interface SavedCredentials {
+  username: string;
+  license_key: string;
+}

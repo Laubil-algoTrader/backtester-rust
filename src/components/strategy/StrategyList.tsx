@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import type { Strategy } from "@/lib/types";
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent } from "@/components/ui/Card";
@@ -15,6 +16,9 @@ export function StrategyList({
   onLoad,
   onDeleted,
 }: StrategyListProps) {
+  const { t } = useTranslation("strategy");
+  const { t: tc } = useTranslation("common");
+
   const handleDelete = async (id: string) => {
     try {
       await deleteStrategy(id);
@@ -28,7 +32,7 @@ export function StrategyList({
     return (
       <div className="py-8 text-center text-sm text-muted-foreground">
         <FileText className="mx-auto mb-2 h-8 w-8 opacity-40" />
-        No saved strategies yet.
+        {t("noSavedStrategies")}
       </div>
     );
   }
@@ -40,8 +44,8 @@ export function StrategyList({
           <CardContent className="flex items-center gap-3 p-3">
             <div className="min-w-0 flex-1">
               <p className="truncate text-sm font-medium">{s.name}</p>
-              <p className="text-xs text-muted-foreground">
-                {s.long_entry_rules.length + s.short_entry_rules.length} entry / {s.long_exit_rules.length + s.short_exit_rules.length} exit rules
+              <p className="text-sm text-muted-foreground">
+                {t("entryExitRules", { entry: s.long_entry_rules.length + s.short_entry_rules.length, exit: s.long_exit_rules.length + s.short_exit_rules.length })}
                 {s.updated_at ? ` \u00b7 ${s.updated_at.slice(0, 10)}` : ""}
               </p>
             </div>
@@ -52,7 +56,7 @@ export function StrategyList({
               onClick={() => onLoad(s)}
             >
               <Upload className="mr-1 h-3.5 w-3.5" />
-              Load
+              {tc("buttons.load")}
             </Button>
             <Button
               variant="ghost"

@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import type { Rule } from "@/lib/types";
 import { Button } from "@/components/ui/Button";
 import { Plus } from "lucide-react";
@@ -11,6 +12,8 @@ interface RulesListProps {
 }
 
 export function RulesList({ title, rules, onChange }: RulesListProps) {
+  const { t } = useTranslation("strategy");
+
   const handleAdd = () => {
     const newRules = [...rules];
     // Set AND connector on the previous last rule
@@ -47,8 +50,8 @@ export function RulesList({ title, rules, onChange }: RulesListProps) {
       <h3 className="text-sm font-semibold">{title}</h3>
 
       {rules.length === 0 && (
-        <p className="text-xs text-muted-foreground">
-          No rules defined. Add a rule to get started.
+        <p className="text-sm text-muted-foreground">
+          {t("noRules")}
         </p>
       )}
 
@@ -64,7 +67,7 @@ export function RulesList({ title, rules, onChange }: RulesListProps) {
 
       <Button variant="outline" size="sm" onClick={handleAdd}>
         <Plus className="mr-1.5 h-4 w-4" />
-        Add Rule
+        {t("addRule")}
       </Button>
     </div>
   );

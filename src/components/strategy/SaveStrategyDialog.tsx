@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import {
   Dialog,
   DialogContent,
@@ -23,13 +24,15 @@ export function SaveStrategyDialog({
   currentName,
   onSave,
 }: SaveStrategyDialogProps) {
+  const { t } = useTranslation("strategy");
+  const { t: tc } = useTranslation("common");
   const [name, setName] = useState(currentName);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const handleSave = async () => {
     if (!name.trim()) {
-      setError("Name is required");
+      setError(t("nameRequired"));
       return;
     }
     setSaving(true);
@@ -48,14 +51,14 @@ export function SaveStrategyDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Save Strategy</DialogTitle>
+          <DialogTitle>{t("saveStrategy")}</DialogTitle>
           <DialogDescription>
-            Give your strategy a name to save it for later.
+            {t("saveDesc")}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
           <Input
-            placeholder="Strategy name"
+            placeholder={t("strategyName")}
             value={name}
             onChange={(e) => {
               setName(e.target.value);
@@ -66,15 +69,15 @@ export function SaveStrategyDialog({
             }}
           />
           {error && (
-            <p className="text-xs text-destructive">{error}</p>
+            <p className="text-sm text-destructive">{error}</p>
           )}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>
-            Cancel
+            {tc("buttons.cancel")}
           </Button>
           <Button onClick={handleSave} disabled={saving}>
-            {saving ? "Saving..." : "Save"}
+            {saving ? t("saving") : tc("buttons.save")}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -1,0 +1,74 @@
+{
+  "nav": {
+    "data": "Datos",
+    "strategy": "Estrategia",
+    "backtest": "Backtest",
+    "optimize": "Optimizar",
+    "export": "Exportar"
+  },
+  "header": {
+    "backtester": "Backtester",
+    "dataManagement": "Gestión de Datos",
+    "strategyBuilder": "Constructor de Estrategias",
+    "backtest": "Backtest",
+    "optimization": "Optimización"
+  },
+  "buttons": {
+    "save": "Guardar",
+    "cancel": "Cancelar",
+    "delete": "Eliminar",
+    "load": "Cargar",
+    "new": "Nuevo",
+    "add": "Agregar",
+    "close": "Cerrar",
+    "apply": "Aplicar",
+    "run": "Ejecutar",
+    "stop": "Detener"
+  },
+  "logout": "Cerrar sesión",
+  "pro": "PRO",
+  "months": {
+    "jan": "Ene",
+    "feb": "Feb",
+    "mar": "Mar",
+    "apr": "Abr",
+    "may": "May",
+    "jun": "Jun",
+    "jul": "Jul",
+    "aug": "Ago",
+    "sep": "Sep",
+    "oct": "Oct",
+    "nov": "Nov",
+    "dec": "Dic"
+  },
+  "monthsFull": {
+    "january": "Enero",
+    "february": "Febrero",
+    "march": "Marzo",
+    "april": "Abril",
+    "may": "Mayo",
+    "june": "Junio",
+    "july": "Julio",
+    "august": "Agosto",
+    "september": "Septiembre",
+    "october": "Octubre",
+    "november": "Noviembre",
+    "december": "Diciembre"
+  },
+  "days": {
+    "sunday": "Domingo",
+    "monday": "Lunes",
+    "tuesday": "Martes",
+    "wednesday": "Miércoles",
+    "thursday": "Jueves",
+    "friday": "Viernes",
+    "saturday": "Sábado"
+  },
+  "language": "Idioma",
+  "total": "total",
+  "year": "Año",
+  "ytd": "YTD",
+  "noData": "No hay datos suficientes para el desglose mensual.",
+  "stoppedByUser": "Detenido por el usuario",
+  "combinations": "combinaciones"
+}

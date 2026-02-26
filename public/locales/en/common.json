@@ -1,0 +1,74 @@
+{
+  "nav": {
+    "data": "Data",
+    "strategy": "Strategy",
+    "backtest": "Backtest",
+    "optimize": "Optimize",
+    "export": "Export"
+  },
+  "header": {
+    "backtester": "Backtester",
+    "dataManagement": "Data Management",
+    "strategyBuilder": "Strategy Builder",
+    "backtest": "Backtest",
+    "optimization": "Optimization"
+  },
+  "buttons": {
+    "save": "Save",
+    "cancel": "Cancel",
+    "delete": "Delete",
+    "load": "Load",
+    "new": "New",
+    "add": "Add",
+    "close": "Close",
+    "apply": "Apply",
+    "run": "Run",
+    "stop": "Stop"
+  },
+  "logout": "Logout",
+  "pro": "PRO",
+  "months": {
+    "jan": "Jan",
+    "feb": "Feb",
+    "mar": "Mar",
+    "apr": "Apr",
+    "may": "May",
+    "jun": "Jun",
+    "jul": "Jul",
+    "aug": "Aug",
+    "sep": "Sep",
+    "oct": "Oct",
+    "nov": "Nov",
+    "dec": "Dec"
+  },
+  "monthsFull": {
+    "january": "January",
+    "february": "February",
+    "march": "March",
+    "april": "April",
+    "may": "May",
+    "june": "June",
+    "july": "July",
+    "august": "August",
+    "september": "September",
+    "october": "October",
+    "november": "November",
+    "december": "December"
+  },
+  "days": {
+    "sunday": "Sunday",
+    "monday": "Monday",
+    "tuesday": "Tuesday",
+    "wednesday": "Wednesday",
+    "thursday": "Thursday",
+    "friday": "Friday",
+    "saturday": "Saturday"
+  },
+  "language": "Language",
+  "total": "total",
+  "year": "Year",
+  "ytd": "YTD",
+  "noData": "Not enough data for monthly breakdown.",
+  "stoppedByUser": "Stopped by user",
+  "combinations": "combinations"
+}
