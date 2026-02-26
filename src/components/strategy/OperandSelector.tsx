@@ -104,13 +104,11 @@ function ContextualConstantInput({
   context,
   value,
   onChange,
-  t,
   tc,
 }: {
   context: TimeContext;
   value: number;
   onChange: (v: number) => void;
-  t: (key: string) => string;
   tc: (key: string) => string;
 }) {
   if (context === "month") {
@@ -520,7 +518,6 @@ export function OperandSelector({
           context={timeContext}
           value={value.constant_value ?? 0}
           onChange={(v) => onChange({ ...value, constant_value: v })}
-          t={t}
           tc={tc}
         />
       ) : value.operand_type === "Constant" ? (
