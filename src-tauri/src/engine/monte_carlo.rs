@@ -70,8 +70,9 @@ fn empty_result() -> MonteCarloResult {
 ///   from the pool, allowing repeats. Every simulation produces a genuinely different
 ///   total return and equity path.
 /// - **`SkipTrades`**: Iterates the original trade sequence but randomly skips each
-///   trade with probability `config.skip_probability`. Models missed executions,
-///   technical failures, or selective filtering.
+///   trade with probability `config.skip_probability`. Models missed executions.
+/// - **`Combined`**: Even-indexed simulations use Resampling, odd-indexed use SkipTrades.
+///   All results are pooled into a single distribution for a comprehensive stress test.
 ///
 /// Returns percentile statistics for return and max-drawdown distributions, the ruin
 /// probability (equity < initial_capital at any point), and sampled equity curves for
@@ -123,11 +124,14 @@ pub fn run_monte_carlo(
         max_dd
     };
 
+    let skip_prob = config.skip_probability.clamp(0.0, 0.99);
+
     // ── Run simulations in parallel ───────────────────────────────────────────
     // Each result: (return_pct, max_dd_pct, ruined, equity_curve)
+    // We keep the index `i` so Combined can alternate methods evenly.
     let sim_results: Vec<Option<(f64, f64, bool, Vec<f64>)>> = (0..config.n_simulations)
         .into_par_iter()
-        .map(|_| {
+        .map(|i| {
             if cancel_flag.load(Ordering::Relaxed) {
                 return None;
             }
@@ -140,50 +144,55 @@ pub fn run_monte_carlo(
             let mut curve = Vec::with_capacity(n_trades + 1);
             curve.push(equity);
 
-            match config.method {
-                MonteCarloMethod::Resampling => {
-                    // Bootstrap WITH replacement: each of the N slots draws a random trade.
-                    for _ in 0..n_trades {
-                        let pnl = pnls[rng.gen_range(0..n_trades)];
-                        equity += pnl;
-                        curve.push(equity);
-                        if equity > peak {
-                            peak = equity;
-                        }
-                        if equity < initial_capital {
-                            ruined = true;
-                        }
-                        if peak > 0.0 {
-                            let dd = (peak - equity) / peak * 100.0;
-                            if dd > max_dd_pct {
-                                max_dd_pct = dd;
-                            }
+            // For Combined: even index → Resampling, odd index → SkipTrades.
+            let use_resampling = matches!(
+                config.method,
+                MonteCarloMethod::Resampling
+            ) || (matches!(config.method, MonteCarloMethod::Combined) && i % 2 == 0);
+
+            let use_skip = matches!(
+                config.method,
+                MonteCarloMethod::SkipTrades
+            ) || (matches!(config.method, MonteCarloMethod::Combined) && i % 2 != 0);
+
+            if use_resampling {
+                // Bootstrap WITH replacement: each slot draws a random trade.
+                for _ in 0..n_trades {
+                    let pnl = pnls[rng.gen_range(0..n_trades)];
+                    equity += pnl;
+                    curve.push(equity);
+                    if equity > peak {
+                        peak = equity;
+                    }
+                    if equity < initial_capital {
+                        ruined = true;
+                    }
+                    if peak > 0.0 {
+                        let dd = (peak - equity) / peak * 100.0;
+                        if dd > max_dd_pct {
+                            max_dd_pct = dd;
                         }
                     }
                 }
-
-                MonteCarloMethod::SkipTrades => {
-                    // Walk the original sequence; skip each trade with probability p.
-                    let skip_prob = config.skip_probability.clamp(0.0, 0.99);
-                    for &pnl in &pnls {
-                        if rng.gen::<f64>() < skip_prob {
-                            // Trade skipped — equity stays flat for this step.
-                            curve.push(equity);
-                            continue;
-                        }
-                        equity += pnl;
+            } else if use_skip {
+                // Walk the original sequence; skip each trade with probability p.
+                for &pnl in &pnls {
+                    if rng.gen::<f64>() < skip_prob {
                         curve.push(equity);
-                        if equity > peak {
-                            peak = equity;
-                        }
-                        if equity < initial_capital {
-                            ruined = true;
-                        }
-                        if peak > 0.0 {
-                            let dd = (peak - equity) / peak * 100.0;
-                            if dd > max_dd_pct {
-                                max_dd_pct = dd;
-                            }
+                        continue;
+                    }
+                    equity += pnl;
+                    curve.push(equity);
+                    if equity > peak {
+                        peak = equity;
+                    }
+                    if equity < initial_capital {
+                        ruined = true;
+                    }
+                    if peak > 0.0 {
+                        let dd = (peak - equity) / peak * 100.0;
+                        if dd > max_dd_pct {
+                            max_dd_pct = dd;
                         }
                     }
                 }

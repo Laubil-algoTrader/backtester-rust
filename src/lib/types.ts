@@ -622,7 +622,7 @@ export type AppSection = "data" | "strategy" | "backtest" | "optimization" | "ro
 
 // ── Monte Carlo ──
 
-export type MonteCarloMethod = "Resampling" | "SkipTrades";
+export type MonteCarloMethod = "Resampling" | "SkipTrades" | "Combined";
 
 export interface MonteCarloConfig {
   n_simulations: number;

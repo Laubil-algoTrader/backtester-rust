@@ -36,6 +36,10 @@ pub enum MonteCarloMethod {
     /// Randomly skip each trade with the given probability. Models missed executions,
     /// technical failures, or selective filtering — the trade sequence remains ordered.
     SkipTrades,
+    /// Combined stress test: alternates evenly between Resampling and SkipTrades simulations.
+    /// Half the simulations resample trades, half skip trades — unified into one distribution.
+    /// Produces a more conservative and comprehensive picture of strategy robustness.
+    Combined,
 }
 
 /// Configuration for a Monte Carlo simulation run.
