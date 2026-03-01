@@ -254,8 +254,10 @@ type MCTab = "manipulation" | "retest";
 const N_SIM_OPTIONS = [100, 250, 500, 1000, 2000];
 
 export function RobustezPage() {
-  const lastBacktest = useAppStore((s) => s.lastBacktest);
-  const selectedSymbol = useAppStore((s) => s.selectedSymbol);
+  const lastBacktest = useAppStore((s) => s.backtestResults);
+  const symbols = useAppStore((s) => s.symbols);
+  const selectedSymbolId = useAppStore((s) => s.selectedSymbolId);
+  const selectedSymbol = symbols.find((s) => s.id === selectedSymbolId) ?? null;
 
   // MC type tab
   const [mcTab, setMcTab] = useState<MCTab>("manipulation");
@@ -282,7 +284,7 @@ export function RobustezPage() {
   const canRun =
     !loading &&
     (useResampling || useSkipTrades) &&
-    lastBacktest !== null &&
+    !!lastBacktest &&
     lastBacktest.trades.length > 0;
 
   const initialCapital =
@@ -328,6 +330,7 @@ export function RobustezPage() {
   }
 
   const noData = !lastBacktest || lastBacktest.trades.length === 0;
+
 
   return (
     <div className="mx-auto max-w-[1400px] space-y-4 p-6">
