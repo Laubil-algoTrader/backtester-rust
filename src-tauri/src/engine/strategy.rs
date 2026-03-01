@@ -7,7 +7,7 @@ use crate::models::strategy::{
     PriceField, Rule, Strategy, TimeField,
 };
 
-use super::indicators::{compute_indicator, IndicatorOutput};
+use super::indicators::{CandleSlices, compute_indicator_with_slices, IndicatorOutput};
 
 /// Cache of pre-computed indicator values, keyed by `IndicatorConfig::cache_key()`.
 pub type IndicatorCache = HashMap<String, IndicatorOutput>;
@@ -279,6 +279,9 @@ pub fn strategy_uses_candle_patterns(strategy: &Strategy) -> bool {
 }
 
 /// Pre-compute all indicators referenced in a strategy's rules.
+///
+/// OHLCV vectors are extracted from `candles` once and reused for every indicator,
+/// avoiding O(N × K) redundant allocations when N candles and K indicators are present.
 /// Returns a cache that can be queried during rule evaluation.
 pub fn pre_compute_indicators(
     strategy: &Strategy,
@@ -287,14 +290,17 @@ pub fn pre_compute_indicators(
     let mut cache = IndicatorCache::new();
     let mut seen = std::collections::HashSet::new();
 
+    // Extract OHLCV once for all indicator computations.
+    let slices = CandleSlices::from_candles(candles);
+
     // Collect all indicator configs from all 4 rule lists
     let all_rules = strategy.long_entry_rules.iter()
         .chain(strategy.short_entry_rules.iter())
         .chain(strategy.long_exit_rules.iter())
         .chain(strategy.short_exit_rules.iter());
     for rule in all_rules {
-        collect_indicator_from_operand(&rule.left_operand, &mut seen, &mut cache, candles)?;
-        collect_indicator_from_operand(&rule.right_operand, &mut seen, &mut cache, candles)?;
+        collect_indicator_from_operand(&rule.left_operand, &mut seen, &mut cache, &slices, candles)?;
+        collect_indicator_from_operand(&rule.right_operand, &mut seen, &mut cache, &slices, candles)?;
     }
 
     Ok(cache)
@@ -304,13 +310,14 @@ fn collect_indicator_from_operand(
     operand: &Operand,
     seen: &mut std::collections::HashSet<String>,
     cache: &mut IndicatorCache,
+    slices: &CandleSlices,
     candles: &[Candle],
 ) -> Result<(), AppError> {
     if operand.operand_type == OperandType::Indicator {
         if let Some(ref config) = operand.indicator {
             let key = config.cache_key();
             if seen.insert(key.clone()) {
-                let output = compute_indicator(config, candles)?;
+                let output = compute_indicator_with_slices(config, slices, candles)?;
                 cache.insert(key, output);
             }
         }
@@ -390,7 +397,7 @@ fn evaluate_single_rule(
             if prev_left.is_nan() || prev_right.is_nan() {
                 return false;
             }
-            prev_left <= prev_right && left > right
+            prev_left < prev_right && left > right
         }
         Comparator::CrossBelow => {
             if bar_index == 0 {
@@ -401,7 +408,7 @@ fn evaluate_single_rule(
             if prev_left.is_nan() || prev_right.is_nan() {
                 return false;
             }
-            prev_left >= prev_right && left < right
+            prev_left > prev_right && left < right
         }
     }
 }

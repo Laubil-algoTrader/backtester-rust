@@ -543,10 +543,27 @@ pub async fn run_optimization(
             let no_cancel = std::sync::atomic::AtomicBool::new(false);
 
             for opt_result in results.iter_mut() {
-                // Reconstruct the strategy with this result's params
-                let param_values: Vec<f64> = ranges.iter()
-                    .map(|r| *opt_result.params.get(&r.display_name).unwrap_or(&0.0))
+                // Respect cancellation between OOS result evaluations
+                if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    info!("OOS evaluation cancelled by user");
+                    break;
+                }
+
+                // Reconstruct the strategy with this result's params.
+                // If a parameter name is missing, skip this result rather than
+                // silently applying 0.0 which would corrupt the OOS backtest.
+                let param_values_result: Result<Vec<f64>, _> = ranges.iter()
+                    .map(|r| opt_result.params.get(&r.display_name)
+                        .copied()
+                        .ok_or_else(|| format!("OOS: parameter '{}' missing from result", r.display_name)))
                     .collect();
+                let param_values = match param_values_result {
+                    Ok(vals) => vals,
+                    Err(msg) => {
+                        tracing::warn!("{}", msg);
+                        continue;
+                    }
+                };
                 let modified_strategy = optimizer::apply_params(&strategy, ranges, &param_values);
 
                 let mut oos_results = Vec::new();
@@ -582,7 +599,8 @@ pub async fn run_optimization(
                                 total_trades: bt.metrics.total_trades,
                             });
                         }
-                        Err(_) => {
+                        Err(e) => {
+                            tracing::warn!("OOS backtest failed for '{}': {}", label, e);
                             oos_results.push(OosResult {
                                 label: label.clone(),
                                 total_return_pct: 0.0,

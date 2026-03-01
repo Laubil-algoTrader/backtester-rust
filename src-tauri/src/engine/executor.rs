@@ -338,7 +338,7 @@ pub fn run_backtest(
             strategy,
             config,
         );
-        let _ = trade.pnl - trade.commission;
+        equity += trade.pnl - trade.commission;
         trades.push(trade);
     }
 

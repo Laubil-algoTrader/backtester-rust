@@ -17,24 +17,60 @@ pub struct IndicatorOutput {
     pub extra: Option<HashMap<String, Vec<f64>>>,
 }
 
-/// Compute an indicator from candle data based on its configuration.
-pub fn compute_indicator(
+/// Pre-extracted OHLCV slices for a candle series.
+///
+/// Extracting these vectors once (instead of once per indicator call) avoids
+/// O(N × K) allocations during optimization where N = candles and K = indicators.
+#[derive(Debug, Clone)]
+pub struct CandleSlices {
+    pub open: Vec<f64>,
+    pub high: Vec<f64>,
+    pub low: Vec<f64>,
+    pub close: Vec<f64>,
+    pub volume: Vec<f64>,
+}
+
+impl CandleSlices {
+    /// Extract all OHLCV vectors from a candle slice in a single pass.
+    pub fn from_candles(candles: &[Candle]) -> Self {
+        let len = candles.len();
+        let mut open = Vec::with_capacity(len);
+        let mut high = Vec::with_capacity(len);
+        let mut low = Vec::with_capacity(len);
+        let mut close = Vec::with_capacity(len);
+        let mut volume = Vec::with_capacity(len);
+        for c in candles {
+            open.push(c.open);
+            high.push(c.high);
+            low.push(c.low);
+            close.push(c.close);
+            volume.push(c.volume);
+        }
+        Self { open, high, low, close, volume }
+    }
+}
+
+/// Compute an indicator using pre-extracted OHLCV slices.
+///
+/// Prefer this over [`compute_indicator`] when computing multiple indicators for the
+/// same candle series (e.g. in `pre_compute_indicators`) to avoid redundant allocations.
+pub fn compute_indicator_with_slices(
     config: &IndicatorConfig,
+    slices: &CandleSlices,
     candles: &[Candle],
 ) -> Result<IndicatorOutput, AppError> {
-    let len = candles.len();
+    let len = slices.close.len();
     if len == 0 {
         return Err(AppError::InsufficientData {
             needed: 1,
             available: 0,
         });
     }
-
-    let close: Vec<f64> = candles.iter().map(|c| c.close).collect();
-    let high: Vec<f64> = candles.iter().map(|c| c.high).collect();
-    let low: Vec<f64> = candles.iter().map(|c| c.low).collect();
-    let volume: Vec<f64> = candles.iter().map(|c| c.volume).collect();
-    let open: Vec<f64> = candles.iter().map(|c| c.open).collect();
+    let close = &slices.close;
+    let high = &slices.high;
+    let low = &slices.low;
+    let volume = &slices.volume;
+    let open = &slices.open;
 
     match config.indicator_type {
         IndicatorType::SMA => {
@@ -329,6 +365,19 @@ pub fn compute_indicator(
             Ok(IndicatorOutput { primary: vi_plus, secondary: Some(vi_minus), tertiary: None, extra: None })
         }
     }
+}
+
+/// Compute an indicator from candle data, extracting OHLCV slices on the fly.
+///
+/// When computing many indicators for the same candle series, prefer
+/// [`compute_indicator_with_slices`] with a shared [`CandleSlices`] to avoid
+/// repeated allocations.
+pub fn compute_indicator(
+    config: &IndicatorConfig,
+    candles: &[Candle],
+) -> Result<IndicatorOutput, AppError> {
+    let slices = CandleSlices::from_candles(candles);
+    compute_indicator_with_slices(config, &slices, candles)
 }
 
 // ── Helpers ──

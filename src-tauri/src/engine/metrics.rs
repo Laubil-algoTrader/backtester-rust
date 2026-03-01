@@ -1,3 +1,5 @@
+use chrono::NaiveDate;
+
 use crate::models::config::Timeframe;
 use crate::models::result::{BacktestMetrics, EquityPoint};
 use crate::models::trade::TradeResult;
@@ -33,7 +35,7 @@ pub fn calculate_metrics(
     // ── Trade classification ──
     let winning: Vec<&TradeResult> = trades.iter().filter(|t| t.pnl > 0.0).collect();
     let losing: Vec<&TradeResult> = trades.iter().filter(|t| t.pnl < 0.0).collect();
-    let breakeven: Vec<&TradeResult> = trades.iter().filter(|t| t.pnl == 0.0).collect();
+    let breakeven: Vec<&TradeResult> = trades.iter().filter(|t| t.pnl.abs() < 1e-6).collect();
 
     let winning_trades = winning.len();
     let losing_trades = losing.len();
@@ -79,7 +81,7 @@ pub fn calculate_metrics(
     // Annualized return: estimate trading days from equity curve using actual timeframe
     let trading_bars = equity_curve.len().max(1);
     let bpd = bars_per_day(timeframe);
-    let annualized_return_pct = annualize_return(total_return_pct, trading_bars, bpd);
+    let annualized_return_pct = annualize_return(total_return_pct, trading_bars, bpd, equity_curve);
     let bars_per_month = bpd * 21.0; // ~21 trading days per month
     let monthly_return_avg_pct = if trading_bars > 0 {
         total_return_pct / (trading_bars as f64 / bars_per_month).max(1.0)
@@ -90,19 +92,59 @@ pub fn calculate_metrics(
     // ── Drawdown ──
     let (max_drawdown_pct, max_dd_duration_bars, avg_drawdown_pct) =
         calculate_drawdown_stats(equity_curve);
-    let recovery_factor = if max_drawdown_pct > 0.0 {
-        net_profit / (initial_capital * max_drawdown_pct / 100.0)
+    // Recovery Factor = Net Profit / Max Absolute Drawdown
+    // Computed directly from the equity curve to avoid dependence on initial_capital.
+    let max_dd_absolute = if !equity_curve.is_empty() {
+        let mut peak = equity_curve[0].equity;
+        let mut max_abs = 0.0f64;
+        for point in equity_curve {
+            if point.equity > peak {
+                peak = point.equity;
+            }
+            let abs_dd = peak - point.equity;
+            if abs_dd > max_abs {
+                max_abs = abs_dd;
+            }
+        }
+        max_abs
+    } else {
+        0.0
+    };
+    let recovery_factor = if max_dd_absolute > 0.0 {
+        net_profit / max_dd_absolute
     } else {
         0.0
     };
 
     // ── Risk-adjusted ──
-    // Annualization factor: number of trades we'd expect per year
-    // For per-trade returns, use 252 trading days as the annualization basis
-    let annualization_factor = 252.0;
-    let trade_returns: Vec<f64> = trades.iter().map(|t| t.pnl / initial_capital).collect();
-    let sharpe_ratio = calculate_sharpe(&trade_returns, annualization_factor);
-    let sortino_ratio = calculate_sortino(&trade_returns, annualization_factor);
+    // Prefer daily equity returns for Sharpe/Sortino — this gives a methodology-consistent
+    // result regardless of trade frequency. Fall back to per-trade returns only when the
+    // equity curve spans fewer than 2 calendar days (very short tests).
+    let (sharpe_ratio, sortino_ratio) =
+        if let Some((daily_returns, n_days)) = equity_to_daily_returns(equity_curve) {
+            // Trading days per year = observed days / calendar years.
+            // This adapts automatically: ~252 for stocks, ~260 for forex, ~365 for crypto.
+            let cal_years = calendar_years_from_equity(equity_curve).unwrap_or(1.0);
+            let trading_days_per_year = (n_days as f64 / cal_years).max(1.0);
+            (
+                calculate_sharpe(&daily_returns, trading_days_per_year),
+                calculate_sortino(&daily_returns, trading_days_per_year),
+            )
+        } else {
+            // Fallback: per-trade returns with frequency-adjusted annualization factor.
+            let bars_per_year = 252.0 * bpd;
+            let annualization_factor = if trading_bars > 0 && total_trades >= 2 {
+                (total_trades as f64 * bars_per_year / trading_bars as f64).max(1.0)
+            } else {
+                bars_per_year
+            };
+            let trade_returns: Vec<f64> =
+                trades.iter().map(|t| t.pnl / initial_capital).collect();
+            (
+                calculate_sharpe(&trade_returns, annualization_factor),
+                calculate_sortino(&trade_returns, annualization_factor),
+            )
+        };
     let calmar_ratio = if max_drawdown_pct > 0.0 {
         annualized_return_pct / max_drawdown_pct
     } else {
@@ -253,13 +295,44 @@ fn empty_metrics(initial_capital: f64) -> BacktestMetrics {
     }
 }
 
-/// Annualize a return percentage based on bars and bars-per-day for the timeframe.
-fn annualize_return(total_return_pct: f64, bars: usize, bpd: f64) -> f64 {
-    if bars == 0 {
-        return 0.0;
+/// Extract the number of calendar years spanned by an equity curve using actual timestamps.
+///
+/// Parses the first 10 characters of each endpoint timestamp as `YYYY-MM-DD`.
+/// Returns `None` if parsing fails or the span is zero.
+fn calendar_years_from_equity(equity_curve: &[EquityPoint]) -> Option<f64> {
+    if equity_curve.len() < 2 {
+        return None;
     }
-    let bars_per_year = 252.0 * bpd;
-    let years = bars as f64 / bars_per_year;
+    let first_ts = &equity_curve.first()?.timestamp;
+    let last_ts = &equity_curve.last()?.timestamp;
+    // Accept both "YYYY-MM-DD" and "YYYY-MM-DD HH:MM:SS" by slicing the date prefix.
+    let parse_date = |s: &str| -> Option<NaiveDate> {
+        let date_part = s.get(..10)?;
+        NaiveDate::parse_from_str(date_part, "%Y-%m-%d").ok()
+    };
+    let first_date = parse_date(first_ts)?;
+    let last_date = parse_date(last_ts)?;
+    let days = (last_date - first_date).num_days();
+    if days <= 0 {
+        return None;
+    }
+    Some(days as f64 / 365.25)
+}
+
+/// Annualize a return percentage.
+///
+/// Uses actual calendar days from the equity curve when available (preferred), falling back
+/// to bar-count estimation based on the timeframe's bars-per-day.
+fn annualize_return(total_return_pct: f64, bars: usize, bpd: f64, equity_curve: &[EquityPoint]) -> f64 {
+    let years = if let Some(cal_years) = calendar_years_from_equity(equity_curve) {
+        cal_years
+    } else {
+        if bars == 0 {
+            return 0.0;
+        }
+        let bars_per_year = 252.0 * bpd;
+        bars as f64 / bars_per_year
+    };
     if years <= 0.0 {
         return total_return_pct;
     }
@@ -330,6 +403,52 @@ fn calculate_sharpe(returns: &[f64], annualization_factor: f64) -> f64 {
     (mean / std_dev) * annualization_factor.sqrt()
 }
 
+/// Convert an equity curve to daily percentage returns and observed trading-day count.
+///
+/// Groups equity curve points by their calendar date (first 10 chars of timestamp,
+/// assumed to be `YYYY-MM-DD`). Takes the last equity value of each day and computes
+/// day-over-day returns. Returns `None` when fewer than 2 trading days are present.
+///
+/// The second element of the tuple is the count of unique trading days, which callers
+/// use to derive `trading_days_per_year` for the annualization factor.
+fn equity_to_daily_returns(equity_curve: &[EquityPoint]) -> Option<(Vec<f64>, usize)> {
+    use std::collections::BTreeMap;
+
+    if equity_curve.len() < 2 {
+        return None;
+    }
+
+    // Last equity value per calendar day (BTreeMap keeps keys in lexicographic/date order)
+    let mut by_day: BTreeMap<String, f64> = BTreeMap::new();
+    for pt in equity_curve {
+        let date: String = pt.timestamp.chars().take(10).collect();
+        by_day.insert(date, pt.equity);
+    }
+
+    let daily: Vec<f64> = by_day.values().copied().collect();
+    let n_days = daily.len();
+    if n_days < 2 {
+        return None;
+    }
+
+    let returns: Vec<f64> = daily
+        .windows(2)
+        .filter_map(|w| {
+            if w[0] > 0.0 {
+                Some((w[1] - w[0]) / w[0])
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if returns.len() < 2 {
+        return None;
+    }
+
+    Some((returns, n_days))
+}
+
 /// Sortino Ratio: mean(returns) / downside_deviation * sqrt(annualization_factor).
 fn calculate_sortino(returns: &[f64], annualization_factor: f64) -> f64 {
     let n = returns.len();
@@ -342,8 +461,12 @@ fn calculate_sortino(returns: &[f64], annualization_factor: f64) -> f64 {
     if neg_count == 0 {
         return 0.0; // No downside → can't compute meaningful Sortino
     }
+    // Downside deviation uses ALL n observations in the denominator (not just the negative ones).
+    // This is the standard Sortino formula — negative returns contribute their squared value,
+    // positive returns contribute 0. Dividing by neg_count instead of n would overstate the
+    // downside risk, making the ratio appear worse than it really is.
     let downside_sum: f64 = negative_returns.iter().map(|r| r.powi(2)).sum();
-    let downside_dev = (downside_sum / neg_count as f64).sqrt();
+    let downside_dev = (downside_sum / n as f64).sqrt();
     if downside_dev == 0.0 {
         return 0.0;
     }
