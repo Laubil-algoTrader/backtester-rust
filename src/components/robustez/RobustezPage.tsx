@@ -44,9 +44,20 @@ function riskColor(frac: number): string {
 
 const VB_W = 1000;
 const VB_H = 340;
-const PAD = { top: 16, right: 20, bottom: 32, left: 62 };
+const PAD = { top: 16, right: 24, bottom: 32, left: 66 };
 const IW = VB_W - PAD.left - PAD.right;
 const IH = VB_H - PAD.top - PAD.bottom;
+
+/**
+ * Map a normalised rank (0 = worst outcome, 1 = best outcome) to an HSL color.
+ * Spectrum: red → orange → yellow → lime → green  (mirrors SQX fan chart palette).
+ */
+function rankToColor(rank: number): string {
+  const hue = rank * 128;                           // 0 = red, 128 = green
+  const sat = 72 + 18 * Math.sin(Math.PI * rank);  // more vivid in the middle
+  const lgt = 46 + 10 * Math.sin(Math.PI * rank);  // slightly brighter mid-range
+  return `hsl(${hue.toFixed(0)},${sat.toFixed(0)}%,${lgt.toFixed(0)}%)`;
+}
 
 function EquityFanChart({
   simCurves,
@@ -59,20 +70,16 @@ function EquityFanChart({
 }) {
   if (simCurves.length === 0 && originalCurve.length === 0) return null;
 
+  // ── bounds ──────────────────────────────────────────────────────────────────
   let minV = initialCapital;
   let maxV = initialCapital;
-  for (const curve of simCurves) {
+  for (const curve of [...simCurves, originalCurve]) {
     for (const v of curve) {
       if (v < minV) minV = v;
       if (v > maxV) maxV = v;
     }
   }
-  for (const v of originalCurve) {
-    if (v < minV) minV = v;
-    if (v > maxV) maxV = v;
-  }
-  const range = maxV - minV || 1;
-  const padV = range * 0.05;
+  const padV = (maxV - minV || 1) * 0.06;
   const lo = minV - padV;
   const hi = maxV + padV;
   const span = hi - lo;
@@ -81,24 +88,34 @@ function EquityFanChart({
     PAD.left + (i / Math.max(total - 1, 1)) * IW;
   const toY = (v: number) =>
     PAD.top + IH - ((v - lo) / span) * IH;
-
   const makePath = (curve: number[]) =>
     curve
       .map((v, i) => `${i === 0 ? "M" : "L"}${toX(i, curve.length).toFixed(1)},${toY(v).toFixed(1)}`)
       .join(" ");
 
+  // ── Sort curves by final equity: worst drawn first (below), best last (on top) ──
+  const sorted = [...simCurves]
+    .map((c) => ({ curve: c, final: c[c.length - 1] ?? initialCapital }))
+    .sort((a, b) => a.final - b.final);
+
+  const worstFinal = sorted[0]?.final ?? initialCapital;
+  const bestFinal  = sorted[sorted.length - 1]?.final ?? initialCapital;
+  const finalSpan  = bestFinal - worstFinal || 1;
+
+  // With many curves each should be slightly transparent to reveal density.
+  const opacity = simCurves.length > 150 ? 0.30 : simCurves.length > 80 ? 0.38 : 0.48;
+
+  // ── Grid ────────────────────────────────────────────────────────────────────
   const yTicks = Array.from({ length: 5 }, (_, i) => lo + (span / 4) * i);
-  const xTickCount = 7;
   const numPts = Math.max(originalCurve.length, simCurves[0]?.length ?? 1);
-  const xTicks = Array.from({ length: xTickCount }, (_, i) =>
-    Math.round((i / (xTickCount - 1)) * (numPts - 1))
-  );
+  const xTicks = Array.from({ length: 7 }, (_, i) => Math.round((i / 6) * (numPts - 1)));
 
   const fmtM = (v: number) => {
     const abs = Math.abs(v);
-    if (abs >= 1_000_000) return `$${(v / 1e6).toFixed(1)}M`;
-    if (abs >= 1_000) return `$${(v / 1_000).toFixed(0)}k`;
-    return `$${v.toFixed(0)}`;
+    const s = v < 0 ? "-" : "";
+    if (abs >= 1_000_000) return `${s}$${(abs / 1e6).toFixed(1)}M`;
+    if (abs >= 1_000)     return `${s}$${(abs / 1_000).toFixed(0)}k`;
+    return `${s}$${abs.toFixed(0)}`;
   };
 
   return (
@@ -107,43 +124,61 @@ function EquityFanChart({
       preserveAspectRatio="none"
       style={{ width: "100%", height: "100%", display: "block" }}
     >
-      {/* Grid + Y labels */}
+      {/* Horizontal grid + Y axis labels */}
       {yTicks.map((v, i) => {
         const y = toY(v);
         return (
           <g key={i}>
             <line x1={PAD.left} y1={y} x2={VB_W - PAD.right} y2={y}
-              stroke="rgba(255,255,255,0.06)" strokeWidth="0.6" />
-            <text x={PAD.left - 5} y={y + 4} textAnchor="end" fontSize="10"
-              fill="rgba(255,255,255,0.35)" fontFamily="ui-monospace,monospace">
+              stroke="rgba(255,255,255,0.07)" strokeWidth="0.7" />
+            <text x={PAD.left - 6} y={y + 4} textAnchor="end" fontSize="10"
+              fill="rgba(255,255,255,0.42)" fontFamily="ui-monospace,monospace">
               {fmtM(v)}
             </text>
           </g>
         );
       })}
 
-      {/* X labels */}
+      {/* X axis labels */}
       {xTicks.map((idx) => (
-        <text key={idx} x={toX(idx, numPts)} y={VB_H - 6}
-          textAnchor="middle" fontSize="9" fill="rgba(255,255,255,0.28)"
+        <text key={idx} x={toX(idx, numPts)} y={VB_H - 5}
+          textAnchor="middle" fontSize="9" fill="rgba(255,255,255,0.30)"
           fontFamily="ui-monospace,monospace">
           {idx}
         </text>
       ))}
 
-      {/* Zero-line (initial capital) */}
-      <line x1={PAD.left} y1={toY(initialCapital)} x2={VB_W - PAD.right} y2={toY(initialCapital)}
-        stroke="rgba(255,255,255,0.18)" strokeWidth="0.8" strokeDasharray="6,4" />
+      {/* Initial-capital baseline */}
+      <line
+        x1={PAD.left} y1={toY(initialCapital)}
+        x2={VB_W - PAD.right} y2={toY(initialCapital)}
+        stroke="rgba(255,255,255,0.25)" strokeWidth="1" strokeDasharray="7,5"
+      />
 
-      {/* Sim curves */}
-      {simCurves.map((curve, i) => (
-        <path key={i} d={makePath(curve)} fill="none"
-          stroke="rgba(139,92,246,0.11)" strokeWidth="0.55" />
-      ))}
+      {/* ── Simulation curves: worst → best, colored by rank ── */}
+      {sorted.map(({ curve, final }, idx) => {
+        const rank = (final - worstFinal) / finalSpan;
+        return (
+          <path
+            key={idx}
+            d={makePath(curve)}
+            fill="none"
+            stroke={rankToColor(rank)}
+            strokeOpacity={opacity}
+            strokeWidth="0.8"
+          />
+        );
+      })}
 
-      {/* Original curve */}
-      <path d={makePath(originalCurve)} fill="none"
-        stroke="#60a5fa" strokeWidth="2.2" strokeLinejoin="round" />
+      {/* Original equity curve — bright blue, always on top */}
+      <path
+        d={makePath(originalCurve)}
+        fill="none"
+        stroke="#3b82f6"
+        strokeWidth="2.6"
+        strokeLinejoin="round"
+        strokeLinecap="round"
+      />
     </svg>
   );
 }
