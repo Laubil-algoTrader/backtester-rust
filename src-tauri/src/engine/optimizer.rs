@@ -105,7 +105,14 @@ pub fn apply_params(strategy: &Strategy, ranges: &[ParameterRange], values: &[f6
                     "long_exit" => s.long_exit_rules.get_mut(idx),
                     "short_exit" => s.short_exit_rules.get_mut(idx),
                     _ => {
-                        // Backward compat: "indicator" uses long_entry + long_exit
+                        // DEPRECATED: old "indicator" source concatenates long_entry + long_exit.
+                        // Use "long_entry", "short_entry", "long_exit", or "short_exit" instead.
+                        tracing::warn!(
+                            "Deprecated param_source '{}' in optimizer — use \
+                             'long_entry'/'short_entry'/'long_exit'/'short_exit'. \
+                             This fallback will be removed in a future version.",
+                            source
+                        );
                         let le_len = s.long_entry_rules.len();
                         if idx < le_len {
                             s.long_entry_rules.get_mut(idx)
@@ -291,15 +298,18 @@ fn build_result(
 // Grid Search
 // ══════════════════════════════════════════════════════════════
 
-/// Generate all value combinations from parameter ranges (cartesian product).
-fn generate_grid(ranges: &[ParameterRange]) -> Result<Vec<Vec<f64>>, AppError> {
+/// Validate and expand parameter ranges into per-range value lists.
+///
+/// Returns `(per_range, total)` without materialising the full cartesian product.
+/// The caller converts a flat index in `0..total` into a concrete parameter combination
+/// using [`index_to_params`].
+fn build_grid_ranges(ranges: &[ParameterRange]) -> Result<(Vec<Vec<f64>>, usize), AppError> {
     if ranges.is_empty() {
         return Err(AppError::OptimizationError(
             "No parameter ranges specified".into(),
         ));
     }
 
-    // Generate values for each range
     let mut per_range: Vec<Vec<f64>> = Vec::with_capacity(ranges.len());
     let mut total: usize = 1;
 
@@ -330,21 +340,26 @@ fn generate_grid(ranges: &[ParameterRange]) -> Result<Vec<Vec<f64>>, AppError> {
         });
     }
 
-    // Build cartesian product iteratively
-    let mut combos: Vec<Vec<f64>> = vec![vec![]];
-    for vals in &per_range {
-        let mut next = Vec::with_capacity(combos.len() * vals.len());
-        for combo in &combos {
-            for &v in vals {
-                let mut c = combo.clone();
-                c.push(v);
-                next.push(c);
-            }
-        }
-        combos = next;
-    }
+    Ok((per_range, total))
+}
 
-    Ok(combos)
+/// Convert a flat combination index into a concrete parameter vector.
+///
+/// Given `per_range[i]` = the list of valid values for parameter i, the mapping is:
+/// ```text
+/// values[i] = per_range[i][ (idx / stride[i]) % per_range[i].len() ]
+/// ```
+/// where `stride[i] = product of per_range[j].len() for j > i`.
+fn index_to_params(mut idx: usize, per_range: &[Vec<f64>]) -> Vec<f64> {
+    let n = per_range.len();
+    let mut values = vec![0.0f64; n];
+    // Traverse from last dimension to first (row-major order)
+    for i in (0..n).rev() {
+        let size = per_range[i].len();
+        values[i] = per_range[i][idx % size];
+        idx /= size;
+    }
+    values
 }
 
 /// Run Grid Search optimization.
@@ -362,23 +377,23 @@ pub fn run_grid_search(
     cancel_flag: &AtomicBool,
     progress_callback: impl Fn(u8, usize, usize, f64) + Send + Sync,
 ) -> Result<Vec<OptimizationResult>, AppError> {
-    let combinations = generate_grid(ranges)?;
-    let total = combinations.len();
+    let (per_range, total) = build_grid_ranges(ranges)?;
     info!("Grid search: {} combinations", total);
 
     let counter = AtomicUsize::new(0);
     let best_so_far = Arc::new(Mutex::new(f64::NEG_INFINITY));
     let start = Instant::now();
 
-    let results: Vec<Option<OptimizationResult>> = combinations
-        .par_iter()
-        .map(|values| {
+    let results: Vec<Option<OptimizationResult>> = (0..total)
+        .into_par_iter()
+        .map(|combo_idx| {
             // Check cancellation
             if cancel_flag.load(Ordering::Relaxed) {
                 return None;
             }
 
-            let modified = apply_params(strategy, ranges, values);
+            let values = index_to_params(combo_idx, &per_range);
+            let modified = apply_params(strategy, ranges, &values);
 
             // Run backtest with no-op progress callback
             let result = executor::run_backtest(
@@ -395,7 +410,7 @@ pub fn run_grid_search(
 
             match result {
                 Ok(bt) => {
-                    let opt_result = build_result(ranges, values, &bt.metrics, objectives, &bt.equity_curve);
+                    let opt_result = build_result(ranges, &values, &bt.metrics, objectives, &bt.equity_curve);
 
                     // Update best
                     {
@@ -757,7 +772,9 @@ fn compute_composite_scores(results: &mut [OptimizationResult], objectives: &[Ob
             let min = vals.iter().copied().fold(f64::INFINITY, f64::min);
             let max = vals.iter().copied().fold(f64::NEG_INFINITY, f64::max);
             let range = max - min;
-            let normalized = if range > 0.0 {
+            // Use f64::EPSILON as guard: very small ranges (caused by floating-point noise)
+            // would produce Inf/NaN when dividing. Treat them as "all results equal" → 0.5.
+            let normalized = if range > f64::EPSILON {
                 (vals[i] - min) / range
             } else {
                 0.5
@@ -800,11 +817,11 @@ mod tests {
                 param_source: "indicator".into(),
             },
         ];
-        let grid = generate_grid(&ranges).unwrap();
-        assert_eq!(grid.len(), 3); // 10, 20, 30
-        assert_eq!(grid[0], vec![10.0]);
-        assert_eq!(grid[1], vec![20.0]);
-        assert_eq!(grid[2], vec![30.0]);
+        let (per_range, total) = build_grid_ranges(&ranges).unwrap();
+        assert_eq!(total, 3); // 10, 20, 30
+        assert_eq!(index_to_params(0, &per_range), vec![10.0]);
+        assert_eq!(index_to_params(1, &per_range), vec![20.0]);
+        assert_eq!(index_to_params(2, &per_range), vec![30.0]);
     }
 
     #[test]
@@ -831,9 +848,9 @@ mod tests {
                 param_source: "indicator".into(),
             },
         ];
-        let grid = generate_grid(&ranges).unwrap();
+        let (_per_range, total) = build_grid_ranges(&ranges).unwrap();
         // 2 × 3 = 6 combinations
-        assert_eq!(grid.len(), 6);
+        assert_eq!(total, 6);
     }
 
     #[test]
@@ -860,7 +877,7 @@ mod tests {
                 param_source: "indicator".into(),
             },
         ];
-        let result = generate_grid(&ranges);
+        let result = build_grid_ranges(&ranges);
         assert!(result.is_err());
         match result.unwrap_err() {
             AppError::TooManyCombinations { count, limit } => {

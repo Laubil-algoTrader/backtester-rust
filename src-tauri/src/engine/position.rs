@@ -80,6 +80,14 @@ pub fn calculate_lots(
     };
 
     // Clamp to min_lot and round to min_lot increments
+    if raw <= 0.0 || raw.is_nan() {
+        tracing::warn!(
+            "Position sizing produced invalid raw lots ({:.6}); clamping to min_lot={}. \
+             Check SL distance and pip_value configuration.",
+            raw, instrument.min_lot
+        );
+        return instrument.min_lot;
+    }
     let lots = (raw / instrument.min_lot).floor() * instrument.min_lot;
     lots.max(instrument.min_lot)
 }
@@ -101,10 +109,34 @@ pub fn calculate_stop_loss(
         }
     };
 
-    match direction {
+    let sl_price = match direction {
         TradeDirection::Long | TradeDirection::Both => entry_price - distance,
         TradeDirection::Short => entry_price + distance,
+    };
+
+    // Sanity check: SL must be on the correct side of entry price
+    match direction {
+        TradeDirection::Long | TradeDirection::Both => {
+            if sl_price >= entry_price {
+                tracing::warn!(
+                    "Stop loss ({:.5}) is at or above entry price ({:.5}) for Long. \
+                     Check SL value/ATR configuration. The SL will likely never trigger.",
+                    sl_price, entry_price
+                );
+            }
+        }
+        TradeDirection::Short => {
+            if sl_price <= entry_price {
+                tracing::warn!(
+                    "Stop loss ({:.5}) is at or below entry price ({:.5}) for Short. \
+                     Check SL value/ATR configuration. The SL will likely never trigger.",
+                    sl_price, entry_price
+                );
+            }
+        }
     }
+
+    sl_price
 }
 
 /// Calculate take profit price.

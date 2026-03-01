@@ -581,3 +581,39 @@ Estas features están planeadas pero NO son parte de v1. Documentarlas aquí com
 7. Machine Learning integration
 8. Live trading (conexión a brokers via API)
 9. Multi-timeframe strategies (ej: señal en H4, entrada en M15)
+
+---
+
+## Análisis del Motor — Bugs Corregidos y Pendientes (2026-03)
+
+### Bugs corregidos en esta sesión
+| Archivo | Línea | Severidad | Fix aplicado |
+|---|---|---|---|
+| `engine/executor.rs` | 341 | CRÍTICA | `equity += trade.pnl - trade.commission` en cierre end-of-data |
+| `engine/metrics.rs` | 346 | CRÍTICA | Sortino: denominador cambiado de `neg_count` a `n` (total trades) |
+| `engine/metrics.rs` | 93-96 | CRÍTICA | Recovery Factor: usa drawdown absoluto real de la equity curve, no `initial_capital × pct` |
+| `engine/metrics.rs` | 36 | ALTA | Breakeven: `t.pnl == 0.0` → `t.pnl.abs() < 1e-6` |
+| `engine/metrics.rs` | 102 | ALTA | Factor anualización: `total_trades * bars_per_year / trading_bars` (adaptativo) |
+| `commands.rs` | 548 | ALTA | OOS: parámetro faltante → `warn!` + `continue` en vez de usar `0.0` silenciosamente |
+| `commands.rs` | 541 | MEDIA | Cancelación respetada entre cada iteración del loop OOS |
+| `engine/position.rs` | 84 | MEDIA | Lot sizing: `warn!` cuando `raw <= 0.0 \|\| NaN` |
+| `engine/position.rs` | 104-107 | MEDIA | SL: `warn!` cuando SL queda por encima de entry (Long) o por debajo (Short) |
+| `engine/optimizer.rs` | 760 | BAJA | Composite score: `range > 0.0` → `range > f64::EPSILON` para evitar Inf/NaN |
+
+### Limitaciones de realismo conocidas (features futuras)
+- **Factor de anualización**: Los 252 días base son correctos para equities, pero crypto debería usar 365. Actualmente, `bars_per_day()` asume 24h para todos los timeframes — para acciones (8h/día) o forex (23.5h/día) los retornos anualizados quedan levemente inflados.
+- **Gap risk en modo barra**: En modo barra, SL/TP siempre se ejecutan al precio exacto. Solo el modo tick simulando con Dukascopy respeta gaps reales.
+- **Sharpe sobre retornos por trade**: El estándar académico prefiere retornos sobre series de tiempo (daily equity returns). La implementación actual (per-trade returns × annualization_factor) es válida pero menos robusta para estrategias con frecuencia muy variable.
+- **Sin múltiples posiciones simultáneas**: Una posición a la vez (v1 deliberado).
+- **CrossAbove/CrossBelow usa `prev_left <= prev_right`**: Si ambos valores son iguales un período y luego uno sube, cuenta como cruce. La definición estricta usaría `<`.
+
+### Métricas adicionales a agregar en futuras fases
+- K-Ratio (consistencia de la equity curve: pendiente/ruido)
+- Omega Ratio (sin asumir distribución normal)
+- Tabla de retornos mensuales % (año × mes, colores verde/rojo)
+- Análisis de slippage total
+- Distribución de P&L por día de semana
+- Monte Carlo sobre los trades históricos (aleatorizar orden → distribución de outcomes)
+
+### Cache de indicadores en optimización (pendiente de implementar)
+El CLAUDE.md lo menciona como goal de performance pero NO está implementado aún. En cada combinación de Grid Search se recalculan todos los indicadores desde cero. Implementar `HashMap<(IndicatorKey, params_hash), Vec<f64>>` en el loop del optimizador puede dar 5-20x speedup.
