@@ -111,6 +111,8 @@ pub fn run() {
             commands::load_saved_license,
             commands::clear_license,
             commands::start_license_monitor,
+            commands::run_walk_forward,
+            commands::run_monte_carlo,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

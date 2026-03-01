@@ -1,4 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use polars::prelude::*;
 use tracing::info;
@@ -21,7 +22,8 @@ use super::position::{
     update_mae_mfe, update_trailing_stop,
     OpenPosition,
 };
-use super::strategy::{compute_candle_pattern_cache, compute_daily_ohlc, compute_time_cache, evaluate_rules, max_lookback, pre_compute_indicators, strategy_uses_candle_patterns, strategy_uses_time_fields};
+use super::strategy::{compute_candle_pattern_cache, compute_daily_ohlc, compute_time_cache, evaluate_rules, max_lookback, pre_compute_indicators, pre_compute_indicators_with_shared_cache, strategy_uses_candle_patterns, strategy_uses_time_fields};
+use super::strategy::IndicatorCache;
 
 // ══════════════════════════════════════════════════════════════
 // Sub-bar data types
@@ -45,6 +47,10 @@ pub enum SubBarData {
 // ══════════════════════════════════════════════════════════════
 
 /// Run a complete backtest.
+///
+/// When `shared_indicator_cache` is provided (optimizer use case), indicators that have
+/// already been computed by another rayon thread are reused instead of recalculated,
+/// giving a significant speedup for Grid Search and Genetic Algorithm runs.
 pub fn run_backtest(
     candles: &[Candle],
     sub_bars: &SubBarData,
@@ -54,6 +60,33 @@ pub fn run_backtest(
     cancel_flag: &AtomicBool,
     progress_callback: impl Fn(u8, usize, usize),
 ) -> Result<BacktestResults, AppError> {
+    run_backtest_inner(candles, sub_bars, strategy, config, instrument, cancel_flag, progress_callback, None)
+}
+
+/// Internal implementation allowing an optional shared indicator cache for optimization.
+pub fn run_backtest_with_cache(
+    candles: &[Candle],
+    sub_bars: &SubBarData,
+    strategy: &Strategy,
+    config: &BacktestConfig,
+    instrument: &InstrumentConfig,
+    cancel_flag: &AtomicBool,
+    progress_callback: impl Fn(u8, usize, usize),
+    shared_cache: Arc<Mutex<IndicatorCache>>,
+) -> Result<BacktestResults, AppError> {
+    run_backtest_inner(candles, sub_bars, strategy, config, instrument, cancel_flag, progress_callback, Some(shared_cache))
+}
+
+fn run_backtest_inner(
+    candles: &[Candle],
+    sub_bars: &SubBarData,
+    strategy: &Strategy,
+    config: &BacktestConfig,
+    instrument: &InstrumentConfig,
+    cancel_flag: &AtomicBool,
+    progress_callback: impl Fn(u8, usize, usize),
+    shared_indicator_cache: Option<Arc<Mutex<IndicatorCache>>>,
+) -> Result<BacktestResults, AppError> {
     let total_bars = candles.len();
     info!("Starting backtest: {} bars, strategy={}, precision={:?}",
         total_bars, strategy.name, config.precision);
@@ -62,8 +95,12 @@ pub fn run_backtest(
         return Err(AppError::NoDataInRange);
     }
 
-    // Pre-compute all indicators
-    let cache = pre_compute_indicators(strategy, candles)?;
+    // Pre-compute all indicators (use shared cache in optimizer context)
+    let cache = if let Some(shared) = shared_indicator_cache {
+        pre_compute_indicators_with_shared_cache(strategy, candles, &shared)?
+    } else {
+        pre_compute_indicators(strategy, candles)?
+    };
 
     // Pre-compute daily OHLC boundaries for Daily price fields
     let daily_ohlc = compute_daily_ohlc(candles);

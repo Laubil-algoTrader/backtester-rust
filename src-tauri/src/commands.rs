@@ -6,11 +6,11 @@ use tauri::{AppHandle, Emitter};
 use tracing::info;
 
 use crate::data::{converter, loader, storage, validator};
-use crate::engine::{executor, optimizer};
+use crate::engine::{executor, monte_carlo, optimizer, walk_forward};
 use crate::engine::executor::SubBarData;
 use crate::errors::AppError;
 use crate::models::config::{DataFormat, InstrumentConfig, Timeframe};
-use crate::models::result::{BacktestMetrics, BacktestResults, OosResult, OptimizationConfig, OptimizationMethod, OptimizationResult};
+use crate::models::result::{BacktestMetrics, BacktestResults, MonteCarloResult, OosResult, OptimizationConfig, OptimizationMethod, OptimizationResult, WalkForwardConfig, WalkForwardResult};
 use crate::models::strategy::{BacktestConfig, BacktestPrecision, Strategy};
 use crate::models::symbol::Symbol;
 use crate::models::trade::TradeResult;
@@ -633,6 +633,124 @@ pub async fn cancel_optimization(
     info!("Cancelling optimization");
     state.cancel_flag.store(true, Ordering::Relaxed);
     Ok(())
+}
+
+// ── Walk-Forward Analysis ──
+
+/// Run a Walk-Forward Analysis.
+///
+/// Divides the data into `config.num_windows` sequential windows. Each window is split
+/// into an in-sample portion (optimized) and an out-of-sample portion (validated).
+/// Emits `walk-forward-progress` events during execution.
+#[tauri::command]
+pub async fn run_walk_forward(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    strategy: Strategy,
+    wf_config: WalkForwardConfig,
+) -> Result<WalkForwardResult, AppError> {
+    info!(
+        "Running Walk-Forward Analysis: {} windows, IS={:.0}%, strategy={}",
+        wf_config.num_windows,
+        wf_config.in_sample_pct * 100.0,
+        strategy.name
+    );
+
+    state.cancel_flag.store(false, Ordering::Relaxed);
+
+    let bt_config = &wf_config.optimization_config.backtest_config;
+    let db = state.db.lock().await;
+    let symbol = storage::get_symbol_by_id(&db, &bt_config.symbol_id)?;
+    drop(db);
+
+    let timeframe_key = bt_config.timeframe.as_str().to_string();
+    let parquet_path = symbol
+        .timeframe_paths
+        .get(&timeframe_key)
+        .ok_or_else(|| AppError::NotFound(format!(
+            "Timeframe {} not available for {}",
+            timeframe_key, symbol.name
+        )))?
+        .clone();
+
+    let date_filter = loader::build_date_filter(&bt_config.start_date, &bt_config.end_date);
+    let mut lf = loader::scan_parquet_lazy(&PathBuf::from(&parquet_path))?;
+    if let Some(f) = &date_filter {
+        lf = lf.filter(f.clone());
+    }
+    let df = lf.collect()
+        .map_err(|e| AppError::Internal(format!("candle lazy collect: {}", e)))?;
+    let candles = executor::candles_from_dataframe(&df)?;
+    if candles.is_empty() {
+        return Err(AppError::NoDataInRange);
+    }
+
+    info!("Walk-forward data: {} candles", candles.len());
+
+    let cancel_flag = state.cancel_flag.clone();
+    let instrument = symbol.instrument_config.clone();
+
+    let result = tokio::task::spawn_blocking(move || {
+        walk_forward::run_walk_forward(
+            &candles,
+            &strategy,
+            &wf_config,
+            &instrument,
+            &cancel_flag,
+            |pct, current, total| {
+                let _ = app.emit(
+                    "walk-forward-progress",
+                    serde_json::json!({
+                        "percent": pct,
+                        "current_window": current,
+                        "total_windows": total,
+                    }),
+                );
+            },
+        )
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("Task join error: {}", e)))??;
+
+    info!(
+        "Walk-forward complete: {} windows, efficiency_ratio={:.2}",
+        result.windows.len(),
+        result.efficiency_ratio
+    );
+
+    Ok(result)
+}
+
+// ── Monte Carlo Simulation ──
+
+/// Run a Monte Carlo simulation on a list of historical trades.
+///
+/// Randomly reorders trade P&L values `n_simulations` times and returns
+/// percentile statistics and ruin probability across all simulations.
+#[tauri::command]
+pub async fn run_monte_carlo(
+    state: tauri::State<'_, AppState>,
+    trades: Vec<crate::models::trade::TradeResult>,
+    initial_capital: f64,
+    n_simulations: usize,
+) -> Result<MonteCarloResult, AppError> {
+    info!(
+        "Running Monte Carlo: {} trades, {} simulations",
+        trades.len(),
+        n_simulations
+    );
+
+    state.cancel_flag.store(false, Ordering::Relaxed);
+    let cancel_flag = state.cancel_flag.clone();
+
+    let result = tokio::task::spawn_blocking(move || {
+        monte_carlo::run_monte_carlo(&trades, initial_capital, n_simulations, &cancel_flag)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("Task join error: {}", e)))?;
+
+    info!("Monte Carlo complete: {} simulations", result.n_simulations);
+    Ok(result)
 }
 
 // ── Export Commands ──

@@ -1,7 +1,7 @@
 use chrono::NaiveDate;
 
 use crate::models::config::Timeframe;
-use crate::models::result::{BacktestMetrics, EquityPoint};
+use crate::models::result::{BacktestMetrics, EquityPoint, MonthlyReturn};
 use crate::models::trade::TradeResult;
 
 /// Calculate the number of bars per trading day for a given timeframe.
@@ -193,6 +193,15 @@ pub fn calculate_metrics(
     // ── Ulcer Index % ──
     let ulcer_index_pct = calculate_ulcer_index(equity_curve);
 
+    // ── Additional metrics ──
+    let k_ratio = calculate_k_ratio(equity_curve);
+    let omega_ratio = if let Some((daily_returns, _)) = equity_to_daily_returns(equity_curve) {
+        calculate_omega_ratio(&daily_returns, 0.0)
+    } else {
+        0.0
+    };
+    let monthly_returns = compute_monthly_returns(equity_curve);
+
     BacktestMetrics {
         final_capital,
         total_return_pct,
@@ -243,6 +252,9 @@ pub fn calculate_metrics(
         } else {
             0.0
         },
+        k_ratio,
+        omega_ratio,
+        monthly_returns,
     }
 }
 
@@ -292,6 +304,9 @@ fn empty_metrics(initial_capital: f64) -> BacktestMetrics {
         stagnation_time: "0m".to_string(),
         ulcer_index_pct: 0.0,
         return_dd_ratio: 0.0,
+        k_ratio: 0.0,
+        omega_ratio: 0.0,
+        monthly_returns: vec![],
     }
 }
 
@@ -570,6 +585,142 @@ fn calculate_ulcer_index(equity_curve: &[EquityPoint]) -> f64 {
         sum_sq += dd_pct * dd_pct;
     }
     (sum_sq / n as f64).sqrt()
+}
+
+/// K-Ratio: measures the consistency of the equity curve growth.
+///
+/// Fits a linear regression on `log(equity[i] / equity[0])` vs bar index i.
+/// Returns `slope / std_error_of_slope * sqrt(n)`, normalized to be comparable across
+/// strategies. Higher is better; values > 1.0 indicate consistent growth.
+fn calculate_k_ratio(equity_curve: &[EquityPoint]) -> f64 {
+    let n = equity_curve.len();
+    if n < 4 {
+        return 0.0;
+    }
+    let base = equity_curve[0].equity;
+    if base <= 0.0 {
+        return 0.0;
+    }
+
+    // y[i] = log(equity[i] / base), x[i] = i
+    let mut sum_x = 0.0f64;
+    let mut sum_y = 0.0f64;
+    let mut sum_xx = 0.0f64;
+    let mut sum_xy = 0.0f64;
+    let mut valid = 0usize;
+
+    for (i, pt) in equity_curve.iter().enumerate() {
+        if pt.equity <= 0.0 {
+            continue;
+        }
+        let x = i as f64;
+        let y = (pt.equity / base).ln();
+        sum_x += x;
+        sum_y += y;
+        sum_xx += x * x;
+        sum_xy += x * y;
+        valid += 1;
+    }
+
+    if valid < 4 {
+        return 0.0;
+    }
+    let nf = valid as f64;
+    let denom = nf * sum_xx - sum_x * sum_x;
+    if denom.abs() < f64::EPSILON {
+        return 0.0;
+    }
+
+    let slope = (nf * sum_xy - sum_x * sum_y) / denom;
+    let intercept = (sum_y - slope * sum_x) / nf;
+
+    // Residual sum of squares
+    let mut ss_res = 0.0f64;
+    for (i, pt) in equity_curve.iter().enumerate() {
+        if pt.equity <= 0.0 {
+            continue;
+        }
+        let y = (pt.equity / base).ln();
+        let y_hat = intercept + slope * i as f64;
+        ss_res += (y - y_hat).powi(2);
+    }
+
+    let var_slope = if valid > 2 {
+        let mean_x = sum_x / nf;
+        let ss_xx = sum_xx - nf * mean_x * mean_x;
+        if ss_xx > 0.0 {
+            (ss_res / (nf - 2.0)) / ss_xx
+        } else {
+            return 0.0;
+        }
+    } else {
+        return 0.0;
+    };
+
+    let std_err = var_slope.sqrt();
+    if std_err < f64::EPSILON {
+        return 0.0;
+    }
+    (slope / std_err) * (nf.sqrt())
+}
+
+/// Omega Ratio: probability-weighted ratio of gains to losses above/below threshold.
+///
+/// `omega = sum(max(r - threshold, 0)) / sum(max(threshold - r, 0))` over daily returns.
+/// Values > 1.0 mean more probability-weighted gain than loss.
+fn calculate_omega_ratio(returns: &[f64], threshold: f64) -> f64 {
+    let gains: f64 = returns.iter().map(|r| (r - threshold).max(0.0)).sum();
+    let losses: f64 = returns.iter().map(|r| (threshold - r).max(0.0)).sum();
+    if losses < f64::EPSILON {
+        if gains > 0.0 { f64::INFINITY } else { 0.0 }
+    } else {
+        gains / losses
+    }
+}
+
+/// Compute monthly returns from the equity curve.
+///
+/// Groups equity-curve points by YYYY-MM calendar month and returns the
+/// percentage return from the first to the last equity value in each month.
+fn compute_monthly_returns(equity_curve: &[EquityPoint]) -> Vec<MonthlyReturn> {
+    use std::collections::BTreeMap;
+
+    if equity_curve.len() < 2 {
+        return vec![];
+    }
+
+    // (year, month) → (first_equity, last_equity)
+    let mut by_month: BTreeMap<(i32, u32), (f64, f64)> = BTreeMap::new();
+
+    for pt in equity_curve {
+        let ts = &pt.timestamp;
+        if ts.len() < 7 {
+            continue;
+        }
+        // Parse YYYY-MM from timestamp prefix
+        let year: i32 = ts[0..4].parse().unwrap_or(0);
+        let month: u32 = ts[5..7].parse().unwrap_or(0);
+        if year == 0 || month == 0 {
+            continue;
+        }
+        let entry = by_month.entry((year, month)).or_insert((pt.equity, pt.equity));
+        entry.1 = pt.equity; // keep updating last
+    }
+
+    by_month
+        .into_iter()
+        .filter_map(|((year, month), (first, last))| {
+            if first > 0.0 {
+                Some(MonthlyReturn {
+                    year,
+                    month,
+                    return_pct: (last - first) / first * 100.0,
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// Format a number of bars to a human-readable duration, given minutes per bar.

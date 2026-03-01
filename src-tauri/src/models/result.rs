@@ -19,6 +19,29 @@ pub struct DrawdownPoint {
     pub drawdown_pct: f64,
 }
 
+/// Monthly return entry for year × month breakdown.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonthlyReturn {
+    pub year: i32,
+    pub month: u32,
+    pub return_pct: f64,
+}
+
+/// Results of a Monte Carlo simulation run on historical trades.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonteCarloResult {
+    pub n_simulations: usize,
+    pub median_return_pct: f64,
+    pub p5_return_pct: f64,
+    pub p25_return_pct: f64,
+    pub p75_return_pct: f64,
+    pub p95_return_pct: f64,
+    /// Fraction of simulations where equity dropped below initial capital at any point.
+    pub ruin_probability: f64,
+    pub median_max_drawdown_pct: f64,
+    pub p95_max_drawdown_pct: f64,
+}
+
 /// All performance metrics from a backtest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BacktestMetrics {
@@ -84,6 +107,11 @@ pub struct BacktestMetrics {
 
     // Return / Drawdown ratio
     pub return_dd_ratio: f64,
+
+    // Additional metrics (P4.4)
+    pub k_ratio: f64,
+    pub omega_ratio: f64,
+    pub monthly_returns: Vec<MonthlyReturn>,
 }
 
 /// Complete results of a backtest run.
@@ -148,6 +176,10 @@ pub struct GeneticAlgorithmConfig {
     pub generations: usize,
     pub mutation_rate: f64,
     pub crossover_rate: f64,
+    /// Stop early if the best fitness has not improved for this many consecutive generations.
+    /// `None` means no early stopping (run all generations).
+    #[serde(default)]
+    pub patience: Option<usize>,
 }
 
 /// A date range for Out-of-Sample testing.
@@ -206,4 +238,41 @@ pub struct OptimizationResult {
     /// Downsampled equity curve for sparkline visualization (max ~60 points).
     #[serde(default)]
     pub equity_curve: Vec<EquityPoint>,
+}
+
+// ══════════════════════════════════════════════════════════════
+// Walk-Forward Analysis types
+// ══════════════════════════════════════════════════════════════
+
+/// Configuration for Walk-Forward Analysis.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalkForwardConfig {
+    /// Number of sequential windows to divide the data into.
+    pub num_windows: usize,
+    /// Fraction of each window used for in-sample optimization (0.1–0.9).
+    pub in_sample_pct: f64,
+    /// Optimization configuration used on the in-sample portion of each window.
+    pub optimization_config: OptimizationConfig,
+}
+
+/// Per-window results from a Walk-Forward Analysis.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalkForwardWindowResult {
+    pub window_index: usize,
+    pub in_sample_start: String,
+    pub in_sample_end: String,
+    pub out_of_sample_start: String,
+    pub out_of_sample_end: String,
+    pub best_params: HashMap<String, f64>,
+    pub in_sample_metrics: BacktestMetrics,
+    pub out_of_sample_metrics: BacktestMetrics,
+}
+
+/// Aggregated results of a complete Walk-Forward Analysis.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalkForwardResult {
+    pub windows: Vec<WalkForwardWindowResult>,
+    pub combined_out_of_sample_metrics: BacktestMetrics,
+    /// OOS net profit / IS net profit. Values ≥ 0.5 suggest a robust strategy.
+    pub efficiency_ratio: f64,
 }

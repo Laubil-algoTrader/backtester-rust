@@ -19,6 +19,7 @@ use crate::models::strategy::{
 };
 
 use super::executor::{self, SubBarData};
+use super::strategy::IndicatorCache;
 
 /// Maximum allowed combinations for Grid Search.
 const MAX_COMBINATIONS: usize = 500_000;
@@ -384,6 +385,9 @@ pub fn run_grid_search(
     let best_so_far = Arc::new(Mutex::new(f64::NEG_INFINITY));
     let start = Instant::now();
 
+    // Shared indicator cache: indicators unchanged across combinations are computed once.
+    let shared_cache = Arc::new(Mutex::new(IndicatorCache::new()));
+
     let results: Vec<Option<OptimizationResult>> = (0..total)
         .into_par_iter()
         .map(|combo_idx| {
@@ -395,8 +399,8 @@ pub fn run_grid_search(
             let values = index_to_params(combo_idx, &per_range);
             let modified = apply_params(strategy, ranges, &values);
 
-            // Run backtest with no-op progress callback
-            let result = executor::run_backtest(
+            // Run backtest using shared indicator cache
+            let result = executor::run_backtest_with_cache(
                 candles,
                 sub_bars,
                 &modified,
@@ -404,6 +408,7 @@ pub fn run_grid_search(
                 instrument,
                 cancel_flag,
                 |_, _, _| {},
+                Arc::clone(&shared_cache),
             );
 
             let current = counter.fetch_add(1, Ordering::Relaxed) + 1;
@@ -496,6 +501,7 @@ pub fn run_genetic_algorithm(
     let generations = ga_config.generations;
     let mutation_rate = ga_config.mutation_rate;
     let crossover_rate = ga_config.crossover_rate;
+    let patience = ga_config.patience;
     let num_params = ranges.len();
 
     if num_params == 0 {
@@ -514,6 +520,9 @@ pub fn run_genetic_algorithm(
     // Collect all evaluated individuals across all generations
     let all_results: Arc<Mutex<Vec<OptimizationResult>>> = Arc::new(Mutex::new(Vec::new()));
 
+    // Shared indicator cache for reuse across generations / individuals
+    let shared_cache = Arc::new(Mutex::new(IndicatorCache::new()));
+
     // Initialize random population
     let mut population: Vec<Individual> = (0..pop_size)
         .map(|_| {
@@ -530,6 +539,7 @@ pub fn run_genetic_algorithm(
         .collect();
 
     let mut global_best = f64::NEG_INFINITY;
+    let mut stagnant_gens = 0usize;
 
     for gen in 0..generations {
         if cancel_flag.load(Ordering::Relaxed) {
@@ -545,7 +555,7 @@ pub fn run_genetic_algorithm(
                 }
 
                 let modified = apply_params(strategy, ranges, &ind.genes);
-                let result = executor::run_backtest(
+                let result = executor::run_backtest_with_cache(
                     candles,
                     sub_bars,
                     &modified,
@@ -553,6 +563,7 @@ pub fn run_genetic_algorithm(
                     instrument,
                     cancel_flag,
                     |_, _, _| {},
+                    Arc::clone(&shared_cache),
                 );
 
                 match result {
@@ -571,6 +582,7 @@ pub fn run_genetic_algorithm(
         }
 
         // Update fitness values and collect results
+        let prev_best = global_best;
         for (ind, eval) in population.iter_mut().zip(fitnesses.into_iter()) {
             if let Some((fitness, opt_result)) = eval {
                 ind.fitness = fitness;
@@ -583,9 +595,24 @@ pub fn run_genetic_algorithm(
             }
         }
 
+        // Early stopping via patience
+        if global_best > prev_best + f64::EPSILON {
+            stagnant_gens = 0;
+        } else {
+            stagnant_gens += 1;
+        }
+
         // Report progress
         let pct = (((gen + 1) as f64 / generations as f64) * 100.0) as u8;
         progress_callback(pct, gen + 1, generations, global_best);
+
+        // Early stopping: stop if fitness hasn't improved for `patience` generations
+        if let Some(p) = patience {
+            if stagnant_gens >= p {
+                info!("GA early stopping: no improvement for {} generations", p);
+                break;
+            }
+        }
 
         // Don't breed after the last generation
         if gen + 1 >= generations {
