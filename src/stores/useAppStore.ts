@@ -19,6 +19,7 @@ import type {
   OosPeriod,
   ParameterRange,
   LicenseTier,
+  MonteCarloResult,
 } from "@/lib/types";
 
 // ── Default values ──
@@ -118,6 +119,10 @@ interface AppState {
   setOptimizationResults: (results: OptimizationResult[]) => void;
   setOptimizationParamRanges: (ranges: ParameterRange[]) => void;
   setOptimizationOosPeriods: (periods: OosPeriod[]) => void;
+
+  // Monte Carlo (Robustez)
+  monteCarloResults: MonteCarloResult | null;
+  setMonteCarloResults: (results: MonteCarloResult | null) => void;
 
   // Active Downloads
   activeDownloads: Record<string, { progress: number; message: string; startTime: number }>;
@@ -255,6 +260,10 @@ export const useAppStore = create<AppState>((set) => ({
   setOptimizationResults: (results) => set({ optimizationResults: results }),
   setOptimizationParamRanges: (ranges) => set({ optimizationParamRanges: ranges }),
   setOptimizationOosPeriods: (periods) => set({ optimizationOosPeriods: periods }),
+
+  // Monte Carlo (Robustez)
+  monteCarloResults: null,
+  setMonteCarloResults: (results) => set({ monteCarloResults: results }),
 
   // Active Downloads
   activeDownloads: {},

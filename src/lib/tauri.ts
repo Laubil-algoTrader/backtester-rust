@@ -7,6 +7,7 @@ import type {
   BacktestResults,
   OptimizationResult,
   OptimizationConfig,
+  MonteCarloResult,
   Timeframe,
   CodeGenerationResult,
   LicenseResponse,
@@ -76,6 +77,19 @@ export async function runOptimization(
 /// Cancel a running optimization.
 export async function cancelOptimization(): Promise<void> {
   return invoke<void>("cancel_optimization");
+}
+
+/// Run Monte Carlo simulation on a list of historical trades.
+export async function runMonteCarlo(
+  trades: BacktestResults["trades"],
+  initialCapital: number,
+  nSimulations: number
+): Promise<MonteCarloResult> {
+  return invoke<MonteCarloResult>("run_monte_carlo", {
+    trades,
+    initialCapital,
+    nSimulations,
+  });
 }
 
 /// Save a strategy.

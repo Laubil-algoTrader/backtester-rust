@@ -4,6 +4,7 @@
     "strategy": "Strategy",
     "backtest": "Backtest",
     "optimize": "Optimize",
+    "robustez": "Robustness",
     "export": "Export"
   },
   "header": {

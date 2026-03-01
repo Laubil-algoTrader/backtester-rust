@@ -481,6 +481,11 @@ export interface BacktestMetrics {
 
   // Return / Drawdown ratio
   return_dd_ratio: number;
+
+  // Additional metrics (P4.4)
+  k_ratio: number;
+  omega_ratio: number;
+  monthly_returns: MonthlyReturn[];
 }
 
 // ── Equity/Drawdown points ──
@@ -613,7 +618,30 @@ export interface CodeGenerationResult {
 
 // ── App Section ──
 
-export type AppSection = "data" | "strategy" | "backtest" | "optimization" | "export";
+export type AppSection = "data" | "strategy" | "backtest" | "optimization" | "robustez" | "export";
+
+// ── Monte Carlo ──
+
+export interface MonteCarloResult {
+  n_simulations: number;
+  median_return_pct: number;
+  p5_return_pct: number;
+  p25_return_pct: number;
+  p75_return_pct: number;
+  p95_return_pct: number;
+  /** Fraction of simulations (0–1) where equity fell below initial capital */
+  ruin_probability: number;
+  median_max_drawdown_pct: number;
+  p95_max_drawdown_pct: number;
+}
+
+// ── New BacktestMetrics fields (P4.4) ──
+
+export interface MonthlyReturn {
+  year: number;
+  month: number;
+  return_pct: number;
+}
 
 // ── License ──
 

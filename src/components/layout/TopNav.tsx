@@ -16,6 +16,7 @@ const navItems: NavItem[] = [
   { id: "strategy", labelKey: "nav.strategy" },
   { id: "backtest", labelKey: "nav.backtest" },
   { id: "optimization", labelKey: "nav.optimize", proOnly: true },
+  { id: "robustez", labelKey: "nav.robustez", proOnly: true },
   { id: "export", labelKey: "nav.export", proOnly: true },
 ];
 

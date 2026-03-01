@@ -5,6 +5,7 @@ import { DataPage } from "@/components/data/DataPage";
 import { StrategyPage } from "@/components/strategy/StrategyPage";
 import { BacktestPage } from "@/components/backtest/BacktestPage";
 import { OptimizationPage } from "@/components/optimization/OptimizationPage";
+import { RobustezPage } from "@/components/robustez/RobustezPage";
 import { ExportPage } from "@/components/export/ExportPage";
 import { LoginPage } from "@/components/auth/LoginPage";
 import { TooltipProvider } from "@/components/ui/Tooltip";
@@ -62,6 +63,8 @@ function App() {
         return <BacktestPage />;
       case "optimization":
         return <OptimizationPage />;
+      case "robustez":
+        return <RobustezPage />;
       case "export":
         return <ExportPage />;
     }
