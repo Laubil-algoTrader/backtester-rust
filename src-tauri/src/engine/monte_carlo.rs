@@ -1,20 +1,23 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use rand::seq::SliceRandom;
+use rand::Rng;
 use rayon::prelude::*;
 
 use crate::models::result::MonteCarloResult;
 use crate::models::trade::TradeResult;
 
-/// Run a Monte Carlo simulation by randomly reordering the historical trade sequence.
+/// Run a Monte Carlo simulation using bootstrap resampling WITH replacement.
 ///
 /// For each simulation:
-/// 1. Shuffle the trade P&L values into a random order.
-/// 2. Replay the shuffled sequence: apply each trade's net P&L to a running equity.
+/// 1. Draw `n_trades` trade P&Ls randomly from the historical pool (with replacement).
+///    This means the same trade can appear multiple times in one simulation, and some
+///    trades may not appear at all — producing genuinely different final equities.
+/// 2. Replay the resampled sequence: apply each trade's net P&L to a running equity.
 /// 3. Record the final equity and the maximum percentage drawdown encountered.
 ///
 /// Returns percentile statistics across all simulations plus a ruin probability
-/// (fraction of simulations where equity fell below `initial_capital` at any point).
+/// (fraction of simulations where equity dropped below `initial_capital` at any point,
+/// i.e. the account showed a net loss relative to the starting capital).
 pub fn run_monte_carlo(
     trades: &[TradeResult],
     initial_capital: f64,
@@ -46,21 +49,25 @@ pub fn run_monte_carlo(
                 return None;
             }
 
-            let mut shuffled = pnls.clone();
             let mut rng = rand::thread_rng();
-            shuffled.shuffle(&mut rng);
+            let n_trades = pnls.len();
 
             let mut equity = initial_capital;
             let mut peak = equity;
             let mut max_dd_pct = 0.0f64;
             let mut ruined = false;
 
-            for pnl in &shuffled {
+            // Bootstrap WITH replacement: draw n_trades samples randomly from the pool.
+            // Unlike shuffle, this allows repeats and omissions, so each simulation
+            // produces a genuinely different total return.
+            for _ in 0..n_trades {
+                let pnl = pnls[rng.gen_range(0..n_trades)];
                 equity += pnl;
                 if equity > peak {
                     peak = equity;
                 }
-                if equity <= 0.0 {
+                // Ruin = account is below the starting capital at any point (net loss)
+                if equity < initial_capital {
                     ruined = true;
                 }
                 if peak > 0.0 {
