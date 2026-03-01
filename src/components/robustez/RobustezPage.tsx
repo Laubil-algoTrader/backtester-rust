@@ -322,19 +322,8 @@ export function RobustezPage() {
     !!lastBacktest &&
     lastBacktest.trades.length > 0;
 
-  const initialCapital =
-    lastBacktest?.trades?.[0]
-      ? lastBacktest.trades[0].entry_price /* approximate */ * 0 + 10000
-      : 10000;
-
-  // More accurate: derive initial_capital from equity curve first point
-  const derivedInitialCapital = (() => {
-    if (!lastBacktest) return 10000;
-    if (lastBacktest.equity_curve.length > 0) {
-      return lastBacktest.equity_curve[0].equity;
-    }
-    return 10000;
-  })();
+  // Source of truth: the config used for the backtest that generated these trades.
+  const derivedInitialCapital = lastBacktest?.backtest_config.initial_capital ?? 10000;
 
   async function handleRun() {
     if (!lastBacktest) return;

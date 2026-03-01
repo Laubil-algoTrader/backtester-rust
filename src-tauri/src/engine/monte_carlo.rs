@@ -119,18 +119,17 @@ fn run_sim_equity(sim_pnls: Vec<f64>, initial_capital: f64) -> SimOut {
         if equity > peak {
             peak = equity;
         }
-        if equity < initial_capital {
+        // Ruin = account blown out (equity at or below zero, trading must stop).
+        if equity <= 0.0 {
             ruined = true;
         }
-        if peak > 0.0 {
-            let dd_abs = peak - equity;
-            let dd_pct = dd_abs / peak * 100.0;
-            if dd_abs > max_dd_abs {
-                max_dd_abs = dd_abs;
-            }
-            if dd_pct > max_dd_pct {
-                max_dd_pct = dd_pct;
-            }
+        let dd_abs = peak - equity;
+        let dd_pct = dd_abs / peak * 100.0;
+        if dd_abs > max_dd_abs {
+            max_dd_abs = dd_abs;
+        }
+        if dd_pct > max_dd_pct {
+            max_dd_pct = dd_pct;
         }
     }
 
