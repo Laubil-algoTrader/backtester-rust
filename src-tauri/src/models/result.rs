@@ -27,19 +27,60 @@ pub struct MonthlyReturn {
     pub return_pct: f64,
 }
 
+/// Monte Carlo simulation method.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MonteCarloMethod {
+    /// Bootstrap resampling with replacement: draw N trades randomly from the historical pool,
+    /// allowing the same trade to appear multiple times. Produces genuinely different returns.
+    Resampling,
+    /// Randomly skip each trade with the given probability. Models missed executions,
+    /// technical failures, or selective filtering — the trade sequence remains ordered.
+    SkipTrades,
+}
+
+/// Configuration for a Monte Carlo simulation run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonteCarloConfig {
+    pub n_simulations: usize,
+    pub method: MonteCarloMethod,
+    /// Probability of skipping each trade (0.0–1.0). Only used for `SkipTrades`.
+    #[serde(default)]
+    pub skip_probability: f64,
+}
+
 /// Results of a Monte Carlo simulation run on historical trades.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MonteCarloResult {
     pub n_simulations: usize,
+
+    // Return percentiles
     pub median_return_pct: f64,
     pub p5_return_pct: f64,
     pub p25_return_pct: f64,
     pub p75_return_pct: f64,
     pub p95_return_pct: f64,
+
     /// Fraction of simulations where equity dropped below initial capital at any point.
     pub ruin_probability: f64,
+
+    // Max-drawdown percentiles
     pub median_max_drawdown_pct: f64,
+    pub p25_max_drawdown_pct: f64,
+    pub p75_max_drawdown_pct: f64,
     pub p95_max_drawdown_pct: f64,
+
+    /// Sampled simulation equity curves for visualization (max 200, each ≤300 points).
+    /// Each inner vec starts at `initial_capital` and ends at the simulation's final equity.
+    pub sim_equity_curves: Vec<Vec<f64>>,
+
+    /// Original (historical) equity curve, downsampled to the same resolution.
+    pub original_equity_curve: Vec<f64>,
+
+    /// Original strategy net return % — reference value for filter comparisons.
+    pub original_return_pct: f64,
+
+    /// Original strategy max drawdown % — reference value for filter comparisons.
+    pub original_max_drawdown_pct: f64,
 }
 
 /// All performance metrics from a backtest.

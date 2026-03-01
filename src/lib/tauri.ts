@@ -7,6 +7,7 @@ import type {
   BacktestResults,
   OptimizationResult,
   OptimizationConfig,
+  MonteCarloConfig,
   MonteCarloResult,
   Timeframe,
   CodeGenerationResult,
@@ -83,12 +84,12 @@ export async function cancelOptimization(): Promise<void> {
 export async function runMonteCarlo(
   trades: BacktestResults["trades"],
   initialCapital: number,
-  nSimulations: number
+  config: MonteCarloConfig
 ): Promise<MonteCarloResult> {
   return invoke<MonteCarloResult>("run_monte_carlo", {
     trades,
     initialCapital,
-    nSimulations,
+    config,
   });
 }
 

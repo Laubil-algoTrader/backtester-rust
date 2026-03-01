@@ -10,7 +10,7 @@ use crate::engine::{executor, monte_carlo, optimizer, walk_forward};
 use crate::engine::executor::SubBarData;
 use crate::errors::AppError;
 use crate::models::config::{DataFormat, InstrumentConfig, Timeframe};
-use crate::models::result::{BacktestMetrics, BacktestResults, MonteCarloResult, OosResult, OptimizationConfig, OptimizationMethod, OptimizationResult, WalkForwardConfig, WalkForwardResult};
+use crate::models::result::{BacktestMetrics, BacktestResults, MonteCarloConfig, MonteCarloResult, OosResult, OptimizationConfig, OptimizationMethod, OptimizationResult, WalkForwardConfig, WalkForwardResult};
 use crate::models::strategy::{BacktestConfig, BacktestPrecision, Strategy};
 use crate::models::symbol::Symbol;
 use crate::models::trade::TradeResult;
@@ -725,26 +725,30 @@ pub async fn run_walk_forward(
 
 /// Run a Monte Carlo simulation on a list of historical trades.
 ///
-/// Randomly reorders trade P&L values `n_simulations` times and returns
-/// percentile statistics and ruin probability across all simulations.
+/// Run a Monte Carlo simulation on historical trades.
+///
+/// Accepts a `MonteCarloConfig` that specifies the method (Resampling or SkipTrades),
+/// the number of simulations, and (for SkipTrades) the skip probability.
+/// Returns percentile statistics, ruin probability, and sampled equity curves for visualization.
 #[tauri::command]
 pub async fn run_monte_carlo(
     state: tauri::State<'_, AppState>,
     trades: Vec<crate::models::trade::TradeResult>,
     initial_capital: f64,
-    n_simulations: usize,
+    config: MonteCarloConfig,
 ) -> Result<MonteCarloResult, AppError> {
     info!(
-        "Running Monte Carlo: {} trades, {} simulations",
+        "Running Monte Carlo: {} trades, {} simulations, method={:?}",
         trades.len(),
-        n_simulations
+        config.n_simulations,
+        config.method,
     );
 
     state.cancel_flag.store(false, Ordering::Relaxed);
     let cancel_flag = state.cancel_flag.clone();
 
     let result = tokio::task::spawn_blocking(move || {
-        monte_carlo::run_monte_carlo(&trades, initial_capital, n_simulations, &cancel_flag)
+        monte_carlo::run_monte_carlo(&trades, initial_capital, &config, &cancel_flag)
     })
     .await
     .map_err(|e| AppError::Internal(format!("Task join error: {}", e)))?;
