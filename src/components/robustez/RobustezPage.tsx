@@ -1,113 +1,49 @@
-import { useState, useRef } from "react";
+import { useState } from "react";
 import {
   Shield,
   Play,
   Loader2,
   AlertTriangle,
-  TrendingUp,
-  TrendingDown,
-  Activity,
-  Plus,
-  Trash2,
-  CheckCircle2,
-  XCircle,
   Shuffle,
   SkipForward,
-  BarChart3,
-  Combine,
+  FlaskConical,
+  Lock,
 } from "lucide-react";
-import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  ReferenceLine,
-  Cell,
-} from "recharts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { useAppStore } from "@/stores/useAppStore";
 import { runMonteCarlo } from "@/lib/tauri";
-import type {
-  MonteCarloResult,
-  MonteCarloMethod,
-  MonteCarloConfig,
-  MonteCarloFilter,
-  MonteCarloFilterMetric,
-  MonteCarloFilterPercentile,
-  MonteCarloFilterComparison,
-  MonteCarloFilterThresholdType,
-  Strategy,
-} from "@/lib/types";
+import type { MonteCarloResult, MonteCarloConfig } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { TOOLTIP_STYLE } from "@/lib/chartTheme";
 
-// ── helpers ───────────────────────────────────────────────────────────────────
+// ── Formatters ────────────────────────────────────────────────────────────────
 
-function fmt(n: number, decimals = 2) {
-  return n.toFixed(decimals);
+function fmtMoney(v: number, decimals = 2): string {
+  const abs = Math.abs(v);
+  const sign = v < 0 ? "-" : "";
+  if (abs >= 1_000_000) return `${sign}$${(abs / 1e6).toFixed(2)}M`;
+  if (abs >= 1_000) return `${sign}$${(abs / 1_000).toFixed(0)}k`;
+  return `${sign}$${abs.toFixed(decimals)}`;
 }
 
-function fmtPct(n: number) {
-  return `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`;
+function fmtRatio(v: number): string {
+  return v.toFixed(2);
 }
 
-function riskColor(pct: number): string {
-  if (pct < 0.05) return "text-emerald-400";
-  if (pct < 0.2) return "text-yellow-400";
+function fmtExpectancy(v: number): string {
+  return fmtMoney(v, 2);
+}
+
+function riskColor(frac: number): string {
+  if (frac < 0.05) return "text-emerald-400";
+  if (frac < 0.2) return "text-yellow-400";
   return "text-red-400";
 }
 
-function getReturnPercentile(result: MonteCarloResult, p: MonteCarloFilterPercentile): number {
-  switch (p) {
-    case 5:  return result.p5_return_pct;
-    case 25: return result.p25_return_pct;
-    case 50: return result.median_return_pct;
-    case 75: return result.p75_return_pct;
-    case 95: return result.p95_return_pct;
-  }
-}
-
-function getDdPercentile(result: MonteCarloResult, p: MonteCarloFilterPercentile): number {
-  switch (p) {
-    case 5:  return result.median_max_drawdown_pct * 0.4;
-    case 25: return result.p25_max_drawdown_pct;
-    case 50: return result.median_max_drawdown_pct;
-    case 75: return result.p75_max_drawdown_pct;
-    case 95: return result.p95_max_drawdown_pct;
-  }
-}
-
-function evaluateFilter(filter: MonteCarloFilter, result: MonteCarloResult): boolean {
-  const rawValue =
-    filter.metric === "net_return"
-      ? getReturnPercentile(result, filter.percentile)
-      : getDdPercentile(result, filter.percentile);
-
-  let threshold = filter.threshold_value;
-  if (filter.threshold_type === "pct_of_original") {
-    const ref =
-      filter.metric === "net_return"
-        ? result.original_return_pct
-        : result.original_max_drawdown_pct;
-    threshold = ref * (filter.threshold_value / 100);
-  }
-
-  switch (filter.comparison) {
-    case ">":  return rawValue > threshold;
-    case "<":  return rawValue < threshold;
-    case ">=": return rawValue >= threshold;
-    case "<=": return rawValue <= threshold;
-  }
-}
-
-// ── EquityFanChart (SVG) ──────────────────────────────────────────────────────
+// ── EquityFanChart ────────────────────────────────────────────────────────────
 
 const VB_W = 1000;
-const VB_H = 320;
+const VB_H = 340;
 const PAD = { top: 16, right: 20, bottom: 32, left: 62 };
 const IW = VB_W - PAD.left - PAD.right;
 const IH = VB_H - PAD.top - PAD.bottom;
@@ -146,30 +82,24 @@ function EquityFanChart({
   const toY = (v: number) =>
     PAD.top + IH - ((v - lo) / span) * IH;
 
-  const makePath = (curve: number[]) => {
-    const n = curve.length;
-    return curve
-      .map((v, i) => `${i === 0 ? "M" : "L"}${toX(i, n).toFixed(1)},${toY(v).toFixed(1)}`)
+  const makePath = (curve: number[]) =>
+    curve
+      .map((v, i) => `${i === 0 ? "M" : "L"}${toX(i, curve.length).toFixed(1)},${toY(v).toFixed(1)}`)
       .join(" ");
-  };
 
-  const Y_TICKS = 5;
-  const yTickValues = Array.from({ length: Y_TICKS }, (_, i) =>
-    lo + (span / (Y_TICKS - 1)) * i
-  );
-
-  const fmtMoney = (v: number) => {
-    const abs = Math.abs(v);
-    if (abs >= 1_000_000) return `$${(v / 1_000_000).toFixed(1)}M`;
-    if (abs >= 1_000) return `$${(v / 1_000).toFixed(0)}k`;
-    return `$${v.toFixed(0)}`;
-  };
-
-  const numPts = originalCurve.length;
+  const yTicks = Array.from({ length: 5 }, (_, i) => lo + (span / 4) * i);
   const xTickCount = 7;
+  const numPts = Math.max(originalCurve.length, simCurves[0]?.length ?? 1);
   const xTicks = Array.from({ length: xTickCount }, (_, i) =>
     Math.round((i / (xTickCount - 1)) * (numPts - 1))
   );
+
+  const fmtM = (v: number) => {
+    const abs = Math.abs(v);
+    if (abs >= 1_000_000) return `$${(v / 1e6).toFixed(1)}M`;
+    if (abs >= 1_000) return `$${(v / 1_000).toFixed(0)}k`;
+    return `$${v.toFixed(0)}`;
+  };
 
   return (
     <svg
@@ -177,622 +107,474 @@ function EquityFanChart({
       preserveAspectRatio="none"
       style={{ width: "100%", height: "100%", display: "block" }}
     >
-      {yTickValues.map((v, i) => {
+      {/* Grid + Y labels */}
+      {yTicks.map((v, i) => {
         const y = toY(v);
         return (
           <g key={i}>
-            <line x1={PAD.left} y1={y} x2={VB_W - PAD.right} y2={y} stroke="rgba(255,255,255,0.05)" strokeWidth="0.6" />
-            <text x={PAD.left - 5} y={y + 4} textAnchor="end" fontSize="11" fill="rgba(255,255,255,0.38)" fontFamily="ui-monospace,monospace">
-              {fmtMoney(v)}
+            <line x1={PAD.left} y1={y} x2={VB_W - PAD.right} y2={y}
+              stroke="rgba(255,255,255,0.06)" strokeWidth="0.6" />
+            <text x={PAD.left - 5} y={y + 4} textAnchor="end" fontSize="10"
+              fill="rgba(255,255,255,0.35)" fontFamily="ui-monospace,monospace">
+              {fmtM(v)}
             </text>
           </g>
         );
       })}
 
+      {/* X labels */}
       {xTicks.map((idx) => (
-        <text key={idx} x={toX(idx, numPts)} y={VB_H - 6} textAnchor="middle" fontSize="10" fill="rgba(255,255,255,0.3)" fontFamily="ui-monospace,monospace">
+        <text key={idx} x={toX(idx, numPts)} y={VB_H - 6}
+          textAnchor="middle" fontSize="9" fill="rgba(255,255,255,0.28)"
+          fontFamily="ui-monospace,monospace">
           {idx}
         </text>
       ))}
 
-      <line x1={PAD.left} y1={toY(initialCapital)} x2={VB_W - PAD.right} y2={toY(initialCapital)} stroke="rgba(255,255,255,0.2)" strokeWidth="0.7" strokeDasharray="6,4" />
+      {/* Zero-line (initial capital) */}
+      <line x1={PAD.left} y1={toY(initialCapital)} x2={VB_W - PAD.right} y2={toY(initialCapital)}
+        stroke="rgba(255,255,255,0.18)" strokeWidth="0.8" strokeDasharray="6,4" />
 
+      {/* Sim curves */}
       {simCurves.map((curve, i) => (
-        <path key={i} d={makePath(curve)} fill="none" stroke="rgba(139,92,246,0.12)" strokeWidth="0.55" />
+        <path key={i} d={makePath(curve)} fill="none"
+          stroke="rgba(139,92,246,0.11)" strokeWidth="0.55" />
       ))}
 
-      <path d={makePath(originalCurve)} fill="none" stroke="#60a5fa" strokeWidth="2" strokeLinejoin="round" />
+      {/* Original curve */}
+      <path d={makePath(originalCurve)} fill="none"
+        stroke="#60a5fa" strokeWidth="2.2" strokeLinejoin="round" />
     </svg>
   );
 }
 
-// ── FilterRow ─────────────────────────────────────────────────────────────────
+// ── Confidence Table ──────────────────────────────────────────────────────────
 
-function FilterRow({
-  filter,
+const HIGHLIGHTED_LEVEL = 95;
+
+function ConfidenceTable({
   result,
-  onChange,
-  onRemove,
 }: {
-  filter: MonteCarloFilter;
-  result: MonteCarloResult | null;
-  onChange: (f: MonteCarloFilter) => void;
-  onRemove: () => void;
+  result: MonteCarloResult;
 }) {
-  const passes = result ? evaluateFilter(filter, result) : null;
-  const sel = "rounded border border-border bg-background px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-primary";
+  const headCls = "px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-muted-foreground";
+  const cellCls = "px-3 py-2 font-mono text-sm tabular-nums";
 
   return (
-    <div className={cn(
-      "flex flex-wrap items-center gap-2 rounded-md border px-3 py-2 text-sm",
-      passes === null ? "border-border/40 bg-background"
-        : passes ? "border-emerald-500/30 bg-emerald-500/5"
-        : "border-red-500/30 bg-red-500/5"
-    )}>
-      {passes !== null && (passes
-        ? <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
-        : <XCircle className="h-4 w-4 shrink-0 text-red-400" />)}
+    <div className="overflow-hidden rounded-lg border border-border/40">
+      <table className="w-full border-collapse text-sm">
+        <thead>
+          <tr className="border-b border-border/40 bg-card/60">
+            <th className={headCls}>Confidence</th>
+            <th className={cn(headCls, "text-right")}>Net Profit</th>
+            <th className={cn(headCls, "text-right")}>Drawdown</th>
+            <th className={cn(headCls, "text-right")}>Ret/DD</th>
+            <th className={cn(headCls, "text-right")}>Expectancy</th>
+          </tr>
+        </thead>
+        <tbody>
+          {/* Original row */}
+          <tr className="border-b border-border/40 bg-white/[0.03]">
+            <td className={cn(cellCls, "font-semibold text-white/80")}>Original</td>
+            <td className={cn(cellCls, "text-right", result.original_net_profit >= 0 ? "text-emerald-400" : "text-red-400")}>
+              {fmtMoney(result.original_net_profit)}
+            </td>
+            <td className={cn(cellCls, "text-right text-orange-300")}>
+              {fmtMoney(result.original_max_drawdown_abs)}
+            </td>
+            <td className={cn(cellCls, "text-right text-white/70")}>
+              {fmtRatio(result.original_ret_dd_ratio)}
+            </td>
+            <td className={cn(cellCls, "text-right", result.original_expectancy >= 0 ? "text-emerald-400/80" : "text-red-400/80")}>
+              {fmtExpectancy(result.original_expectancy)}
+            </td>
+          </tr>
 
-      <select value={filter.metric} onChange={(e) => onChange({ ...filter, metric: e.target.value as MonteCarloFilterMetric })} className={sel}>
-        <option value="net_return">Net Return</option>
-        <option value="max_drawdown">Max Drawdown</option>
-      </select>
-
-      <select value={filter.percentile} onChange={(e) => onChange({ ...filter, percentile: Number(e.target.value) as MonteCarloFilterPercentile })} className={sel}>
-        {([5, 25, 50, 75, 95] as MonteCarloFilterPercentile[]).map((p) => <option key={p} value={p}>P{p}</option>)}
-      </select>
-
-      <select value={filter.comparison} onChange={(e) => onChange({ ...filter, comparison: e.target.value as MonteCarloFilterComparison })} className={sel}>
-        <option value=">">{">"}</option>
-        <option value="<">{"<"}</option>
-        <option value=">=">{">="}</option>
-        <option value="<=">{"<="}</option>
-      </select>
-
-      <input type="number" value={filter.threshold_value} onChange={(e) => onChange({ ...filter, threshold_value: Number(e.target.value) })} className="w-20 rounded border border-border bg-background px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-primary" step="any" />
-
-      <select value={filter.threshold_type} onChange={(e) => onChange({ ...filter, threshold_type: e.target.value as MonteCarloFilterThresholdType })} className={sel}>
-        <option value="absolute">%</option>
-        <option value="pct_of_original">% del original</option>
-      </select>
-
-      {result && (
-        <span className="ml-1 font-mono text-[11px] text-muted-foreground">
-          (actual: {filter.metric === "net_return" ? fmtPct(getReturnPercentile(result, filter.percentile)) : `-${fmt(getDdPercentile(result, filter.percentile))}%`})
-        </span>
-      )}
-
-      <button onClick={onRemove} className="ml-auto rounded p-0.5 text-muted-foreground hover:text-destructive">
-        <Trash2 className="h-3.5 w-3.5" />
-      </button>
+          {/* Confidence level rows */}
+          {result.confidence_table.map((row) => {
+            const isHighlighted = row.level === HIGHLIGHTED_LEVEL;
+            return (
+              <tr
+                key={row.level}
+                className={cn(
+                  "border-b border-border/20 transition-colors",
+                  isHighlighted
+                    ? "bg-blue-500/[0.12] outline outline-1 outline-blue-500/30"
+                    : "hover:bg-white/[0.02]"
+                )}
+              >
+                <td className={cn(
+                  cellCls,
+                  isHighlighted ? "font-bold text-blue-300" : "text-muted-foreground"
+                )}>
+                  {row.level}%
+                  {isHighlighted && (
+                    <span className="ml-2 text-[10px] font-normal text-blue-400/70">← recomendado</span>
+                  )}
+                </td>
+                <td className={cn(
+                  cellCls, "text-right",
+                  row.net_profit >= 0 ? "text-emerald-400/80" : "text-red-400/80",
+                  isHighlighted && "font-semibold"
+                )}>
+                  {fmtMoney(row.net_profit)}
+                </td>
+                <td className={cn(
+                  cellCls, "text-right text-orange-300/70",
+                  isHighlighted && "font-semibold text-orange-300"
+                )}>
+                  {fmtMoney(row.max_drawdown_abs)}
+                </td>
+                <td className={cn(
+                  cellCls, "text-right text-white/50",
+                  isHighlighted && "font-semibold text-white/80"
+                )}>
+                  {fmtRatio(row.ret_dd_ratio)}
+                </td>
+                <td className={cn(
+                  cellCls, "text-right",
+                  row.expectancy >= 0 ? "text-emerald-400/60" : "text-red-400/60",
+                  isHighlighted && "font-semibold opacity-100"
+                )}>
+                  {fmtExpectancy(row.expectancy)}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }
 
-// ── method option ─────────────────────────────────────────────────────────────
+// ── Main Page ─────────────────────────────────────────────────────────────────
 
-const METHOD_INFO: Record<
-  "Resampling" | "SkipTrades",
-  { icon: React.ReactNode; label: string; desc: string }
-> = {
-  Resampling: {
-    icon: <Shuffle className="h-4 w-4 shrink-0" />,
-    label: "Resampling",
-    desc: "Elige trades al azar con repetición — evalúa si el edge es estadísticamente estable.",
-  },
-  SkipTrades: {
-    icon: <SkipForward className="h-4 w-4 shrink-0" />,
-    label: "Skip Trades",
-    desc: "Salta trades aleatoriamente — modela errores de ejecución o filtros selectivos.",
-  },
-};
+type MCTab = "manipulation" | "retest";
 
-// ── main page ─────────────────────────────────────────────────────────────────
+const N_SIM_OPTIONS = [100, 250, 500, 1000, 2000];
 
-export function RobustezPage() {
-  const backtestResults = useAppStore((s) => s.backtestResults);
-  const savedStrategies = useAppStore((s) => s.savedStrategies);
-  const currentStrategy = useAppStore((s) => s.currentStrategy);
-  const initialCapital = useAppStore((s) => s.initialCapital);
-  const setMonteCarloResults = useAppStore((s) => s.setMonteCarloResults);
+export default function RobustezPage() {
+  const lastBacktest = useAppStore((s) => s.lastBacktest);
+  const selectedSymbol = useAppStore((s) => s.selectedSymbol);
 
-  // ── config ────────────────────────────────────────────────────────────────
+  // MC type tab
+  const [mcTab, setMcTab] = useState<MCTab>("manipulation");
+
+  // Config state
+  const [nSimulations, setNSimulations] = useState(500);
   const [useResampling, setUseResampling] = useState(true);
-  const [useSkipTrades, setUseSkipTrades] = useState(false);
-  const [skipProbability, setSkipProbability] = useState(10);
-  const [nSimulations, setNSimulations] = useState(1000);
-  const [selectedStrategyId, setSelectedStrategyId] = useState<string>("__current__");
+  const [useSkipTrades, setUseSkipTrades] = useState(true);
+  const [skipPct, setSkipPct] = useState(10); // % (0-50)
 
-  // ── result ────────────────────────────────────────────────────────────────
+  // Result state
   const [result, setResult] = useState<MonteCarloResult | null>(null);
-  const [lastMethod, setLastMethod] = useState<MonteCarloMethod>("Resampling");
-
-  // ── filters ───────────────────────────────────────────────────────────────
-  const [filters, setFilters] = useState<MonteCarloFilter[]>([]);
-  const filterIdRef = useRef(0);
-
-  // ── run state ─────────────────────────────────────────────────────────────
-  const [isRunning, setIsRunning] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const abortRef = useRef(false);
 
-  // ── derived ───────────────────────────────────────────────────────────────
-  const strategyOptions: { id: string; label: string; strategy?: Strategy }[] = [
-    { id: "__current__", label: `Estrategia actual${currentStrategy.name ? `: ${currentStrategy.name}` : ""}` },
-    ...savedStrategies.map((s) => ({ id: s.id, label: s.name, strategy: s })),
-  ];
+  // Remember last-run config for the "methods used" footer
+  const [lastConfig, setLastConfig] = useState<{
+    useResampling: boolean;
+    useSkipTrades: boolean;
+    skipPct: number;
+    nSim: number;
+  } | null>(null);
 
-  const trades = backtestResults?.trades ?? [];
-  const canRun = trades.length >= 5 && (useResampling || useSkipTrades);
+  const canRun =
+    !loading &&
+    (useResampling || useSkipTrades) &&
+    lastBacktest !== null &&
+    lastBacktest.trades.length > 0;
 
-  // Derive the effective Monte Carlo method from the checkboxes
-  const effectiveMethod: MonteCarloMethod =
-    useResampling && useSkipTrades ? "Combined"
-    : useSkipTrades ? "SkipTrades"
-    : "Resampling";
+  const initialCapital =
+    lastBacktest?.trades?.[0]
+      ? lastBacktest.trades[0].entry_price /* approximate */ * 0 + 10000
+      : 10000;
 
-  const allFiltersPassing =
-    result && filters.length > 0
-      ? filters.every((f) => evaluateFilter(f, result))
-      : null;
+  // More accurate: derive initial_capital from equity curve first point
+  const derivedInitialCapital = (() => {
+    if (!lastBacktest) return 10000;
+    if (lastBacktest.equity_curve.length > 0) {
+      return lastBacktest.equity_curve[0].equity;
+    }
+    return 10000;
+  })();
 
-  // ── run ───────────────────────────────────────────────────────────────────
-  const handleRun = async () => {
-    if (!canRun || isRunning) return;
-    setIsRunning(true);
+  async function handleRun() {
+    if (!lastBacktest) return;
+    setLoading(true);
     setError(null);
-    abortRef.current = false;
+    setResult(null);
 
     const config: MonteCarloConfig = {
       n_simulations: nSimulations,
-      method: effectiveMethod,
-      skip_probability: skipProbability / 100,
+      use_resampling: useResampling,
+      use_skip_trades: useSkipTrades,
+      skip_probability: skipPct / 100,
     };
 
     try {
-      const r = await runMonteCarlo(trades, initialCapital, config);
-      if (!abortRef.current) {
-        setResult(r);
-        setLastMethod(effectiveMethod);
-        setMonteCarloResults(r);
-      }
+      const res = await runMonteCarlo(
+        lastBacktest.trades,
+        derivedInitialCapital,
+        config
+      );
+      setResult(res);
+      setLastConfig({ useResampling, useSkipTrades, skipPct, nSim: nSimulations });
     } catch (e) {
-      setError(String(e));
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setIsRunning(false);
+      setLoading(false);
     }
-  };
+  }
 
-  // ── method label for display ──────────────────────────────────────────────
-  const methodLabel =
-    lastMethod === "Combined"
-      ? `Combinado (Resampling + Skip ${skipProbability}%)`
-      : lastMethod === "SkipTrades"
-      ? `Skip Trades ${skipProbability}%`
-      : "Resampling";
+  const noData = !lastBacktest || lastBacktest.trades.length === 0;
 
-  // ── render ────────────────────────────────────────────────────────────────
   return (
-    <div className="mx-auto max-w-[1400px] space-y-4">
+    <div className="mx-auto max-w-[1400px] space-y-4 p-6">
+      {/* Header */}
+      <div className="flex items-center gap-3">
+        <Shield className="h-6 w-6 text-primary" />
+        <div>
+          <h1 className="text-xl font-semibold">Análisis de Robustez</h1>
+          <p className="text-sm text-muted-foreground">
+            Stress-test de la estrategia mediante simulaciones Monte Carlo
+          </p>
+        </div>
+      </div>
 
-      {/* ── Config card ── */}
+      {/* MC type tabs */}
+      <div className="flex gap-1 rounded-lg border border-border/40 bg-card/40 p-1 w-fit">
+        <button
+          onClick={() => setMcTab("manipulation")}
+          className={cn(
+            "flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition-colors",
+            mcTab === "manipulation"
+              ? "bg-primary text-primary-foreground shadow"
+              : "text-muted-foreground hover:text-foreground"
+          )}
+        >
+          <Shuffle className="h-4 w-4" />
+          Trade Manipulation
+        </button>
+        <button
+          disabled
+          className="flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium text-muted-foreground/40 cursor-not-allowed"
+        >
+          <FlaskConical className="h-4 w-4" />
+          Retest (parámetros / spread)
+          <Lock className="h-3 w-3 ml-1" />
+        </button>
+      </div>
+
+      {noData && (
+        <div className="flex items-center gap-2 rounded-lg border border-yellow-500/30 bg-yellow-500/5 p-4 text-sm text-yellow-300">
+          <AlertTriangle className="h-4 w-4 shrink-0" />
+          Primero ejecutá un backtest para poder correr el Monte Carlo.
+        </div>
+      )}
+
+      {/* Config card */}
       <Card>
         <CardHeader className="pb-3">
-          <div className="flex items-center gap-2">
-            <Shield className="h-4 w-4 text-primary" />
-            <CardTitle className="text-sm font-semibold text-foreground">
-              Simulación Monte Carlo
-            </CardTitle>
-          </div>
+          <CardTitle className="text-base">Configuración</CardTitle>
         </CardHeader>
-        <CardContent className="space-y-5">
-
-          {/* Row 1: strategy + simulations */}
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <div className="flex flex-col gap-1.5">
-              <label className="text-xs font-medium text-muted-foreground">Estrategia</label>
+        <CardContent className="space-y-4">
+          {/* Top row: simulations + run button */}
+          <div className="flex flex-wrap items-center gap-6">
+            <div className="flex items-center gap-3">
+              <label className="text-sm text-muted-foreground whitespace-nowrap">
+                Número de simulaciones
+              </label>
               <select
-                value={selectedStrategyId}
-                onChange={(e) => setSelectedStrategyId(e.target.value)}
-                className="rounded-md border border-border bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+                value={nSimulations}
+                onChange={(e) => setNSimulations(Number(e.target.value))}
+                disabled={loading}
+                className="rounded border border-border bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
               >
-                {strategyOptions.map((opt) => (
-                  <option key={opt.id} value={opt.id}>{opt.label}</option>
+                {N_SIM_OPTIONS.map((n) => (
+                  <option key={n} value={n}>{n.toLocaleString()}</option>
                 ))}
               </select>
-              <span className="text-[11px] text-muted-foreground">
-                {trades.length} trades del último backtest
-              </span>
             </div>
 
-            <div className="flex flex-col gap-1.5">
-              <label className="text-xs font-medium text-muted-foreground">Nº de Simulaciones</label>
-              <input
-                type="number"
-                min={100}
-                max={100000}
-                step={100}
-                value={nSimulations}
-                onChange={(e) => setNSimulations(Math.max(100, Math.min(100000, Number(e.target.value))))}
-                className="rounded-md border border-border bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
-              />
-              <span className="text-[11px] text-muted-foreground">100 – 100,000</span>
-            </div>
-          </div>
-
-          {/* Row 2: method checkboxes */}
-          <div>
-            <label className="mb-2 block text-xs font-medium text-muted-foreground">
-              Métodos
-              {useResampling && useSkipTrades && (
-                <span className="ml-2 inline-flex items-center gap-1 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-bold text-primary">
-                  <Combine className="h-3 w-3" />
-                  COMBINADO — una sola distribución unificada
-                </span>
-              )}
-            </label>
-            <div className="space-y-2">
-              {(["Resampling", "SkipTrades"] as const).map((m) => {
-                const checked = m === "Resampling" ? useResampling : useSkipTrades;
-                const toggle = m === "Resampling" ? setUseResampling : setUseSkipTrades;
-                const info = METHOD_INFO[m];
-                return (
-                  <label
-                    key={m}
-                    className={cn(
-                      "flex cursor-pointer items-start gap-3 rounded-lg border px-4 py-3 transition-colors",
-                      checked
-                        ? "border-primary/40 bg-primary/5"
-                        : "border-border/40 bg-background hover:bg-foreground/[0.02]"
-                    )}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={(e) => toggle(e.target.checked)}
-                      className="accent-primary mt-0.5 h-4 w-4 shrink-0"
-                    />
-                    <span className={cn("mt-0.5", checked ? "text-primary" : "text-muted-foreground")}>
-                      {info.icon}
-                    </span>
-                    <div className="flex-1">
-                      <p className="text-sm font-medium">{info.label}</p>
-                      <p className="text-[11px] text-muted-foreground">{info.desc}</p>
-                    </div>
-                    {m === "SkipTrades" && checked && (
-                      <div
-                        className="flex shrink-0 items-center gap-2"
-                        onClick={(e) => e.preventDefault()}
-                      >
-                        <span className="text-xs text-muted-foreground">Prob.:</span>
-                        <input
-                          type="range"
-                          min={1}
-                          max={50}
-                          step={1}
-                          value={skipProbability}
-                          onChange={(e) => setSkipProbability(Number(e.target.value))}
-                          className="w-24 accent-primary"
-                        />
-                        <span className="w-9 font-mono text-sm font-bold">{skipProbability}%</span>
-                      </div>
-                    )}
-                  </label>
-                );
-              })}
-            </div>
-
-            {/* Combined explanation */}
-            {useResampling && useSkipTrades && (
-              <p className="mt-2 flex items-start gap-1.5 text-[11px] text-muted-foreground">
-                <Combine className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
-                La mitad de las simulaciones usan Resampling y la otra mitad Skip Trades.
-                Todos los resultados se fusionan en una sola distribución — más conservadora y completa.
-              </p>
-            )}
-          </div>
-
-          {/* Row 3: filters */}
-          <div>
-            <div className="mb-2 flex items-center gap-3">
-              <label className="text-xs font-medium text-muted-foreground">Filtros de aprobación</label>
-              {result && filters.length > 0 && (
-                <span className={cn(
-                  "flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-bold",
-                  allFiltersPassing
-                    ? "bg-emerald-500/15 text-emerald-400"
-                    : "bg-red-500/15 text-red-400"
-                )}>
-                  {allFiltersPassing
-                    ? <><CheckCircle2 className="h-3 w-3" /> APROBADO</>
-                    : <><XCircle className="h-3 w-3" /> REPROBADO</>}
-                </span>
-              )}
-            </div>
-
-            {filters.length === 0 && (
-              <p className="text-xs italic text-muted-foreground">
-                Sin filtros. Agregá criterios para evaluar si la estrategia pasa el test.
-              </p>
-            )}
-
-            <div className="space-y-2">
-              {filters.map((f) => (
-                <FilterRow
-                  key={f.id}
-                  filter={f}
-                  result={result}
-                  onChange={(upd) => setFilters((prev) => prev.map((x) => (x.id === f.id ? upd : x)))}
-                  onRemove={() => setFilters((prev) => prev.filter((x) => x.id !== f.id))}
-                />
-              ))}
-            </div>
-
-            <button
-              onClick={() => {
-                filterIdRef.current += 1;
-                setFilters((prev) => [...prev, {
-                  id: String(filterIdRef.current),
-                  metric: "net_return",
-                  percentile: 25,
-                  comparison: ">",
-                  threshold_type: "absolute",
-                  threshold_value: 0,
-                }]);
-              }}
-              className="mt-2 flex items-center gap-1.5 rounded-md border border-dashed border-border/60 px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary"
+            <Button
+              onClick={handleRun}
+              disabled={!canRun}
+              className="ml-auto"
             >
-              <Plus className="h-3.5 w-3.5" />
-              Agregar filtro
-            </button>
-          </div>
-
-          {/* Warnings */}
-          {trades.length < 5 && (
-            <div className="flex items-center gap-2 rounded-md border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-xs text-yellow-400">
-              <AlertTriangle className="h-4 w-4 shrink-0" />
-              Ejecutá un backtest primero. Se necesitan al menos 5 trades.
-            </div>
-          )}
-          {trades.length >= 5 && !useResampling && !useSkipTrades && (
-            <div className="flex items-center gap-2 rounded-md border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-xs text-yellow-400">
-              <AlertTriangle className="h-4 w-4 shrink-0" />
-              Seleccioná al menos un método.
-            </div>
-          )}
-
-          {/* Run + cancel */}
-          <div className="flex items-center gap-3">
-            <Button onClick={handleRun} disabled={!canRun || isRunning} size="sm">
-              {isRunning ? (
-                <><Loader2 className="mr-1.5 h-4 w-4 animate-spin" />Simulando…</>
+              {loading ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Simulando…
+                </>
               ) : (
-                <><Play className="mr-1.5 h-4 w-4" />Ejecutar Monte Carlo</>
+                <>
+                  <Play className="mr-2 h-4 w-4" />
+                  Correr Monte Carlo
+                </>
               )}
             </Button>
-            {isRunning && (
-              <Button variant="outline" size="sm" onClick={() => { abortRef.current = true; setIsRunning(false); }}>
-                Cancelar
-              </Button>
-            )}
           </div>
 
-          {error && (
-            <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-              {error}
-            </div>
+          {/* Method checkboxes */}
+          <div className="space-y-2">
+            {/* Resampling */}
+            <label className={cn(
+              "flex items-center gap-3 rounded-md border px-3 py-2.5 cursor-pointer transition-colors",
+              useResampling
+                ? "border-primary/40 bg-primary/5"
+                : "border-border/40 bg-card/40 hover:border-border"
+            )}>
+              <input
+                type="checkbox"
+                checked={useResampling}
+                onChange={(e) => setUseResampling(e.target.checked)}
+                className="h-4 w-4 rounded accent-primary"
+                disabled={loading}
+              />
+              <Shuffle className="h-4 w-4 text-muted-foreground shrink-0" />
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium">Randomize trades order, with method Resampling</p>
+                <p className="text-xs text-muted-foreground">
+                  Bootstrap con reemplazo — cada simulación sortea N trades del pool con repetición
+                </p>
+              </div>
+            </label>
+
+            {/* Skip Trades */}
+            <label className={cn(
+              "flex items-center gap-3 rounded-md border px-3 py-2.5 cursor-pointer transition-colors",
+              useSkipTrades
+                ? "border-primary/40 bg-primary/5"
+                : "border-border/40 bg-card/40 hover:border-border"
+            )}>
+              <input
+                type="checkbox"
+                checked={useSkipTrades}
+                onChange={(e) => setUseSkipTrades(e.target.checked)}
+                className="h-4 w-4 rounded accent-primary"
+                disabled={loading}
+              />
+              <SkipForward className="h-4 w-4 text-muted-foreground shrink-0" />
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium">
+                  Randomly skip trades, with probability{" "}
+                  <span className="text-primary font-semibold">{skipPct} %</span>
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  Simula trades perdidos por fallo de plataforma o internet
+                </p>
+              </div>
+              {/* Slider inline */}
+              {useSkipTrades && (
+                <div className="flex items-center gap-2 ml-2 shrink-0" onClick={(e) => e.preventDefault()}>
+                  <input
+                    type="range"
+                    min={1}
+                    max={50}
+                    value={skipPct}
+                    onChange={(e) => setSkipPct(Number(e.target.value))}
+                    disabled={loading}
+                    className="w-28 accent-primary"
+                  />
+                  <span className="w-8 text-right text-xs tabular-nums text-muted-foreground">
+                    {skipPct}%
+                  </span>
+                </div>
+              )}
+            </label>
+          </div>
+
+          {/* Combined note */}
+          {useResampling && useSkipTrades && (
+            <p className="text-xs text-muted-foreground/70 pl-1">
+              ✓ Ambos activos: cada simulación aplica primero Resampling y luego Skip Trades —
+              comportamiento idéntico a StrategyQuant X con ambos métodos marcados.
+            </p>
           )}
         </CardContent>
       </Card>
 
-      {/* ── Empty state ── */}
-      {!result && !isRunning && (
-        <div className="py-14 text-center">
-          <BarChart3 className="mx-auto mb-3 h-10 w-10 text-muted-foreground/30" />
-          <p className="text-sm text-muted-foreground">
-            Configurá la simulación y presioná <strong>Ejecutar Monte Carlo</strong>
-          </p>
+      {/* Error */}
+      {error && (
+        <div className="flex items-center gap-2 rounded-lg border border-red-500/30 bg-red-500/5 p-4 text-sm text-red-300">
+          <AlertTriangle className="h-4 w-4 shrink-0" />
+          {error}
         </div>
       )}
 
-      {/* ── Results ── */}
+      {/* Results */}
       {result && (
         <>
-          {/* Equity fan chart */}
-          <Card>
-            <CardHeader className="pb-2">
-              <div className="flex items-center justify-between">
-                <CardTitle>
-                  Curvas de Equity — {result.sim_equity_curves.length} sim. · {methodLabel}
-                </CardTitle>
-                <div className="flex items-center gap-3 text-xs text-muted-foreground">
-                  <span className="flex items-center gap-1.5">
-                    <span className="inline-block h-2 w-5 rounded-sm" style={{ background: "rgba(139,92,246,0.5)" }} />
-                    Simulaciones
+          {/* Table + Chart side by side */}
+          <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(500px,auto)_1fr]">
+            {/* Confidence Table */}
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base">Tabla de Confianza</CardTitle>
+                <p className="text-xs text-muted-foreground">
+                  C% confianza = solo (100−C)% de chance de que los resultados sean peores
+                </p>
+              </CardHeader>
+              <CardContent className="p-0 pb-4">
+                <ConfidenceTable result={result} />
+
+                {/* Ruin probability */}
+                <div className="mt-4 flex items-center gap-2 px-4">
+                  <span className="text-xs text-muted-foreground">Probabilidad de ruina:</span>
+                  <span className={cn("text-sm font-semibold", riskColor(result.ruin_probability))}>
+                    {(result.ruin_probability * 100).toFixed(1)}%
                   </span>
-                  <span className="flex items-center gap-1.5">
-                    <span className="inline-block h-2 w-5 rounded-sm bg-blue-400" />
-                    Original
+                  <span className="text-xs text-muted-foreground">
+                    ({Math.round(result.ruin_probability * result.n_simulations)} / {result.n_simulations} simulaciones)
                   </span>
                 </div>
-              </div>
-            </CardHeader>
-            <CardContent className="pb-4">
-              <div style={{ height: 320 }}>
-                <EquityFanChart
-                  simCurves={result.sim_equity_curves}
-                  originalCurve={result.original_equity_curve}
-                  initialCapital={initialCapital}
-                />
-              </div>
-            </CardContent>
-          </Card>
+              </CardContent>
+            </Card>
 
-          {/* Stat cards + risk/filter badges */}
-          <Card>
-            <CardContent className="space-y-4 pt-4">
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                {[
-                  { label: "Retorno Mediano", value: fmtPct(result.median_return_pct), cls: result.median_return_pct >= 0 ? "text-emerald-400" : "text-red-400", sub: "P50" },
-                  { label: "Rango P5 – P95", value: `${fmtPct(result.p5_return_pct)} / ${fmtPct(result.p95_return_pct)}`, cls: "text-foreground", sub: "90% de resultados" },
-                  { label: "Prob. de Pérdida", value: `${(result.ruin_probability * 100).toFixed(1)}%`, cls: riskColor(result.ruin_probability), sub: "Equity < capital inicial" },
-                  { label: "DD Máx. P95", value: `-${fmt(result.p95_max_drawdown_pct)}%`, cls: "text-red-400", sub: "Peor 5% de escenarios" },
-                ].map((c) => (
-                  <div key={c.label} className="flex flex-col gap-1 rounded-lg border border-border/40 bg-background p-3">
-                    <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">{c.label}</span>
-                    <span className={cn("text-xl font-bold tabular-nums", c.cls)}>{c.value}</span>
-                    <span className="text-xs text-muted-foreground">{c.sub}</span>
-                  </div>
-                ))}
-              </div>
-
-              <div className="flex flex-wrap items-center gap-3">
-                <div className={cn(
-                  "flex flex-1 items-center gap-3 rounded-lg border px-4 py-3",
-                  result.ruin_probability < 0.05 ? "border-emerald-500/30 bg-emerald-500/10"
-                  : result.ruin_probability < 0.2 ? "border-yellow-500/30 bg-yellow-500/10"
-                  : "border-red-500/30 bg-red-500/10"
-                )}>
-                  <Shield className={cn("h-5 w-5 shrink-0",
-                    result.ruin_probability < 0.05 ? "text-emerald-400"
-                    : result.ruin_probability < 0.2 ? "text-yellow-400"
-                    : "text-red-400")} />
-                  <div>
-                    <p className={cn("text-sm font-semibold",
-                      result.ruin_probability < 0.05 ? "text-emerald-400"
-                      : result.ruin_probability < 0.2 ? "text-yellow-400"
-                      : "text-red-400")}>
-                      {result.ruin_probability < 0.05 ? "Estrategia robusta"
-                      : result.ruin_probability < 0.2 ? "Riesgo moderado"
-                      : "Riesgo elevado"}
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      {result.n_simulations.toLocaleString()} sim. · {methodLabel} ·{" "}
-                      {result.p25_return_pct >= 0 ? "El 75% de escenarios es positivo" : "Más del 25% termina en pérdida"}
-                    </p>
-                  </div>
+            {/* Equity Fan Chart */}
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base">Equity Curves</CardTitle>
+                <p className="text-xs text-muted-foreground">
+                  {result.sim_equity_curves.length} simulaciones —{" "}
+                  <span className="text-blue-400">azul = estrategia original</span>
+                </p>
+              </CardHeader>
+              <CardContent className="p-2">
+                <div style={{ height: 340 }}>
+                  <EquityFanChart
+                    simCurves={result.sim_equity_curves}
+                    originalCurve={result.original_equity_curve}
+                    initialCapital={derivedInitialCapital}
+                  />
                 </div>
+              </CardContent>
+            </Card>
+          </div>
 
-                {allFiltersPassing !== null && (
-                  <span className={cn(
-                    "flex items-center gap-1.5 rounded-full px-4 py-2.5 text-sm font-bold",
-                    allFiltersPassing ? "bg-emerald-500/15 text-emerald-400" : "bg-red-500/15 text-red-400"
-                  )}>
-                    {allFiltersPassing ? <CheckCircle2 className="h-4 w-4" /> : <XCircle className="h-4 w-4" />}
-                    {allFiltersPassing ? "APROBADO" : "REPROBADO"}
-                  </span>
-                )}
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Distribution charts */}
-          <Card>
-            <CardContent className="pt-4">
-              <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-                <div>
-                  <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold text-foreground/70">
-                    <TrendingUp className="h-4 w-4 text-primary" />
-                    Distribución de Retornos
-                  </h3>
-                  <div className="h-52">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={[
-                        { label: "P5", value: result.p5_return_pct },
-                        { label: "P25", value: result.p25_return_pct },
-                        { label: "Med", value: result.median_return_pct },
-                        { label: "P75", value: result.p75_return_pct },
-                        { label: "P95", value: result.p95_return_pct },
-                      ]} margin={{ top: 4, right: 4, left: 0, bottom: 4 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="currentColor" className="opacity-10" />
-                        <XAxis dataKey="label" tick={{ fontSize: 11, fill: "currentColor" }} className="text-muted-foreground" />
-                        <YAxis tick={{ fontSize: 11, fill: "currentColor" }} className="text-muted-foreground" tickFormatter={(v) => `${v.toFixed(0)}%`} />
-                        <Tooltip formatter={(v: number) => [fmtPct(v), "Retorno"]} contentStyle={TOOLTIP_STYLE} />
-                        <ReferenceLine y={0} stroke="hsl(var(--muted-foreground))" strokeDasharray="4 4" />
-                        <Bar dataKey="value" radius={[4, 4, 0, 0]}>
-                          {[result.p5_return_pct, result.p25_return_pct, result.median_return_pct, result.p75_return_pct, result.p95_return_pct].map((v, i) => (
-                            <Cell key={i} fill={v >= 0 ? "hsl(var(--primary))" : "hsl(var(--destructive))"} fillOpacity={0.85} />
-                          ))}
-                        </Bar>
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </div>
+          {/* Simulation methods used footer */}
+          {lastConfig && (
+            <Card className="border-border/30 bg-card/30">
+              <CardContent className="py-3 px-4">
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  Simulation methods used
+                </p>
+                <div className="space-y-0.5 text-xs text-muted-foreground">
+                  {selectedSymbol && (
+                    <p>{selectedSymbol.name}</p>
+                  )}
+                  <p>Simulations: {result.n_simulations.toLocaleString()}</p>
+                  {lastConfig.useResampling && (
+                    <p>Randomize trades order, with method Resampling</p>
+                  )}
+                  {lastConfig.useSkipTrades && (
+                    <p>Randomly skip trades, with probability {lastConfig.skipPct} %</p>
+                  )}
                 </div>
-                <div>
-                  <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold text-foreground/70">
-                    <TrendingDown className="h-4 w-4 text-destructive" />
-                    Drawdown Máximo Simulado
-                  </h3>
-                  <div className="h-52">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={[
-                        { label: "P25", value: result.p25_max_drawdown_pct },
-                        { label: "Med", value: result.median_max_drawdown_pct },
-                        { label: "P75", value: result.p75_max_drawdown_pct },
-                        { label: "P95", value: result.p95_max_drawdown_pct },
-                      ]} margin={{ top: 4, right: 4, left: 0, bottom: 4 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="currentColor" className="opacity-10" />
-                        <XAxis dataKey="label" tick={{ fontSize: 11, fill: "currentColor" }} className="text-muted-foreground" />
-                        <YAxis tick={{ fontSize: 11, fill: "currentColor" }} className="text-muted-foreground" tickFormatter={(v) => `${v.toFixed(0)}%`} />
-                        <Tooltip formatter={(v: number) => [`-${v.toFixed(2)}%`, "Max DD"]} contentStyle={TOOLTIP_STYLE} />
-                        <Bar dataKey="value" radius={[4, 4, 0, 0]} fill="hsl(var(--destructive))" fillOpacity={0.8} />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </div>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Percentile table */}
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle>Tabla de Percentiles</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-border/40 text-left text-xs text-muted-foreground">
-                    <th className="pb-2 pr-6 font-medium">Percentil</th>
-                    <th className="pb-2 pr-6 font-medium">Retorno</th>
-                    <th className="pb-2 pr-6 font-medium">Max Drawdown</th>
-                    <th className="pb-2 font-medium">Interpretación</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border/20">
-                  {[
-                    { label: "P5 (peor 5%)",  ret: result.p5_return_pct,      dd: null,                           desc: "Escenario muy adverso" },
-                    { label: "P25",           ret: result.p25_return_pct,     dd: result.p25_max_drawdown_pct,    desc: "1 de cada 4 corre peor" },
-                    { label: "P50 (mediana)", ret: result.median_return_pct,  dd: result.median_max_drawdown_pct, desc: "Resultado más probable" },
-                    { label: "P75",           ret: result.p75_return_pct,     dd: result.p75_max_drawdown_pct,    desc: "1 de cada 4 corre mejor" },
-                    { label: "P95 (mejor 5%)",ret: result.p95_return_pct,     dd: result.p95_max_drawdown_pct,    desc: "Escenario muy favorable" },
-                  ].map((row) => (
-                    <tr key={row.label}>
-                      <td className="py-2 pr-6 text-muted-foreground">{row.label}</td>
-                      <td className={cn("py-2 pr-6 font-mono font-semibold", row.ret >= 0 ? "text-emerald-400" : "text-red-400")}>
-                        {fmtPct(row.ret)}
-                      </td>
-                      <td className="py-2 pr-6 font-mono font-semibold text-red-400">
-                        {row.dd !== null ? `-${fmt(row.dd)}%` : "–"}
-                      </td>
-                      <td className="py-2 text-xs text-muted-foreground">{row.desc}</td>
-                    </tr>
-                  ))}
-                  <tr className="border-t border-border/30 bg-foreground/[0.02]">
-                    <td className="py-2 pr-6 font-medium">Original</td>
-                    <td className={cn("py-2 pr-6 font-mono font-semibold", result.original_return_pct >= 0 ? "text-blue-400" : "text-red-400")}>
-                      {fmtPct(result.original_return_pct)}
-                    </td>
-                    <td className="py-2 pr-6 font-mono font-semibold text-blue-400">
-                      -{fmt(result.original_max_drawdown_pct)}%
-                    </td>
-                    <td className="py-2 text-xs text-muted-foreground">Backtest histórico real</td>
-                  </tr>
-                </tbody>
-              </table>
-            </CardContent>
-          </Card>
+              </CardContent>
+            </Card>
+          )}
         </>
       )}
     </div>

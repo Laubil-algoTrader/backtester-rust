@@ -27,29 +27,44 @@ pub struct MonthlyReturn {
     pub return_pct: f64,
 }
 
-/// Monte Carlo simulation method.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub enum MonteCarloMethod {
-    /// Bootstrap resampling with replacement: draw N trades randomly from the historical pool,
-    /// allowing the same trade to appear multiple times. Produces genuinely different returns.
-    Resampling,
-    /// Randomly skip each trade with the given probability. Models missed executions,
-    /// technical failures, or selective filtering — the trade sequence remains ordered.
-    SkipTrades,
-    /// Combined stress test: alternates evenly between Resampling and SkipTrades simulations.
-    /// Half the simulations resample trades, half skip trades — unified into one distribution.
-    /// Produces a more conservative and comprehensive picture of strategy robustness.
-    Combined,
-}
-
 /// Configuration for a Monte Carlo simulation run.
+///
+/// When both `use_resampling` and `use_skip_trades` are enabled, each simulation
+/// applies them sequentially: first bootstrap-resample the trades, then randomly
+/// skip some from the resampled set. This is the same behaviour as StrategyQuant X
+/// when both methods are checked simultaneously.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MonteCarloConfig {
     pub n_simulations: usize,
-    pub method: MonteCarloMethod,
-    /// Probability of skipping each trade (0.0–1.0). Only used for `SkipTrades`.
+    /// Apply bootstrap resampling (draw N trades with replacement from the historical pool).
+    #[serde(default)]
+    pub use_resampling: bool,
+    /// Randomly skip each trade with `skip_probability`. Models missed executions.
+    #[serde(default)]
+    pub use_skip_trades: bool,
+    /// Probability of skipping each trade (0.0–1.0). Only used when `use_skip_trades` is true.
     #[serde(default)]
     pub skip_probability: f64,
+}
+
+/// One row in the confidence-level table returned by Monte Carlo simulation.
+///
+/// A confidence level of C % means: "there is only (100 − C)% chance that the
+/// metric will be worse than the value shown here."  For profit-like metrics
+/// (net_profit, ret_dd_ratio, expectancy) the displayed value is the pessimistic
+/// tail; for drawdown it is the worst-case tail.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonteCarloConfidenceRow {
+    /// Confidence level in percent (e.g. 95.0).
+    pub level: f64,
+    /// Net profit at this confidence level ($).
+    pub net_profit: f64,
+    /// Maximum drawdown at this confidence level ($, absolute peak-to-trough).
+    pub max_drawdown_abs: f64,
+    /// Return / Drawdown ratio at this confidence level.
+    pub ret_dd_ratio: f64,
+    /// Average profit per executed trade ($) at this confidence level.
+    pub expectancy: f64,
 }
 
 /// Results of a Monte Carlo simulation run on historical trades.
@@ -57,34 +72,24 @@ pub struct MonteCarloConfig {
 pub struct MonteCarloResult {
     pub n_simulations: usize,
 
-    // Return percentiles
-    pub median_return_pct: f64,
-    pub p5_return_pct: f64,
-    pub p25_return_pct: f64,
-    pub p75_return_pct: f64,
-    pub p95_return_pct: f64,
-
-    /// Fraction of simulations where equity dropped below initial capital at any point.
+    /// Fraction of simulations (0–1) where equity fell below initial capital at any point.
     pub ruin_probability: f64,
 
-    // Max-drawdown percentiles
-    pub median_max_drawdown_pct: f64,
-    pub p25_max_drawdown_pct: f64,
-    pub p75_max_drawdown_pct: f64,
-    pub p95_max_drawdown_pct: f64,
+    // ── Original strategy metrics (comparison row in table) ──────────────────
+    pub original_net_profit: f64,
+    pub original_max_drawdown_abs: f64,
+    pub original_ret_dd_ratio: f64,
+    pub original_expectancy: f64,
+    pub original_return_pct: f64,
+    pub original_max_drawdown_pct: f64,
+
+    /// Confidence table rows at levels [50, 60, 70, 80, 90, 92, 95, 97, 98].
+    pub confidence_table: Vec<MonteCarloConfidenceRow>,
 
     /// Sampled simulation equity curves for visualization (max 200, each ≤300 points).
-    /// Each inner vec starts at `initial_capital` and ends at the simulation's final equity.
     pub sim_equity_curves: Vec<Vec<f64>>,
-
     /// Original (historical) equity curve, downsampled to the same resolution.
     pub original_equity_curve: Vec<f64>,
-
-    /// Original strategy net return % — reference value for filter comparisons.
-    pub original_return_pct: f64,
-
-    /// Original strategy max drawdown % — reference value for filter comparisons.
-    pub original_max_drawdown_pct: f64,
 }
 
 /// All performance metrics from a backtest.

@@ -727,9 +727,9 @@ pub async fn run_walk_forward(
 ///
 /// Run a Monte Carlo simulation on historical trades.
 ///
-/// Accepts a `MonteCarloConfig` that specifies the method (Resampling or SkipTrades),
-/// the number of simulations, and (for SkipTrades) the skip probability.
-/// Returns percentile statistics, ruin probability, and sampled equity curves for visualization.
+/// Accepts a `MonteCarloConfig` that specifies which methods to apply
+/// (resampling and/or skip trades), the number of simulations, and the skip probability.
+/// Returns a confidence-level table plus sampled equity curves for visualization.
 #[tauri::command]
 pub async fn run_monte_carlo(
     state: tauri::State<'_, AppState>,
@@ -738,10 +738,11 @@ pub async fn run_monte_carlo(
     config: MonteCarloConfig,
 ) -> Result<MonteCarloResult, AppError> {
     info!(
-        "Running Monte Carlo: {} trades, {} simulations, method={:?}",
+        "Running Monte Carlo: {} trades, {} simulations, resample={}, skip={}",
         trades.len(),
         config.n_simulations,
-        config.method,
+        config.use_resampling,
+        config.use_skip_trades,
     );
 
     state.cancel_flag.store(false, Ordering::Relaxed);

@@ -622,57 +622,51 @@ export type AppSection = "data" | "strategy" | "backtest" | "optimization" | "ro
 
 // ── Monte Carlo ──
 
-export type MonteCarloMethod = "Resampling" | "SkipTrades" | "Combined";
-
+/** Configuration for a Monte Carlo simulation run. */
 export interface MonteCarloConfig {
   n_simulations: number;
-  method: MonteCarloMethod;
-  /** Probability 0–1 of skipping each trade. Only used for SkipTrades. */
+  /** Apply bootstrap resampling (draw N trades with replacement). */
+  use_resampling: boolean;
+  /** Randomly skip each trade with skip_probability. */
+  use_skip_trades: boolean;
+  /** Probability 0–1 of skipping each trade. Only used when use_skip_trades is true. */
   skip_probability: number;
 }
 
-export type MonteCarloFilterMetric = "net_return" | "max_drawdown";
-export type MonteCarloFilterPercentile = 5 | 25 | 50 | 75 | 95;
-export type MonteCarloFilterComparison = ">" | "<" | ">=" | "<=";
-export type MonteCarloFilterThresholdType = "absolute" | "pct_of_original";
-
-export interface MonteCarloFilter {
-  id: string;
-  metric: MonteCarloFilterMetric;
-  percentile: MonteCarloFilterPercentile;
-  comparison: MonteCarloFilterComparison;
-  /** "absolute": raw % value.  "pct_of_original": % of the original strategy's value. */
-  threshold_type: MonteCarloFilterThresholdType;
-  threshold_value: number;
+/**
+ * One row in the confidence-level table.
+ * C% confidence = "only (100−C)% chance results will be worse than these values."
+ * For net_profit / ret_dd_ratio / expectancy: pessimistic tail (lower values).
+ * For max_drawdown_abs: worst-case tail (higher values).
+ */
+export interface MonteCarloConfidenceRow {
+  level: number;
+  net_profit: number;
+  max_drawdown_abs: number;
+  ret_dd_ratio: number;
+  expectancy: number;
 }
 
 export interface MonteCarloResult {
   n_simulations: number;
-
-  // Return percentiles
-  median_return_pct: number;
-  p5_return_pct: number;
-  p25_return_pct: number;
-  p75_return_pct: number;
-  p95_return_pct: number;
-
   /** Fraction of simulations (0–1) where equity fell below initial capital at any point */
   ruin_probability: number;
 
-  // Max-drawdown percentiles
-  median_max_drawdown_pct: number;
-  p25_max_drawdown_pct: number;
-  p75_max_drawdown_pct: number;
-  p95_max_drawdown_pct: number;
+  // Original strategy metrics (comparison row in table)
+  original_net_profit: number;
+  original_max_drawdown_abs: number;
+  original_ret_dd_ratio: number;
+  original_expectancy: number;
+  original_return_pct: number;
+  original_max_drawdown_pct: number;
+
+  /** Confidence table rows at levels [50, 60, 70, 80, 90, 92, 95, 97, 98] */
+  confidence_table: MonteCarloConfidenceRow[];
 
   /** Sampled simulation equity curves for visualization (max 200, each ≤300 points) */
   sim_equity_curves: number[][];
   /** Original historical equity curve, same downsampling */
   original_equity_curve: number[];
-  /** Original net return % — reference for filter comparisons */
-  original_return_pct: number;
-  /** Original max drawdown % — reference for filter comparisons */
-  original_max_drawdown_pct: number;
 }
 
 // ── New BacktestMetrics fields (P4.4) ──
