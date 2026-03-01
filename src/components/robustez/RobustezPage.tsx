@@ -253,7 +253,7 @@ type MCTab = "manipulation" | "retest";
 
 const N_SIM_OPTIONS = [100, 250, 500, 1000, 2000];
 
-export default function RobustezPage() {
+export function RobustezPage() {
   const lastBacktest = useAppStore((s) => s.lastBacktest);
   const selectedSymbol = useAppStore((s) => s.selectedSymbol);
 
