@@ -323,7 +323,11 @@ fn build_grid_ranges(ranges: &[ParameterRange]) -> Result<(Vec<Vec<f64>>, usize)
         }
         let mut vals = Vec::new();
         let mut v = r.min;
-        while v <= r.max + f64::EPSILON {
+        // Use half a step as the floating-point guard.
+        // f64::EPSILON is too small when max is large (e.g. 100.0): accumulated
+        // addition error can exceed 2.2e-16, causing the last value to be dropped.
+        let guard = r.step * 0.5;
+        while v <= r.max + guard {
             vals.push(v);
             v += r.step;
         }

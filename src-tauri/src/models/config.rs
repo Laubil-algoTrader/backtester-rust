@@ -17,6 +17,20 @@ pub struct InstrumentConfig {
     pub digits: usize,
 }
 
+impl Default for InstrumentConfig {
+    /// Defaults to a standard 5-digit Forex major pair (e.g. EUR/USD).
+    fn default() -> Self {
+        Self {
+            pip_size: 0.0001,
+            pip_value: 10.0,
+            lot_size: 100_000.0,
+            min_lot: 0.01,
+            tick_size: 0.00001,
+            digits: 5,
+        }
+    }
+}
+
 /// Supported timeframes for OHLCV data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

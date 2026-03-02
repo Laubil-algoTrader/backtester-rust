@@ -45,6 +45,16 @@ pub struct MonteCarloConfig {
     /// Probability of skipping each trade (0.0–1.0). Only used when `use_skip_trades` is true.
     #[serde(default)]
     pub skip_probability: f64,
+    /// Ruin threshold as a percentage loss of initial capital (0–100).
+    /// A simulation is considered "ruined" when equity drops below
+    /// `initial_capital * (1 - ruin_threshold_pct / 100)`.
+    /// Default 20.0 means: losing 20 % of capital = ruin.
+    #[serde(default = "default_ruin_threshold")]
+    pub ruin_threshold_pct: f64,
+}
+
+fn default_ruin_threshold() -> f64 {
+    20.0
 }
 
 /// One row in the confidence-level table returned by Monte Carlo simulation.
@@ -172,6 +182,8 @@ pub struct BacktestResults {
     pub drawdown_curve: Vec<DrawdownPoint>,
     pub returns: Vec<f64>,
     pub metrics: BacktestMetrics,
+    /// The backtest configuration used to generate these results (capital, timeframe, dates, etc.)
+    pub backtest_config: BacktestConfig,
 }
 
 // ══════════════════════════════════════════════════════════════

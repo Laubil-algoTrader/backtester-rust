@@ -508,6 +508,8 @@ export interface BacktestResults {
   drawdown_curve: DrawdownPoint[];
   returns: number[];
   metrics: BacktestMetrics;
+  /** The backtest configuration used to produce these results. */
+  backtest_config: BacktestConfig;
 }
 
 // ── Optimization ──
@@ -631,6 +633,12 @@ export interface MonteCarloConfig {
   use_skip_trades: boolean;
   /** Probability 0–1 of skipping each trade. Only used when use_skip_trades is true. */
   skip_probability: number;
+  /**
+   * Ruin threshold as a % loss of initial capital (0–100).
+   * A simulation is "ruined" when equity drops below initial_capital × (1 − ruin_threshold_pct/100).
+   * Default 20 = losing 20% of capital counts as ruin.
+   */
+  ruin_threshold_pct: number;
 }
 
 /**

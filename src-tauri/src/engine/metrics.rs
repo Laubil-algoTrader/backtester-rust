@@ -32,21 +32,54 @@ pub fn calculate_metrics(
         return empty_metrics(initial_capital);
     }
 
-    // ── Trade classification ──
-    let winning: Vec<&TradeResult> = trades.iter().filter(|t| t.pnl > 0.0).collect();
-    let losing: Vec<&TradeResult> = trades.iter().filter(|t| t.pnl < 0.0).collect();
-    let breakeven: Vec<&TradeResult> = trades.iter().filter(|t| t.pnl.abs() < 1e-6).collect();
+    // ── Trade classification + P&L (single pass) ──
+    // Thresholds ensure mutual exclusivity: |pnl| < 1e-6 → breakeven, avoiding
+    // double-counting trades where pnl is near-zero but technically > 0 or < 0.
+    let mut winning_trades = 0usize;
+    let mut losing_trades = 0usize;
+    let mut breakeven_trades = 0usize;
+    let mut gross_profit = 0.0f64;
+    let mut gross_loss = 0.0f64;
+    let mut largest_win = 0.0f64;
+    let mut largest_loss = 0.0f64;
+    let mut total_commission = 0.0f64;
+    let mut sum_pnl = 0.0f64;
+    let mut winner_bars_sum = 0usize;
+    let mut loser_bars_sum = 0usize;
+    let mut total_bars_sum = 0usize;
+    let mut mae_sum = 0.0f64;
+    let mut mae_max_acc = 0.0f64;
+    let mut mfe_sum = 0.0f64;
+    let mut mfe_max_acc = 0.0f64;
 
-    let winning_trades = winning.len();
-    let losing_trades = losing.len();
-    let breakeven_trades = breakeven.len();
+    for t in trades.iter() {
+        sum_pnl += t.pnl;
+        total_commission += t.commission;
+        total_bars_sum += t.duration_bars;
+        mae_sum += t.mae;
+        mfe_sum += t.mfe;
+        if t.mae > mae_max_acc { mae_max_acc = t.mae; }
+        if t.mfe > mfe_max_acc { mfe_max_acc = t.mfe; }
+
+        if t.pnl >= 1e-6 {
+            winning_trades += 1;
+            gross_profit += t.pnl;
+            if t.pnl > largest_win { largest_win = t.pnl; }
+            winner_bars_sum += t.duration_bars;
+        } else if t.pnl <= -1e-6 {
+            losing_trades += 1;
+            gross_loss += t.pnl.abs();
+            if t.pnl < largest_loss { largest_loss = t.pnl; }
+            loser_bars_sum += t.duration_bars;
+        } else {
+            breakeven_trades += 1;
+        }
+    }
+
     let win_rate_pct = winning_trades as f64 / total_trades as f64 * 100.0;
+    let net_profit = sum_pnl - total_commission;
+    let avg_trade = sum_pnl / total_trades as f64;
 
-    // ── P&L ──
-    let gross_profit: f64 = winning.iter().map(|t| t.pnl).sum();
-    let gross_loss: f64 = losing.iter().map(|t| t.pnl.abs()).sum();
-    let total_commission: f64 = trades.iter().map(|t| t.commission).sum();
-    let net_profit: f64 = trades.iter().map(|t| t.pnl).sum::<f64>() - total_commission;
     let profit_factor = if gross_loss > 0.0 {
         gross_profit / gross_loss
     } else if gross_profit > 0.0 {
@@ -55,7 +88,6 @@ pub fn calculate_metrics(
         0.0
     };
 
-    let avg_trade = trades.iter().map(|t| t.pnl).sum::<f64>() / total_trades as f64;
     let avg_win = if winning_trades > 0 {
         gross_profit / winning_trades as f64
     } else {
@@ -66,13 +98,7 @@ pub fn calculate_metrics(
     } else {
         0.0
     };
-    let largest_win = winning.iter().map(|t| t.pnl).fold(0.0f64, f64::max);
-    let largest_loss = losing.iter().map(|t| t.pnl).fold(0.0f64, f64::min);
-    let expectancy = if total_trades > 0 {
-        (win_rate_pct / 100.0) * avg_win + (1.0 - win_rate_pct / 100.0) * avg_loss
-    } else {
-        0.0
-    };
+    let expectancy = (win_rate_pct / 100.0) * avg_win + (1.0 - win_rate_pct / 100.0) * avg_loss;
 
     // ── Returns ──
     let final_capital = initial_capital + net_profit;
@@ -157,34 +183,25 @@ pub fn calculate_metrics(
 
     // ── Time ──
     let mpb = timeframe.minutes().max(1); // minutes per bar (min 1 for tick)
-    let avg_bars_in_trade =
-        trades.iter().map(|t| t.duration_bars).sum::<usize>() as f64 / total_trades as f64;
+    let avg_bars_in_trade = total_bars_sum as f64 / total_trades as f64;
     let avg_trade_duration = format_bars(avg_bars_in_trade as usize, mpb);
 
     let avg_winner_bars = if winning_trades > 0 {
-        winning.iter().map(|t| t.duration_bars).sum::<usize>() as f64 / winning_trades as f64
+        winner_bars_sum as f64 / winning_trades as f64
     } else {
         0.0
     };
     let avg_loser_bars = if losing_trades > 0 {
-        losing.iter().map(|t| t.duration_bars).sum::<usize>() as f64 / losing_trades as f64
+        loser_bars_sum as f64 / losing_trades as f64
     } else {
         0.0
     };
 
-    // ── Risk (MAE/MFE) ──
-    let mae_avg = if total_trades > 0 {
-        trades.iter().map(|t| t.mae).sum::<f64>() / total_trades as f64
-    } else {
-        0.0
-    };
-    let mae_max = trades.iter().map(|t| t.mae).fold(0.0f64, f64::max);
-    let mfe_avg = if total_trades > 0 {
-        trades.iter().map(|t| t.mfe).sum::<f64>() / total_trades as f64
-    } else {
-        0.0
-    };
-    let mfe_max = trades.iter().map(|t| t.mfe).fold(0.0f64, f64::max);
+    // ── Risk (MAE/MFE) — values already accumulated in the single pass above ──
+    let mae_avg = mae_sum / total_trades as f64;
+    let mae_max = mae_max_acc;
+    let mfe_avg = mfe_sum / total_trades as f64;
+    let mfe_max = mfe_max_acc;
 
     // ── Stagnation (longest period without new equity high) ──
     let stagnation_bars = calculate_stagnation_bars(equity_curve);

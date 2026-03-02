@@ -103,7 +103,10 @@ fn empty_result() -> MonteCarloResult {
 type SimOut = (f64, f64, f64, usize, bool, Vec<f64>);
 
 /// Run equity curve simulation on `sim_pnls` and return the full metrics tuple.
-fn run_sim_equity(sim_pnls: Vec<f64>, initial_capital: f64) -> SimOut {
+///
+/// `ruin_level` is the equity value below which the account is considered ruined
+/// (e.g. `initial_capital * 0.80` for a 20 % loss threshold).
+fn run_sim_equity(sim_pnls: Vec<f64>, initial_capital: f64, ruin_level: f64) -> SimOut {
     let n_executed = sim_pnls.len();
     let mut equity = initial_capital;
     let mut peak = equity;
@@ -119,8 +122,8 @@ fn run_sim_equity(sim_pnls: Vec<f64>, initial_capital: f64) -> SimOut {
         if equity > peak {
             peak = equity;
         }
-        // Ruin = account blown out (equity at or below zero, trading must stop).
-        if equity <= 0.0 {
+        // Ruin: equity fell at or below the configured threshold.
+        if equity <= ruin_level {
             ruined = true;
         }
         let dd_abs = peak - equity;
@@ -177,6 +180,12 @@ pub fn run_monte_carlo(
     let pnls: Vec<f64> = trades.iter().map(|t| t.pnl - t.commission).collect();
     let n_trades = pnls.len();
 
+    // Ruin level: equity at or below this value = simulation ruined.
+    // ruin_threshold_pct = 20 means "losing 20% of capital = ruin"
+    //   → ruin_level = initial_capital * (1 - 20/100) = initial_capital * 0.80
+    let ruin_pct = config.ruin_threshold_pct.clamp(0.0, 100.0);
+    let ruin_level = initial_capital * (1.0 - ruin_pct / 100.0);
+
     // ── Original equity curve ──────────────────────────────────────────────────
     let (
         orig_net_profit,
@@ -185,7 +194,7 @@ pub fn run_monte_carlo(
         _,
         _,
         original_equity,
-    ) = run_sim_equity(pnls.clone(), initial_capital);
+    ) = run_sim_equity(pnls.clone(), initial_capital, ruin_level);
 
     let original_return_pct = orig_net_profit / initial_capital * 100.0;
     let original_ret_dd_ratio = if orig_dd_abs > f64::EPSILON {
@@ -234,7 +243,7 @@ pub fn run_monte_carlo(
                 return None;
             }
 
-            Some(run_sim_equity(sim_pnls, initial_capital))
+            Some(run_sim_equity(sim_pnls, initial_capital, ruin_level))
         })
         .collect();
 

@@ -302,6 +302,7 @@ export function RobustezPage() {
   const [useResampling, setUseResampling] = useState(true);
   const [useSkipTrades, setUseSkipTrades] = useState(true);
   const [skipPct, setSkipPct] = useState(10); // % (0-50)
+  const [ruinThresholdPct, setRuinThresholdPct] = useState(20); // % loss = ruin (5-80)
 
   // Result state
   const [result, setResult] = useState<MonteCarloResult | null>(null);
@@ -313,6 +314,7 @@ export function RobustezPage() {
     useResampling: boolean;
     useSkipTrades: boolean;
     skipPct: number;
+    ruinThresholdPct: number;
     nSim: number;
   } | null>(null);
 
@@ -323,7 +325,9 @@ export function RobustezPage() {
     lastBacktest.trades.length > 0;
 
   // Source of truth: the config used for the backtest that generated these trades.
-  const derivedInitialCapital = lastBacktest?.backtest_config.initial_capital ?? 10000;
+  // Fall back to the store's current capital if backtest_config is not yet populated.
+  const storeCapital = useAppStore((s) => s.initialCapital);
+  const derivedInitialCapital = lastBacktest?.backtest_config?.initial_capital ?? storeCapital;
 
   async function handleRun() {
     if (!lastBacktest) return;
@@ -336,6 +340,7 @@ export function RobustezPage() {
       use_resampling: useResampling,
       use_skip_trades: useSkipTrades,
       skip_probability: skipPct / 100,
+      ruin_threshold_pct: ruinThresholdPct,
     };
 
     try {
@@ -345,7 +350,7 @@ export function RobustezPage() {
         config
       );
       setResult(res);
-      setLastConfig({ useResampling, useSkipTrades, skipPct, nSim: nSimulations });
+      setLastConfig({ useResampling, useSkipTrades, skipPct, ruinThresholdPct, nSim: nSimulations });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -512,6 +517,49 @@ export function RobustezPage() {
             </label>
           </div>
 
+          {/* Ruin threshold */}
+          {(() => {
+            const ruinLevelDollar = derivedInitialCapital * (1 - ruinThresholdPct / 100);
+            const ruinLossDollar  = derivedInitialCapital * ruinThresholdPct / 100;
+            const fmtDollar = (v: number) => {
+              if (v >= 1_000_000) return `$${(v / 1e6).toFixed(2)}M`;
+              if (v >= 1_000)     return `$${(v / 1_000).toFixed(1)}k`;
+              return `$${v.toFixed(0)}`;
+            };
+            return (
+              <div className="flex items-center gap-3 rounded-md border border-border/40 bg-card/40 px-3 py-2.5">
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium">
+                    Umbral de ruina:{" "}
+                    <span className="text-red-400 font-semibold">{ruinThresholdPct}% de pérdida</span>
+                    <span className="ml-2 text-xs font-normal text-muted-foreground">
+                      (−{fmtDollar(ruinLossDollar)} → equity ≤ {fmtDollar(ruinLevelDollar)})
+                    </span>
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    Una simulación se considera "ruinada" si el equity cae por debajo de{" "}
+                    <span className="text-red-400/80">{fmtDollar(ruinLevelDollar)}</span>
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <input
+                    type="range"
+                    min={1}
+                    max={80}
+                    step={1}
+                    value={ruinThresholdPct}
+                    onChange={(e) => setRuinThresholdPct(Number(e.target.value))}
+                    disabled={loading}
+                    className="w-28 accent-red-500"
+                  />
+                  <span className="w-10 text-right text-xs tabular-nums text-muted-foreground">
+                    -{ruinThresholdPct}%
+                  </span>
+                </div>
+              </div>
+            );
+          })()}
+
           {/* Combined note */}
           {useResampling && useSkipTrades && (
             <p className="text-xs text-muted-foreground/70 pl-1">
@@ -547,7 +595,7 @@ export function RobustezPage() {
                 <ConfidenceTable result={result} />
 
                 {/* Ruin probability */}
-                <div className="mt-4 flex items-center gap-2 px-4">
+                <div className="mt-4 flex flex-wrap items-center gap-2 px-4">
                   <span className="text-xs text-muted-foreground">Probabilidad de ruina:</span>
                   <span className={cn("text-sm font-semibold", riskColor(result.ruin_probability))}>
                     {(result.ruin_probability * 100).toFixed(1)}%
@@ -555,6 +603,13 @@ export function RobustezPage() {
                   <span className="text-xs text-muted-foreground">
                     ({Math.round(result.ruin_probability * result.n_simulations)} / {result.n_simulations} simulaciones)
                   </span>
+                  {lastConfig && (
+                    <span className="text-xs text-muted-foreground/60">
+                      · umbral −{lastConfig.ruinThresholdPct}% (equity ≤ {
+                        fmtMoney(derivedInitialCapital * (1 - lastConfig.ruinThresholdPct / 100), 0)
+                      })
+                    </span>
+                  )}
                 </div>
               </CardContent>
             </Card>
@@ -598,6 +653,7 @@ export function RobustezPage() {
                   {lastConfig.useSkipTrades && (
                     <p>Randomly skip trades, with probability {lastConfig.skipPct} %</p>
                   )}
+                  <p>Ruin threshold: -{lastConfig.ruinThresholdPct}% of initial capital</p>
                 </div>
               </CardContent>
             </Card>

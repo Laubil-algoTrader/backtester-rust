@@ -71,5 +71,6 @@
   "ytd": "YTD",
   "noData": "No hay datos suficientes para el desglose mensual.",
   "stoppedByUser": "Detenido por el usuario",
-  "combinations": "combinaciones"
+  "combinations": "combinaciones",
+  "unsavedChanges": "Cambios sin guardar"
 }

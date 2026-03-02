@@ -377,6 +377,23 @@ fn run_backtest_inner(
         );
         equity += trade.pnl - trade.commission;
         trades.push(trade);
+
+        // Update the last equity/drawdown curve point to reflect the settled
+        // (closed) value instead of the unrealized value written during the loop.
+        if peak_equity < equity {
+            peak_equity = equity;
+        }
+        let final_dd_pct = if peak_equity > 0.0 {
+            (peak_equity - equity) / peak_equity * 100.0
+        } else {
+            0.0
+        };
+        if let Some(last) = equity_curve.last_mut() {
+            last.equity = equity;
+        }
+        if let Some(last) = drawdown_curve.last_mut() {
+            last.drawdown_pct = final_dd_pct;
+        }
     }
 
     progress_callback(100, total_bars, total_bars);
@@ -393,6 +410,7 @@ fn run_backtest_inner(
         drawdown_curve,
         returns,
         metrics,
+        backtest_config: config.clone(),
     })
 }
 
@@ -764,13 +782,14 @@ fn is_within_trading_hours(hours: &TradingHours, h: u8, m: u8) -> bool {
 fn chunked_f64_to_vec(ca: &polars::prelude::Float64Chunked) -> Vec<f64> {
     let rechunked = ca.rechunk();
     if !rechunked.has_nulls() {
-        // Fast path: no nulls → direct memcpy from Arrow buffer
-        let arr = rechunked.downcast_iter().next().unwrap();
-        arr.values().as_slice().to_vec()
-    } else {
-        // Slow path with null handling (rare for our data)
-        (0..rechunked.len()).map(|i| rechunked.get(i).unwrap_or(0.0)).collect()
+        // Fast path: no nulls → direct memcpy from Arrow buffer.
+        // rechunk() guarantees exactly one chunk; if somehow empty, fall through to slow path.
+        if let Some(arr) = rechunked.downcast_iter().next() {
+            return arr.values().as_slice().to_vec();
+        }
     }
+    // Slow path: null values present or empty array
+    (0..rechunked.len()).map(|i| rechunked.get(i).unwrap_or(0.0)).collect()
 }
 
 /// Fast bulk extraction of i64 values from an Int64 ChunkedArray.
@@ -779,13 +798,14 @@ fn chunked_f64_to_vec(ca: &polars::prelude::Float64Chunked) -> Vec<f64> {
 fn chunked_i64_to_vec(ca: &polars::prelude::Int64Chunked) -> Vec<i64> {
     let rechunked = ca.rechunk();
     if !rechunked.has_nulls() {
-        // Fast path: no nulls → direct memcpy from Arrow buffer
-        let arr = rechunked.downcast_iter().next().unwrap();
-        arr.values().as_slice().to_vec()
-    } else {
-        // Slow path with null handling (rare for our data)
-        (0..rechunked.len()).map(|i| rechunked.get(i).unwrap_or(0)).collect()
+        // Fast path: no nulls → direct memcpy from Arrow buffer.
+        // rechunk() guarantees exactly one chunk; if somehow empty, fall through to slow path.
+        if let Some(arr) = rechunked.downcast_iter().next() {
+            return arr.values().as_slice().to_vec();
+        }
     }
+    // Slow path: null values present or empty array
+    (0..rechunked.len()).map(|i| rechunked.get(i).unwrap_or(0)).collect()
 }
 
 // ══════════════════════════════════════════════════════════════

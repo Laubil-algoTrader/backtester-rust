@@ -28,6 +28,9 @@ pub async fn upload_csv(
     symbol_name: String,
     instrument_config: InstrumentConfig,
 ) -> Result<Symbol, AppError> {
+    // 0. Sanitize symbol name (prevent path traversal)
+    sanitize_symbol_name(&symbol_name)?;
+
     let path = PathBuf::from(&file_path);
 
     // 1. Validate CSV
@@ -841,6 +844,9 @@ pub async fn download_dukascopy(
 ) -> Result<Symbol, AppError> {
     use crate::data::dukascopy;
 
+    // Sanitize symbol name (prevent path traversal)
+    sanitize_symbol_name(&symbol_name)?;
+
     let is_tick_mode = base_timeframe == "tick";
 
     // Parse dates
@@ -1107,6 +1113,43 @@ pub async fn start_license_monitor(
 
 // ── Helpers ──
 
+/// Validates a symbol name to prevent path traversal attacks.
+///
+/// Allowed characters: letters, digits, underscore, hyphen, and a single dot
+/// (not two consecutive dots). Names starting or ending with a dot are rejected.
+/// Returns an error if the name is invalid.
+fn sanitize_symbol_name(name: &str) -> Result<(), AppError> {
+    if name.is_empty() || name.len() > 64 {
+        return Err(AppError::InvalidConfig(
+            "Symbol name must be between 1 and 64 characters".to_string(),
+        ));
+    }
+    // Reject path separators and parent-directory components
+    if name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err(AppError::InvalidConfig(format!(
+            "Symbol name contains illegal characters: '{}'",
+            name
+        )));
+    }
+    // Reject null bytes and control characters
+    if name.chars().any(|c| c == '\0' || c.is_control()) {
+        return Err(AppError::InvalidConfig(
+            "Symbol name contains control characters".to_string(),
+        ));
+    }
+    // Allow only: A-Z a-z 0-9 _ - . (and not leading/trailing dot)
+    let valid = name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.');
+    if !valid || name.starts_with('.') || name.ends_with('.') {
+        return Err(AppError::InvalidConfig(format!(
+            "Symbol name '{}' contains illegal characters. Use only letters, digits, '_', '-', or '.'",
+            name
+        )));
+    }
+    Ok(())
+}
+
 fn emit_download_progress(app: &AppHandle, symbol_name: &str, percent: u8, message: &str) {
     let _ = app.emit(
         "download-progress",
@@ -1122,14 +1165,104 @@ fn emit_progress(app: &AppHandle, percent: u8, message: &str) {
 }
 
 /// Convert a DataFrame to a Vec of JSON objects for the frontend.
+///
+/// Uses columnar access: each column is scanned once sequentially, which is
+/// O(rows × cols) with cache-friendly access instead of O(n²) random `.get(i)` calls.
 fn dataframe_to_json(df: &polars::prelude::DataFrame) -> Result<Vec<Value>, AppError> {
-    let mut rows = Vec::with_capacity(df.height());
+    use polars::prelude::DataType;
 
-    for i in 0..df.height() {
-        let mut row = serde_json::Map::new();
-        for col in df.get_columns() {
-            let val = col.get(i).map_err(|e| AppError::Internal(e.to_string()))?;
-            row.insert(col.name().to_string(), anyvalue_to_json(&val));
+    let n_rows = df.height();
+    let n_cols = df.width();
+
+    if n_rows == 0 {
+        return Ok(Vec::new());
+    }
+
+    // Scan each column once and extract all its values (columnar → cache-friendly).
+    let mut col_values: Vec<Vec<Value>> = Vec::with_capacity(n_cols);
+    for col in df.get_columns() {
+        let values: Vec<Value> = match col.dtype() {
+            DataType::Float64 => col
+                .f64()
+                .map_err(|e| AppError::Internal(e.to_string()))?
+                .iter()
+                .map(|v| {
+                    v.and_then(|f| serde_json::Number::from_f64(f).map(Value::Number))
+                        .unwrap_or(Value::Null)
+                })
+                .collect(),
+            DataType::Float32 => col
+                .f32()
+                .map_err(|e| AppError::Internal(e.to_string()))?
+                .iter()
+                .map(|v| {
+                    v.and_then(|f| serde_json::Number::from_f64(f as f64).map(Value::Number))
+                        .unwrap_or(Value::Null)
+                })
+                .collect(),
+            DataType::Int64 => col
+                .i64()
+                .map_err(|e| AppError::Internal(e.to_string()))?
+                .iter()
+                .map(|v| v.map(Value::from).unwrap_or(Value::Null))
+                .collect(),
+            DataType::Int32 => col
+                .i32()
+                .map_err(|e| AppError::Internal(e.to_string()))?
+                .iter()
+                .map(|v| v.map(Value::from).unwrap_or(Value::Null))
+                .collect(),
+            DataType::UInt64 => col
+                .u64()
+                .map_err(|e| AppError::Internal(e.to_string()))?
+                .iter()
+                .map(|v| v.map(Value::from).unwrap_or(Value::Null))
+                .collect(),
+            DataType::UInt32 => col
+                .u32()
+                .map_err(|e| AppError::Internal(e.to_string()))?
+                .iter()
+                .map(|v| v.map(Value::from).unwrap_or(Value::Null))
+                .collect(),
+            DataType::Boolean => col
+                .bool()
+                .map_err(|e| AppError::Internal(e.to_string()))?
+                .iter()
+                .map(|v| v.map(Value::Bool).unwrap_or(Value::Null))
+                .collect(),
+            DataType::String => col
+                .str()
+                .map_err(|e| AppError::Internal(e.to_string()))?
+                .iter()
+                .map(|v| v.map(|s| Value::String(s.to_string())).unwrap_or(Value::Null))
+                .collect(),
+            DataType::Datetime(_, _) => {
+                // Cast to string for human-readable ISO-8601 representation.
+                col.cast(&DataType::String)
+                    .map_err(|e| AppError::Internal(e.to_string()))?
+                    .str()
+                    .map_err(|e| AppError::Internal(e.to_string()))?
+                    .iter()
+                    .map(|v| v.map(|s| Value::String(s.to_string())).unwrap_or(Value::Null))
+                    .collect()
+            }
+            _ => {
+                // Fallback for remaining types: use AnyValue (slower but correct).
+                (0..n_rows)
+                    .map(|i| col.get(i).map(|av| anyvalue_to_json(&av)).unwrap_or(Value::Null))
+                    .collect()
+            }
+        };
+        col_values.push(values);
+    }
+
+    // Assemble rows by transposing the per-column vecs.
+    let col_names: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
+    let mut rows = Vec::with_capacity(n_rows);
+    for i in 0..n_rows {
+        let mut row = serde_json::Map::with_capacity(n_cols);
+        for (j, name) in col_names.iter().enumerate() {
+            row.insert(name.clone(), col_values[j][i].clone());
         }
         rows.push(Value::Object(row));
     }

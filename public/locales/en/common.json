@@ -71,5 +71,6 @@
   "ytd": "YTD",
   "noData": "Not enough data for monthly breakdown.",
   "stoppedByUser": "Stopped by user",
-  "combinations": "combinations"
+  "combinations": "combinations",
+  "unsavedChanges": "Unsaved changes"
 }

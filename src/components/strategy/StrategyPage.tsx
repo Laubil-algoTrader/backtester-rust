@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useAppStore } from "@/stores/useAppStore";
 import { saveStrategy, loadStrategies } from "@/lib/tauri";
@@ -49,6 +49,21 @@ export function StrategyPage() {
   const [showLoadDialog, setShowLoadDialog] = useState(false);
   const [showSaveDialog, setShowSaveDialog] = useState(false);
 
+  // Track the last-saved/loaded snapshot to detect unsaved changes.
+  // We store only the strategy fields that matter for the diff (exclude id/timestamps).
+  const savedSnapshot = useRef<string>("");
+
+  const strategyFingerprint = useMemo(() => {
+    const { long_entry_rules, short_entry_rules, long_exit_rules, short_exit_rules,
+      position_sizing, stop_loss, take_profit, trailing_stop, trading_costs,
+      trade_direction, trading_hours, max_daily_trades, close_trades_at, name } = currentStrategy;
+    return JSON.stringify({ name, long_entry_rules, short_entry_rules, long_exit_rules,
+      short_exit_rules, position_sizing, stop_loss, take_profit, trailing_stop,
+      trading_costs, trade_direction, trading_hours, max_daily_trades, close_trades_at });
+  }, [currentStrategy]);
+
+  const isDirty = strategyFingerprint !== savedSnapshot.current;
+
   // Load saved strategies on mount
   useEffect(() => {
     loadStrategies()
@@ -87,11 +102,11 @@ export function StrategyPage() {
     const id = await saveStrategy(strategyToSave);
 
     // Update current strategy with the returned id
-    setCurrentStrategy({
-      ...currentStrategy,
-      id,
-      name,
-    });
+    const saved = { ...currentStrategy, id, name };
+    setCurrentStrategy(saved);
+
+    // Mark snapshot as clean (no unsaved changes)
+    savedSnapshot.current = strategyFingerprint;
 
     // Refresh saved strategies list
     const updated = await loadStrategies();
@@ -100,6 +115,14 @@ export function StrategyPage() {
 
   const handleLoad = (strategy: Strategy) => {
     setCurrentStrategy(strategy);
+    // Reset snapshot so the loaded strategy is not considered dirty
+    const { long_entry_rules, short_entry_rules, long_exit_rules, short_exit_rules,
+      position_sizing, stop_loss, take_profit, trailing_stop, trading_costs,
+      trade_direction, trading_hours, max_daily_trades, close_trades_at, name } = strategy;
+    savedSnapshot.current = JSON.stringify({ name, long_entry_rules, short_entry_rules,
+      long_exit_rules, short_exit_rules, position_sizing, stop_loss, take_profit,
+      trailing_stop, trading_costs, trade_direction, trading_hours, max_daily_trades,
+      close_trades_at });
     setShowLoadDialog(false);
   };
 
@@ -134,11 +157,17 @@ export function StrategyPage() {
           <Button
             variant="outline"
             size="sm"
-            className="text-sm"
+            className="relative text-sm"
             onClick={() => setShowSaveDialog(true)}
           >
             <Save className="mr-1.5 h-3.5 w-3.5" />
             {tc("buttons.save")}
+            {isDirty && (
+              <span
+                className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-amber-500"
+                title={tc("unsavedChanges")}
+              />
+            )}
           </Button>
           <Button variant="outline" size="sm" className="text-sm" onClick={resetStrategy}>
             <FilePlus className="mr-1.5 h-3.5 w-3.5" />

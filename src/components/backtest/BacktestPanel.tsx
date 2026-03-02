@@ -5,6 +5,7 @@ import { useAppStore } from "@/stores/useAppStore";
 import { runBacktest, cancelBacktest } from "@/lib/tauri";
 import { sortTimeframes, PRECISION_LABELS } from "@/lib/types";
 import type { BacktestConfig, BacktestPrecision, Strategy, Timeframe } from "@/lib/types";
+import { useAvailablePrecisions } from "@/hooks/useAvailablePrecisions";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import {
   Select,
@@ -79,27 +80,7 @@ export function BacktestPanel() {
     : [];
 
   // Available precision modes depend on symbol base timeframe
-  const availablePrecisions: BacktestPrecision[] = (() => {
-    if (!selectedSymbol) return ["SelectedTfOnly"];
-    const base = selectedSymbol.base_timeframe;
-    const hasTick = !!selectedSymbol.timeframe_paths["tick"];
-    const hasM1 = !!selectedSymbol.timeframe_paths["m1"];
-    const hasTickRaw = Object.keys(selectedSymbol.timeframe_paths).some((k) => k === "tick_raw");
-
-    if (base === "tick") {
-      const modes: BacktestPrecision[] = ["SelectedTfOnly"];
-      if (hasM1) modes.push("M1TickSimulation");
-      if (hasTick) modes.push("RealTickCustomSpread");
-      if (hasTickRaw) modes.push("RealTickRealSpread");
-      return modes;
-    }
-    if (base === "m1") {
-      const modes: BacktestPrecision[] = ["SelectedTfOnly"];
-      if (hasM1) modes.push("M1TickSimulation");
-      return modes;
-    }
-    return ["SelectedTfOnly"];
-  })();
+  const availablePrecisions = useAvailablePrecisions(selectedSymbol);
 
   // Auto-fill dates when symbol changes
   useEffect(() => {
@@ -128,7 +109,7 @@ export function BacktestPanel() {
     };
     document.addEventListener("shortcut:run-backtest", handler);
     return () => document.removeEventListener("shortcut:run-backtest", handler);
-  });
+  }, [canRun, handleRun]);
 
   const validate = (): string | null => {
     if (!selectedSymbolId) return t("selectSymbolFirst");
