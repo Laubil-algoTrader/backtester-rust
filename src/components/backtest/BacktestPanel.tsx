@@ -102,14 +102,19 @@ export function BacktestPanel() {
     (currentStrategy.long_entry_rules.length > 0 || currentStrategy.short_entry_rules.length > 0) &&
     !isLoading;
 
-  // Ctrl+Enter shortcut listener
+  // Ctrl+Enter shortcut listener — dep array uses only [canRun] so the effect
+  // re-registers when canRun toggles (capturing a fresh handleRun closure each time).
+  // handleRun is intentionally omitted from deps: it is a new function reference every
+  // render (not wrapped in useCallback), so including it would re-run the effect on
+  // every render. canRun already changes whenever handleRun's meaningful inputs change.
   useEffect(() => {
     const handler = () => {
       if (canRun) handleRun();
     };
     document.addEventListener("shortcut:run-backtest", handler);
     return () => document.removeEventListener("shortcut:run-backtest", handler);
-  }, [canRun, handleRun]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canRun]);
 
   const validate = (): string | null => {
     if (!selectedSymbolId) return t("selectSymbolFirst");

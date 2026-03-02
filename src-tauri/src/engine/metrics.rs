@@ -80,10 +80,11 @@ pub fn calculate_metrics(
     let net_profit = sum_pnl - total_commission;
     let avg_trade = sum_pnl / total_trades as f64;
 
+    // Cap at 999 when there are no losing trades — serde_json cannot serialize f64::INFINITY.
     let profit_factor = if gross_loss > 0.0 {
         gross_profit / gross_loss
     } else if gross_profit > 0.0 {
-        f64::INFINITY
+        999.0
     } else {
         0.0
     };
@@ -265,7 +266,7 @@ pub fn calculate_metrics(
         return_dd_ratio: if max_drawdown_pct > 0.0 {
             total_return_pct / max_drawdown_pct
         } else if total_return_pct > 0.0 {
-            f64::INFINITY
+            999.0 // cap — serde_json cannot serialize f64::INFINITY
         } else {
             0.0
         },
@@ -689,7 +690,7 @@ fn calculate_omega_ratio(returns: &[f64], threshold: f64) -> f64 {
     let gains: f64 = returns.iter().map(|r| (r - threshold).max(0.0)).sum();
     let losses: f64 = returns.iter().map(|r| (threshold - r).max(0.0)).sum();
     if losses < f64::EPSILON {
-        if gains > 0.0 { f64::INFINITY } else { 0.0 }
+        if gains > 0.0 { 999.0 } else { 0.0 } // cap — serde_json cannot serialize f64::INFINITY
     } else {
         gains / losses
     }

@@ -149,14 +149,15 @@ export function OptimizerPanel({ parameterRanges }: OptimizerPanelProps) {
     parameterRanges.length > 0 &&
     !isLoading;
 
-  // Ctrl+Enter shortcut listener
+  // Ctrl+Enter shortcut listener — see BacktestPanel for rationale of [canRun] only.
   useEffect(() => {
     const handler = () => {
       if (canRun) handleRun();
     };
     document.addEventListener("shortcut:run-optimization", handler);
     return () => document.removeEventListener("shortcut:run-optimization", handler);
-  }, [canRun, handleRun]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canRun]);
 
   const validate = (): string | null => {
     if (!selectedSymbolId) return t("validation.selectSymbol");
