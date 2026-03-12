@@ -1,5 +1,23 @@
 use serde::{Deserialize, Serialize};
 
+/// How swap rates are denominated.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum SwapMode {
+    /// Swap expressed in pips per lot per day (standard Forex).
+    #[default]
+    InPips,
+    /// Swap expressed in points per lot per day.
+    InPoints,
+    /// Swap expressed in account currency per lot per day.
+    InMoney,
+    /// Swap as annual percentage of position value (divided by 365 per day).
+    AsPercent,
+}
+
+fn default_triple_swap_day() -> u8 {
+    3 // Wednesday (ISO weekday: Mon=1 … Sun=7)
+}
+
 /// Instrument-specific configuration. Set per symbol at import time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstrumentConfig {
@@ -15,6 +33,39 @@ pub struct InstrumentConfig {
     pub tick_size: f64,
     /// Number of decimal places
     pub digits: usize,
+
+    // ── Swap (overnight financing cost) ──
+
+    /// Daily swap rate for long positions. Interpretation depends on `swap_mode`.
+    /// Positive = credit to trader, negative = charge to trader.
+    #[serde(default)]
+    pub swap_long: f64,
+    /// Daily swap rate for short positions.
+    #[serde(default)]
+    pub swap_short: f64,
+    /// How `swap_long` / `swap_short` are denominated.
+    #[serde(default)]
+    pub swap_mode: SwapMode,
+    /// ISO weekday (Mon=1 … Sun=7) on which triple swap is charged.
+    /// Default 3 = Wednesday (covers Saturday + Sunday in Forex).
+    #[serde(default = "default_triple_swap_day")]
+    pub triple_swap_day: u8,
+
+    // ── Stops level ──
+
+    /// Minimum distance in pips between entry price and SL/TP.
+    /// Mirrors MT5's SYMBOL_TRADE_STOPS_LEVEL. Set to 0 to disable (default).
+    #[serde(default)]
+    pub min_stop_distance_pips: f64,
+
+    // ── Timezone ──
+
+    /// Timezone offset in hours applied to all timestamps at import time.
+    /// Positive = shift forward (e.g. +3 for UTC+3), negative = shift backward (e.g. -5 for UTC-5).
+    /// Default 0 = no shift (treat raw data timestamps as-is).
+    /// Fractional values are supported (e.g. 5.5 for UTC+5:30, -3.5 for UTC-3:30).
+    #[serde(default)]
+    pub tz_offset_hours: f64,
 }
 
 impl Default for InstrumentConfig {
@@ -27,6 +78,12 @@ impl Default for InstrumentConfig {
             min_lot: 0.01,
             tick_size: 0.00001,
             digits: 5,
+            swap_long: 0.0,
+            swap_short: 0.0,
+            swap_mode: SwapMode::InPips,
+            triple_swap_day: 3,
+            min_stop_distance_pips: 0.0,
+            tz_offset_hours: 0.0,
         }
     }
 }
@@ -127,6 +184,32 @@ impl std::str::FromStr for Timeframe {
             _ => Err(format!("Unknown timeframe: {}", s)),
         }
     }
+}
+
+/// Storage format for raw tick data (bid/ask).
+///
+/// Applies only to the `tick_raw/` partition; `tick/` OHLCV files always use Parquet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum TickStorageFormat {
+    /// Compressed columnar Parquet (default). Compatible with Polars tooling.
+    #[default]
+    Parquet,
+    /// Flat binary: `i64_le timestamp_µs + f64_le bid + f64_le ask` = 24 bytes/tick.
+    /// Zero parsing overhead at load time — direct memcpy into TickColumns.
+    Binary,
+}
+
+/// Download pipeline for tick-mode Dukascopy downloads.
+///
+/// `Direct` (default): bi5 → YearBuffer → Parquet/Binary — fast, no intermediate files.
+/// `ViaCsv`: bi5 → intermediate CSV → `stream_tick_csv_to_parquet()` — identical
+/// to the manual CSV import path; use when the Direct path produces discrepancies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TickPipeline {
+    #[default]
+    Direct,
+    ViaCsv,
 }
 
 /// Detected CSV data format.
