@@ -4,6 +4,8 @@
 
 // ── Instrument Configuration ──
 
+export type SwapMode = "InPips" | "InPoints" | "InMoney" | "AsPercent";
+
 export interface InstrumentConfig {
   pip_size: number;
   pip_value: number;
@@ -11,6 +13,15 @@ export interface InstrumentConfig {
   min_lot: number;
   tick_size: number;
   digits: number;
+  // Swap / overnight financing
+  swap_long?: number;
+  swap_short?: number;
+  swap_mode?: SwapMode;
+  triple_swap_day?: number; // ISO weekday Mon=1…Sun=7, default 3 (Wednesday)
+  // Stops level
+  min_stop_distance_pips?: number;
+  // Timezone shift applied at import time (hours, e.g. -2 for UTC-2, 5.5 for UTC+5:30)
+  tz_offset_hours?: number;
 }
 
 export const INSTRUMENT_PRESETS: Record<string, InstrumentConfig> = {
@@ -62,8 +73,20 @@ export type DukascopyCategory = "Forex" | "Indices" | "Commodities" | "Crypto";
 
 export interface DukascopyInstrument {
   name: string;
+  /** User-facing symbol / storage key (e.g. "BCOUSD"). */
   symbol: string;
+  /**
+   * Dukascopy data-feed URL symbol when it differs from `symbol`
+   * (e.g. "BRENTCMDUSD" for Brent Crude).  Undefined means the
+   * data-feed uses `symbol` directly.
+   */
+  api_symbol?: string;
   category: DukascopyCategory;
+  /**
+   * Dukascopy bi5 price divisor.  Raw u32 prices in the binary file
+   * are divided by this value to recover the real price.
+   * Source: dukascopy-node instrument-meta-data.json decimalFactor.
+   */
   point_value: number;
   preset: string;
 }
@@ -110,33 +133,48 @@ export const DUKASCOPY_INSTRUMENTS: DukascopyInstrument[] = [
   { name: "USD/CZK", symbol: "USDCZK", category: "Forex", point_value: 100000, preset: "Forex Major" },
   { name: "USD/HUF", symbol: "USDHUF", category: "Forex", point_value: 1000, preset: "Forex JPY" },
   // ── Indices ──
-  { name: "S&P 500", symbol: "USA500IDXUSD", category: "Indices", point_value: 1, preset: "Indices" },
-  { name: "Dow Jones 30", symbol: "USA30IDXUSD", category: "Indices", point_value: 1, preset: "Indices" },
-  { name: "Nasdaq 100", symbol: "USATECHIDXUSD", category: "Indices", point_value: 1, preset: "Indices" },
-  { name: "DAX 40", symbol: "DEUIDXEUR", category: "Indices", point_value: 1, preset: "Indices" },
-  { name: "FTSE 100", symbol: "GBRIDXGBP", category: "Indices", point_value: 1, preset: "Indices" },
-  { name: "Nikkei 225", symbol: "JPNIDXJPY", category: "Indices", point_value: 1, preset: "Indices" },
-  { name: "CAC 40", symbol: "FRAIDXEUR", category: "Indices", point_value: 1, preset: "Indices" },
-  { name: "ASX 200", symbol: "AUSIDXAUD", category: "Indices", point_value: 1, preset: "Indices" },
-  { name: "Euro Stoxx 50", symbol: "EABORIDXEUR", category: "Indices", point_value: 1, preset: "Indices" },
-  { name: "Hang Seng", symbol: "HKGIDXHKD", category: "Indices", point_value: 1, preset: "Indices" },
+  // decimalFactor=1000 for all indices (confirmed from dukascopy-node instrument-meta-data.json)
+  { name: "S&P 500",     symbol: "USA500IDXUSD",  category: "Indices", point_value: 1000, preset: "Indices" },
+  { name: "Dow Jones 30",symbol: "USA30IDXUSD",   category: "Indices", point_value: 1000, preset: "Indices" },
+  { name: "Nasdaq 100",  symbol: "USATECHIDXUSD", category: "Indices", point_value: 1000, preset: "Indices" },
+  { name: "DAX 40",      symbol: "DEUIDXEUR",     category: "Indices", point_value: 1000, preset: "Indices" },
+  { name: "FTSE 100",    symbol: "GBRIDXGBP",     category: "Indices", point_value: 1000, preset: "Indices" },
+  { name: "Nikkei 225",  symbol: "JPNIDXJPY",     category: "Indices", point_value: 1000, preset: "Indices" },
+  { name: "CAC 40",      symbol: "FRAIDXEUR",     category: "Indices", point_value: 1000, preset: "Indices" },
+  { name: "ASX 200",     symbol: "AUSIDXAUD",     category: "Indices", point_value: 1000, preset: "Indices" },
+  // Euro Stoxx 50: Dukascopy feed uses "EUSIDXEUR" (not EABORIDXEUR)
+  { name: "Euro Stoxx 50", symbol: "EUSIDXEUR",   category: "Indices", point_value: 1000, preset: "Indices" },
+  { name: "Hang Seng",   symbol: "HKGIDXHKD",    category: "Indices", point_value: 1000, preset: "Indices" },
   // ── Commodities ──
-  { name: "Gold (XAU/USD)", symbol: "XAUUSD", category: "Commodities", point_value: 10, preset: "Gold (XAUUSD)" },
-  { name: "Silver (XAG/USD)", symbol: "XAGUSD", category: "Commodities", point_value: 1000, preset: "Forex Major" },
-  { name: "Brent Crude Oil", symbol: "BCOUSD", category: "Commodities", point_value: 1000, preset: "Forex Major" },
-  { name: "WTI Crude Oil", symbol: "WTIUSD", category: "Commodities", point_value: 1000, preset: "Forex Major" },
-  { name: "Natural Gas", symbol: "NGUSD", category: "Commodities", point_value: 10000, preset: "Forex Major" },
-  { name: "Platinum", symbol: "XPTUSD", category: "Commodities", point_value: 10, preset: "Gold (XAUUSD)" },
-  { name: "Palladium", symbol: "XPDUSD", category: "Commodities", point_value: 10, preset: "Gold (XAUUSD)" },
-  { name: "Copper", symbol: "XCUUSD", category: "Commodities", point_value: 10000, preset: "Forex Major" },
+  // Metals: decimalFactor=1000 (3 decimal places in bi5)
+  // Oils/Gas/Copper: Dukascopy uses "CMDUSD" suffix in feed URL.
+  //   api_symbol = the actual URL symbol; symbol = user-facing storage key.
+  { name: "Gold (XAU/USD)",   symbol: "XAUUSD",  category: "Commodities", point_value: 1000,  preset: "Gold (XAUUSD)" },
+  { name: "Silver (XAG/USD)", symbol: "XAGUSD",  category: "Commodities", point_value: 1000,  preset: "Forex Major" },
+  { name: "Brent Crude Oil",  symbol: "BCOUSD",  api_symbol: "BRENTCMDUSD", category: "Commodities", point_value: 1000,  preset: "Forex Major" },
+  { name: "WTI Crude Oil",    symbol: "WTIUSD",  api_symbol: "LIGHTCMDUSD", category: "Commodities", point_value: 1000,  preset: "Forex Major" },
+  { name: "Natural Gas",      symbol: "NGUSD",   api_symbol: "GASCMDUSD",   category: "Commodities", point_value: 10000, preset: "Forex Major" },
+  { name: "Platinum",         symbol: "XPTUSD",  api_symbol: "XPTCMDUSD",   category: "Commodities", point_value: 1000,  preset: "Gold (XAUUSD)" },
+  { name: "Palladium",        symbol: "XPDUSD",  api_symbol: "XPDCMDUSD",   category: "Commodities", point_value: 1000,  preset: "Gold (XAUUSD)" },
+  { name: "Copper",           symbol: "XCUUSD",  api_symbol: "COPPERCMDUSD",category: "Commodities", point_value: 10000, preset: "Forex Major" },
   // ── Crypto ──
-  { name: "BTC/USD", symbol: "BTCUSD", category: "Crypto", point_value: 1, preset: "Crypto" },
-  { name: "ETH/USD", symbol: "ETHUSD", category: "Crypto", point_value: 1, preset: "Crypto" },
-  { name: "LTC/USD", symbol: "LTCUSD", category: "Crypto", point_value: 1, preset: "Crypto" },
-  { name: "XRP/USD", symbol: "XRPUSD", category: "Crypto", point_value: 100000, preset: "Crypto" },
+  // decimalFactor=10 for BTC/ETH/LTC (confirmed from dukascopy-node)
+  // XRP is NOT available in Dukascopy's historical feed — removed.
+  { name: "BTC/USD", symbol: "BTCUSD", category: "Crypto", point_value: 10, preset: "Crypto" },
+  { name: "ETH/USD", symbol: "ETHUSD", category: "Crypto", point_value: 10, preset: "Crypto" },
+  { name: "LTC/USD", symbol: "LTCUSD", category: "Crypto", point_value: 10, preset: "Crypto" },
 ];
 
 // ── Symbol ──
+
+/** Storage format for raw tick data (bid/ask). Mirrors `TickStorageFormat` in Rust. */
+export type TickStorageFormat = "Parquet" | "Binary";
+
+/** Download pipeline for tick-mode Dukascopy downloads.
+ *  - "direct"  → bi5 → Parquet/Binary (fast, default)
+ *  - "via_csv" → bi5 → CSV → Parquet/Binary (parity with manual import)
+ */
+export type TickPipeline = "direct" | "via_csv";
 
 export type Timeframe = "tick" | "m1" | "m5" | "m15" | "m30" | "h1" | "h4" | "d1";
 
@@ -282,11 +320,13 @@ export interface Rule {
 
 // ── Position Sizing ──
 
-export type PositionSizingType = "FixedLots" | "FixedAmount" | "PercentEquity" | "RiskBased";
+export type PositionSizingType = "FixedLots" | "FixedAmount" | "PercentEquity" | "RiskBased" | "AntiMartingale";
 
 export interface PositionSizing {
   sizing_type: PositionSizingType;
   value: number; // lots, amount, percentage, or risk %
+  /** AntiMartingale: lot multiplier per consecutive loss (0,1]. Default 0.9 = −10% per loss. */
+  decrease_factor?: number;
 }
 
 // ── Stop Loss ──
@@ -409,6 +449,8 @@ export interface TradeResult {
   pnl: number;
   pnl_pips: number;
   commission: number;
+  /** Total swap charged over the life of this trade (negative = cost). */
+  swap: number;
   close_reason: TradeCloseReason;
   duration_bars: number;
   duration_time: string;
@@ -486,6 +528,10 @@ export interface BacktestMetrics {
   k_ratio: number;
   omega_ratio: number;
   monthly_returns: MonthlyReturn[];
+
+  // Costs breakdown
+  total_swap_charged: number;
+  total_commission_charged: number;
 }
 
 // ── Equity/Drawdown points ──

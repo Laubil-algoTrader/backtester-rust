@@ -10,6 +10,8 @@ import type {
   MonteCarloConfig,
   MonteCarloResult,
   Timeframe,
+  TickStorageFormat,
+  TickPipeline,
   CodeGenerationResult,
   LicenseResponse,
   SavedCredentials,
@@ -19,12 +21,14 @@ import type {
 export async function uploadCsv(
   filePath: string,
   symbolName: string,
-  instrumentConfig: InstrumentConfig
+  instrumentConfig: InstrumentConfig,
+  tickStorageFormat?: TickStorageFormat
 ): Promise<Symbol> {
   return invoke<Symbol>("upload_csv", {
     filePath,
     symbolName,
     instrumentConfig,
+    tickStorageFormat,
   });
 }
 
@@ -132,6 +136,16 @@ export async function exportReportHtml(
   return invoke<void>("export_report_html", { results, filePath });
 }
 
+/// Export raw tick data for a symbol to a CSV file in MetaTrader 5 import format.
+/// Returns the number of rows written.
+/// Only available for symbols with base_timeframe === "Tick".
+export async function exportTickDataMt5(
+  symbolId: string,
+  filePath: string
+): Promise<number> {
+  return invoke<number>("export_tick_data_mt5", { symbolId, filePath });
+}
+
 /// Generate strategy code for MQL5 or PineScript.
 export async function generateStrategyCode(
   language: "mql5" | "pinescript",
@@ -148,7 +162,10 @@ export async function downloadDukascopy(
   startDate: string,
   endDate: string,
   baseTimeframe: "tick" | "m1",
-  instrumentConfig: InstrumentConfig
+  instrumentConfig: InstrumentConfig,
+  tickStorageFormat?: TickStorageFormat,
+  tickPipeline?: TickPipeline,
+  keepCsv?: boolean
 ): Promise<Symbol> {
   return invoke<Symbol>("download_dukascopy", {
     symbolName,
@@ -158,12 +175,27 @@ export async function downloadDukascopy(
     endDate,
     baseTimeframe,
     instrumentConfig,
+    tickStorageFormat,
+    tickPipeline,
+    keepCsv,
   });
 }
 
 /// Cancel an ongoing download by symbol name.
 export async function cancelDownload(symbolName: string): Promise<void> {
   return invoke<void>("cancel_download", { symbolName });
+}
+
+/// Transform all stored timestamps of a symbol to a new timezone offset.
+/// Returns the updated Symbol with adjusted start_date, end_date and tz_offset_hours.
+export async function transformSymbolTimezone(
+  symbolId: string,
+  newTzOffsetHours: number
+): Promise<Symbol> {
+  return invoke<Symbol>("transform_symbol_timezone", {
+    symbolId,
+    newTzOffsetHours,
+  });
 }
 
 /// Placeholder greet command (for testing communication).
