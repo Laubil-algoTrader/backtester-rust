@@ -1,5 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
+use chrono::Datelike;
 use polars::prelude::*;
 use tracing::info;
 
@@ -17,11 +19,14 @@ use super::metrics::calculate_metrics;
 use super::orders;
 use super::position::{
     calculate_lots, calculate_stop_loss, calculate_take_profit,
-    calculate_trailing_stop_distance, check_sl_tp_hit,
-    update_mae_mfe, update_trailing_stop,
+    calculate_trailing_stop_distance, calculate_swap_charge, check_sl_tp_hit,
+    enforce_stops_level_sl, enforce_stops_level_tp,
+    should_charge_swap, update_mae_mfe_ba, update_trailing_stop,
     OpenPosition,
 };
-use super::strategy::{compute_candle_pattern_cache, compute_daily_ohlc, compute_time_cache, evaluate_rules, max_lookback, pre_compute_indicators, strategy_uses_candle_patterns, strategy_uses_time_fields};
+use super::strategy::{compile_rules_streaming, compute_candle_pattern_cache, compute_daily_ohlc, compute_time_cache, evaluate_rules, evaluate_rules_fast, max_lookback, pre_compute_indicators, pre_compute_indicators_with_shared_cache, precompute_cross_prev_vals, strategy_uses_candle_patterns, strategy_uses_time_fields};
+use super::strategy::IndicatorCache;
+use super::streaming;
 
 // ══════════════════════════════════════════════════════════════
 // Sub-bar data types
@@ -35,8 +40,7 @@ pub enum SubBarData {
     /// M1 candles or tick-as-OHLCV candles for sub-bar resolution.
     Candles(Vec<Candle>),
     /// Columnar tick data (SoA layout) with i64 timestamps for tick-level resolution.
-    /// ~10x faster than Vec<TickData> due to eliminated String allocations,
-    /// i64 comparisons, and better cache locality.
+    /// Uses struct-of-arrays layout for better cache locality and no per-tick allocations.
     Ticks(TickColumns),
 }
 
@@ -45,6 +49,10 @@ pub enum SubBarData {
 // ══════════════════════════════════════════════════════════════
 
 /// Run a complete backtest.
+///
+/// When `shared_indicator_cache` is provided (optimizer use case), indicators that have
+/// already been computed by another rayon thread are reused instead of recalculated,
+/// giving a significant speedup for Grid Search and Genetic Algorithm runs.
 pub fn run_backtest(
     candles: &[Candle],
     sub_bars: &SubBarData,
@@ -54,6 +62,33 @@ pub fn run_backtest(
     cancel_flag: &AtomicBool,
     progress_callback: impl Fn(u8, usize, usize),
 ) -> Result<BacktestResults, AppError> {
+    run_backtest_inner(candles, sub_bars, strategy, config, instrument, cancel_flag, progress_callback, None)
+}
+
+/// Internal implementation allowing an optional shared indicator cache for optimization.
+pub fn run_backtest_with_cache(
+    candles: &[Candle],
+    sub_bars: &SubBarData,
+    strategy: &Strategy,
+    config: &BacktestConfig,
+    instrument: &InstrumentConfig,
+    cancel_flag: &AtomicBool,
+    progress_callback: impl Fn(u8, usize, usize),
+    shared_cache: Arc<Mutex<IndicatorCache>>,
+) -> Result<BacktestResults, AppError> {
+    run_backtest_inner(candles, sub_bars, strategy, config, instrument, cancel_flag, progress_callback, Some(shared_cache))
+}
+
+fn run_backtest_inner(
+    candles: &[Candle],
+    sub_bars: &SubBarData,
+    strategy: &Strategy,
+    config: &BacktestConfig,
+    instrument: &InstrumentConfig,
+    cancel_flag: &AtomicBool,
+    progress_callback: impl Fn(u8, usize, usize),
+    shared_indicator_cache: Option<Arc<Mutex<IndicatorCache>>>,
+) -> Result<BacktestResults, AppError> {
     let total_bars = candles.len();
     info!("Starting backtest: {} bars, strategy={}, precision={:?}",
         total_bars, strategy.name, config.precision);
@@ -62,8 +97,12 @@ pub fn run_backtest(
         return Err(AppError::NoDataInRange);
     }
 
-    // Pre-compute all indicators
-    let cache = pre_compute_indicators(strategy, candles)?;
+    // Pre-compute all indicators (use shared cache in optimizer context)
+    let cache = if let Some(shared) = shared_indicator_cache {
+        pre_compute_indicators_with_shared_cache(strategy, candles, &shared)?
+    } else {
+        pre_compute_indicators(strategy, candles)?
+    };
 
     // Pre-compute daily OHLC boundaries for Daily price fields
     let daily_ohlc = compute_daily_ohlc(candles);
@@ -88,12 +127,17 @@ pub fn run_backtest(
     let lookback = max_lookback(strategy);
     let start_bar = lookback.min(total_bars);
 
+    // Pre-compute spread in price units (used for bid/ask OHLC derivation)
+    let spread = orders::spread_price(&strategy.trading_costs, instrument);
+
     let mut equity = config.initial_capital;
     let mut peak_equity = equity;
     let mut position: Option<OpenPosition> = Option::None;
     let mut trades: Vec<TradeResult> = Vec::new();
     let mut equity_curve: Vec<EquityPoint> = Vec::with_capacity(total_bars);
     let mut drawdown_curve: Vec<DrawdownPoint> = Vec::with_capacity(total_bars);
+    // Track consecutive losses for AntiMartingale position sizing
+    let mut consecutive_losses: u32 = 0;
 
     // Determine allowed trade direction
     let can_go_long = matches!(
@@ -103,6 +147,13 @@ pub fn run_backtest(
     let can_go_short = matches!(
         strategy.trade_direction,
         TradeDirection::Short | TradeDirection::Both
+    );
+
+    // Tick-mode gate: Phase 2.5 only runs for real-tick precision modes
+    let is_tick_mode = matches!(
+        config.precision,
+        crate::models::strategy::BacktestPrecision::RealTickCustomSpread
+            | crate::models::strategy::BacktestPrecision::RealTickRealSpread
     );
 
     // Sub-bar cursor for O(n+m) range lookups
@@ -163,7 +214,10 @@ pub fn run_backtest(
                     pos, exit_price, &candle.datetime, i, CloseReason::Signal,
                     instrument, strategy, config,
                 );
+                // Swap was already deducted from equity per-bar; only PnL and commission remain
                 equity += trade.pnl - trade.commission;
+                if trade.pnl >= 1e-6 { consecutive_losses = 0; }
+                else if trade.pnl <= -1e-6 { consecutive_losses = consecutive_losses.saturating_add(1); }
                 trades.push(trade);
                 position = None;
             }
@@ -202,22 +256,26 @@ pub fn run_backtest(
                 }
 
                 if let Some(dir) = entry_dir {
-                    // Use bar[i-1]'s ATR (last completed bar before entry)
-                    let atr_val = atr_values.as_ref().and_then(|v| {
-                        let atr_idx = i - 1;
-                        if atr_idx < v.len() && !v[atr_idx].is_nan() {
-                            Some(v[atr_idx])
-                        } else {
-                            None
-                        }
-                    });
+                    // Use bar[i-1]'s ATR (last completed bar before entry).
+                    // Each component uses its own ATR period to avoid silent
+                    // "first found wins" contamination across SL/TP/trailing stop.
+                    let get_atr = |v: &Option<Vec<f64>>| -> Option<f64> {
+                        v.as_ref().and_then(|arr| {
+                            let idx = i - 1;
+                            if idx < arr.len() && !arr[idx].is_nan() { Some(arr[idx]) } else { None }
+                        })
+                    };
+                    let atr_for_sl = get_atr(&atr_values.for_sl);
+                    let atr_for_tp = get_atr(&atr_values.for_tp);
+                    let atr_for_ts = get_atr(&atr_values.for_ts);
 
                     let raw_price = candle.open;
                     let entry_price =
                         orders::apply_entry_costs(raw_price, dir, &strategy.trading_costs, instrument);
 
                     let sl_price = strategy.stop_loss.as_ref().map(|sl_cfg| {
-                        calculate_stop_loss(sl_cfg, entry_price, dir, atr_val, instrument)
+                        let sl = calculate_stop_loss(sl_cfg, entry_price, dir, atr_for_sl, instrument);
+                        enforce_stops_level_sl(sl, entry_price, dir, instrument)
                     });
 
                     let lots = calculate_lots(
@@ -226,14 +284,16 @@ pub fn run_backtest(
                         entry_price,
                         sl_price,
                         instrument,
+                        consecutive_losses,
                     );
 
                     let tp_price = strategy.take_profit.as_ref().map(|tp_cfg| {
-                        calculate_take_profit(tp_cfg, entry_price, sl_price, dir, atr_val, instrument)
+                        let tp = calculate_take_profit(tp_cfg, entry_price, sl_price, dir, atr_for_tp, instrument);
+                        enforce_stops_level_tp(tp, entry_price, dir, instrument)
                     });
 
                     let ts_distance = strategy.trailing_stop.as_ref().map(|ts_cfg| {
-                        calculate_trailing_stop_distance(ts_cfg, entry_price, sl_price, atr_val, instrument)
+                        calculate_trailing_stop_distance(ts_cfg, entry_price, sl_price, atr_for_ts, instrument)
                     });
 
                     position = Some(OpenPosition {
@@ -245,12 +305,176 @@ pub fn run_backtest(
                         stop_loss: sl_price,
                         take_profit: tp_price,
                         trailing_stop_distance: ts_distance,
-                        highest_since_entry: candle.high,
-                        lowest_since_entry: candle.low,
+                        highest_since_entry: candle.high + if dir == TradeDirection::Short { spread } else { 0.0 },
+                        lowest_since_entry: candle.low + if dir == TradeDirection::Short { spread } else { 0.0 },
                         mae_pips: 0.0,
                         mfe_pips: 0.0,
+                        trailing_stop_activated: false,
+                        last_swap_date: candle.datetime[..10.min(candle.datetime.len())].to_string(),
+                        accumulated_swap: 0.0,
                     });
                     daily_trade_count += 1;
+                }
+            }
+        }
+
+        // ── Phase 2.5: Tick-by-tick entry (TICK MODE ONLY) ──
+        // When no position was opened at bar open (Phase 2), scan each tick of bar[i]
+        // with streaming indicator values — matching MT5's "Every Tick" entry behavior.
+        // Entry fires at the first tick where the rules become true; subsequent ticks
+        // in this bar are handed to Phase 3 (SL/TP) as the start of the open position.
+        let mut phase3_sub_start = sub_start; // adjusted when entry fires mid-bar
+        if is_tick_mode && position.is_none() && i > 0 {
+            if let SubBarData::Ticks(ref ticks) = *sub_bars {
+                if sub_start < sub_end {
+                    let streaming_state =
+                        streaming::build_streaming_state(strategy, &cache, candles, i - 1);
+                    let mut streaming_vals = streaming::init_streaming_vals(&streaming_state);
+
+                    // Pre-compile rules ONCE per bar — resolves cache_key() + Vec indices.
+                    // Eliminates String allocation + HashMap lookup on every tick.
+                    let fast_long = compile_rules_streaming(&strategy.long_entry_rules, &streaming_state);
+                    let fast_short = compile_rules_streaming(&strategy.short_entry_rules, &streaming_state);
+
+                    // Pre-compute CrossAbove/CrossBelow "previous bar" values ONCE before the tick loop.
+                    let long_cross_prev = precompute_cross_prev_vals(
+                        &strategy.long_entry_rules, i, &cache, candles,
+                        Some(&daily_ohlc), time_cache.as_ref(), pattern_cache.as_ref(),
+                    );
+                    let short_cross_prev = precompute_cross_prev_vals(
+                        &strategy.short_entry_rules, i, &cache, candles,
+                        Some(&daily_ohlc), time_cache.as_ref(), pattern_cache.as_ref(),
+                    );
+
+                    let mut running_high = candle.open;
+                    let mut running_low = candle.open;
+
+                    'tick_entry: for j in sub_start..sub_end {
+                        let tick_bid = ticks.bids[j];
+                        let tick_ask = ticks.asks[j];
+                        let tick_mid = (tick_bid + tick_ask) * 0.5;
+
+                        // Update running OHLCV (open is fixed; high/low track mid-price extremes)
+                        if tick_mid > running_high { running_high = tick_mid; }
+                        if tick_mid < running_low  { running_low = tick_mid; }
+
+                        // Refresh streaming indicator values for this tick
+                        streaming::update_streaming_vals(
+                            &streaming_state, &mut streaming_vals,
+                            running_high, running_low, tick_mid,
+                        );
+
+                        // Synthetic in-progress candle for Price operand resolution
+                        let running_candle = Candle {
+                            timestamp: ticks.timestamps[j],
+                            datetime: String::new(),
+                            open: candle.open,
+                            high: running_high,
+                            low: running_low,
+                            close: tick_mid,
+                            volume: 0.0,
+                        };
+
+                        // Trading-hours guard: use integer arithmetic — no String allocation per tick
+                        let within_hours = strategy.trading_hours.as_ref().map_or(true, |th| {
+                            let (h, m) = hour_minute_from_micros(ticks.timestamps[j]);
+                            is_within_trading_hours(th, h, m)
+                        });
+                        let under_daily_limit = strategy
+                            .max_daily_trades
+                            .map_or(true, |max| daily_trade_count < max as usize);
+                        if !within_hours || !under_daily_limit {
+                            continue 'tick_entry;
+                        }
+
+                        // Evaluate entry rules — zero allocation per tick (FastOp path)
+                        let mut tick_dir: Option<TradeDirection> = None;
+                        if can_go_long && !fast_long.is_empty()
+                            && evaluate_rules_fast(
+                                &fast_long, &strategy.long_entry_rules, i, &cache,
+                                &streaming_state, &streaming_vals, &long_cross_prev,
+                                candles, &running_candle,
+                                Some(&daily_ohlc), time_cache.as_ref(), pattern_cache.as_ref(),
+                            )
+                        {
+                            tick_dir = Some(TradeDirection::Long);
+                        } else if can_go_short && !fast_short.is_empty()
+                            && evaluate_rules_fast(
+                                &fast_short, &strategy.short_entry_rules, i, &cache,
+                                &streaming_state, &streaming_vals, &short_cross_prev,
+                                candles, &running_candle,
+                                Some(&daily_ohlc), time_cache.as_ref(), pattern_cache.as_ref(),
+                            )
+                        {
+                            tick_dir = Some(TradeDirection::Short);
+                        }
+
+                        if let Some(dir) = tick_dir {
+                            // Execute at tick's actual bid/ask price
+                            let raw_price = match dir {
+                                TradeDirection::Long => tick_ask,
+                                TradeDirection::Short | TradeDirection::Both => tick_bid,
+                            };
+                            let entry_price = orders::apply_entry_costs(
+                                raw_price, dir, &strategy.trading_costs, instrument,
+                            );
+
+                            // ATR from bar[i-1] (last completed bar)
+                            let get_atr = |v: &Option<Vec<f64>>| -> Option<f64> {
+                                v.as_ref().and_then(|arr| {
+                                    let idx = i - 1;
+                                    if idx < arr.len() && !arr[idx].is_nan() { Some(arr[idx]) } else { None }
+                                })
+                            };
+                            let atr_for_sl = get_atr(&atr_values.for_sl);
+                            let atr_for_tp = get_atr(&atr_values.for_tp);
+                            let atr_for_ts = get_atr(&atr_values.for_ts);
+
+                            let sl_price = strategy.stop_loss.as_ref().map(|sl_cfg| {
+                                let sl = calculate_stop_loss(sl_cfg, entry_price, dir, atr_for_sl, instrument);
+                                enforce_stops_level_sl(sl, entry_price, dir, instrument)
+                            });
+                            let lots = calculate_lots(
+                                &strategy.position_sizing, equity, entry_price,
+                                sl_price, instrument, consecutive_losses,
+                            );
+                            let tp_price = strategy.take_profit.as_ref().map(|tp_cfg| {
+                                let tp = calculate_take_profit(tp_cfg, entry_price, sl_price, dir, atr_for_tp, instrument);
+                                enforce_stops_level_tp(tp, entry_price, dir, instrument)
+                            });
+                            let ts_distance = strategy.trailing_stop.as_ref().map(|ts_cfg| {
+                                calculate_trailing_stop_distance(ts_cfg, entry_price, sl_price, atr_for_ts, instrument)
+                            });
+
+                            // Only convert timestamp to String when an entry actually fires (rare event)
+                            let tick_dt = micros_to_datetime_string(ticks.timestamps[j]);
+                            position = Some(OpenPosition {
+                                direction: dir,
+                                entry_price,
+                                entry_bar: i,
+                                entry_time: tick_dt,
+                                lots,
+                                stop_loss: sl_price,
+                                take_profit: tp_price,
+                                trailing_stop_distance: ts_distance,
+                                highest_since_entry: running_high
+                                    + if dir == TradeDirection::Short { spread } else { 0.0 },
+                                lowest_since_entry: running_low
+                                    + if dir == TradeDirection::Short { spread } else { 0.0 },
+                                mae_pips: 0.0,
+                                mfe_pips: 0.0,
+                                trailing_stop_activated: false,
+                                last_swap_date: candle.datetime
+                                    [..10.min(candle.datetime.len())]
+                                    .to_string(),
+                                accumulated_swap: 0.0,
+                            });
+                            daily_trade_count += 1;
+                            // Phase 3 must start from the tick AFTER entry
+                            phase3_sub_start = j + 1;
+                            break 'tick_entry;
+                        }
+                    }
                 }
             }
         }
@@ -258,7 +482,7 @@ pub fn run_backtest(
         // ── Phase 3: Check SL/TP for existing position ──
         if let Some(ref mut pos) = position {
             let exit_result = resolve_exit(
-                pos, candle, sub_bars, sub_start, sub_end, instrument,
+                pos, candle, sub_bars, phase3_sub_start, sub_end, instrument, spread,
             );
 
             if let Some((exit_price, exit_time, reason)) = exit_result {
@@ -266,6 +490,8 @@ pub fn run_backtest(
                     pos, exit_price, &exit_time, i, reason, instrument, strategy, config,
                 );
                 equity += trade.pnl - trade.commission;
+                if trade.pnl >= 1e-6 { consecutive_losses = 0; }
+                else if trade.pnl <= -1e-6 { consecutive_losses = consecutive_losses.saturating_add(1); }
                 trades.push(trade);
                 position = None;
             }
@@ -280,15 +506,29 @@ pub fn run_backtest(
                     instrument, strategy, config,
                 );
                 equity += trade.pnl - trade.commission;
+                if trade.pnl >= 1e-6 { consecutive_losses = 0; }
+                else if trade.pnl <= -1e-6 { consecutive_losses = consecutive_losses.saturating_add(1); }
                 trades.push(trade);
                 position = None;
+            }
+        }
+
+        // ── Phase 4.5: Charge overnight swap ──
+        if let Some(ref mut pos) = position {
+            let (charge, multiplier) = should_charge_swap(pos, &candle.datetime, instrument);
+            if charge {
+                let swap = calculate_swap_charge(pos.direction, pos.lots, pos.entry_price, instrument, multiplier);
+                pos.accumulated_swap += swap;
+                pos.last_swap_date = candle.datetime[..10.min(candle.datetime.len())].to_string();
+                equity += swap; // swap is negative when it costs the trader
             }
         }
 
         // ── Phase 5: Update trailing stop (if position survived all exit checks) ──
         if let Some(ref mut pos) = position {
             if matches!(sub_bars, SubBarData::None) {
-                update_trailing_stop(pos, candle);
+                let ba = orders::BidAskOhlc::from_candle(candle, spread);
+                update_trailing_stop(pos, &ba);
             }
         }
 
@@ -338,8 +578,26 @@ pub fn run_backtest(
             strategy,
             config,
         );
-        let _ = trade.pnl - trade.commission;
+        equity += trade.pnl - trade.commission;
+        // Note: swap was already deducted from equity per-bar; no adjustment needed here
         trades.push(trade);
+
+        // Update the last equity/drawdown curve point to reflect the settled
+        // (closed) value instead of the unrealized value written during the loop.
+        if peak_equity < equity {
+            peak_equity = equity;
+        }
+        let final_dd_pct = if peak_equity > 0.0 {
+            (peak_equity - equity) / peak_equity * 100.0
+        } else {
+            0.0
+        };
+        if let Some(last) = equity_curve.last_mut() {
+            last.equity = equity;
+        }
+        if let Some(last) = drawdown_curve.last_mut() {
+            last.drawdown_pct = final_dd_pct;
+        }
     }
 
     progress_callback(100, total_bars, total_bars);
@@ -356,6 +614,7 @@ pub fn run_backtest(
         drawdown_curve,
         returns,
         metrics,
+        backtest_config: config.clone(),
     })
 }
 
@@ -419,6 +678,7 @@ fn find_subbar_range(
 
 /// Resolve SL/TP exit for an open position.
 /// Uses sub-bar data when available, otherwise falls back to TF candle OHLC.
+/// `spread` is the full spread in price units (used to derive BidAsk prices in bar mode).
 /// Returns (exit_price, exit_time, reason) if an exit is triggered.
 fn resolve_exit(
     pos: &mut OpenPosition,
@@ -427,17 +687,19 @@ fn resolve_exit(
     sub_start: usize,
     sub_end: usize,
     instrument: &InstrumentConfig,
+    spread: f64,
 ) -> Option<(f64, String, CloseReason)> {
     match sub_bars {
         SubBarData::None => {
-            // SelectedTfOnly: check against TF candle OHLC
-            update_mae_mfe(pos, candle, instrument);
-            check_sl_tp_hit(pos, candle)
+            // SelectedTfOnly: derive bid/ask OHLC from TF candle + spread
+            let ba = orders::BidAskOhlc::from_candle(candle, spread);
+            update_mae_mfe_ba(pos, &ba, instrument);
+            check_sl_tp_hit(pos, &ba)
                 .map(|(price, reason)| (price, candle.datetime.clone(), reason))
         }
         SubBarData::Candles(subs) => {
             // M1TickSimulation: iterate M1 sub-candles
-            process_subbars_candle(pos, subs, sub_start, sub_end, instrument)
+            process_subbars_candle(pos, subs, sub_start, sub_end, instrument, spread)
         }
         SubBarData::Ticks(ticks) => {
             // RealTick modes: optimized columnar tick processing
@@ -447,6 +709,7 @@ fn resolve_exit(
 }
 
 /// Process M1 sub-candles for SL/TP resolution within a TF bar.
+/// Derives bid/ask OHLC per sub-candle using the configured spread.
 /// Updates MAE/MFE and trailing stop on each sub-candle.
 fn process_subbars_candle(
     pos: &mut OpenPosition,
@@ -454,17 +717,19 @@ fn process_subbars_candle(
     start: usize,
     end: usize,
     instrument: &InstrumentConfig,
+    spread: f64,
 ) -> Option<(f64, String, CloseReason)> {
     for i in start..end {
         let sc = &sub_candles[i];
-        // Update MAE/MFE
-        update_mae_mfe(pos, sc, instrument);
+        let ba = orders::BidAskOhlc::from_candle(sc, spread);
+        // Update MAE/MFE using bid/ask split
+        update_mae_mfe_ba(pos, &ba, instrument);
         // Check SL/TP (with current trailing stop level)
-        if let Some((exit_price, reason)) = check_sl_tp_hit(pos, sc) {
+        if let Some((exit_price, reason)) = check_sl_tp_hit(pos, &ba) {
             return Some((exit_price, sc.datetime.clone(), reason));
         }
         // Update trailing stop for next sub-bar
-        update_trailing_stop(pos, sc);
+        update_trailing_stop(pos, &ba);
     }
     None
 }
@@ -508,7 +773,8 @@ fn process_subbars_tick_columnar(
             // SL check (long exits at bid — stop-market fills at bid)
             if let Some(sl) = pos.stop_loss {
                 if bid <= sl {
-                    return Some((bid, micros_to_datetime_string(timestamps[j]), CloseReason::StopLoss));
+                    let reason = if pos.trailing_stop_activated { CloseReason::TrailingStop } else { CloseReason::StopLoss };
+                    return Some((bid, micros_to_datetime_string(timestamps[j]), reason));
                 }
             }
             // TP check (long exits at bid — limit fills at TP level)
@@ -522,11 +788,12 @@ fn process_subbars_tick_columnar(
                 if bid > pos.highest_since_entry {
                     pos.highest_since_entry = bid;
                     let new_sl = bid - distance;
-                    match pos.stop_loss {
-                        Some(ref mut sl) if new_sl > *sl => *sl = new_sl,
-                        None => pos.stop_loss = Some(new_sl),
-                        _ => {}
-                    }
+                    let moved = match pos.stop_loss {
+                        Some(ref mut sl) if new_sl > *sl => { *sl = new_sl; true }
+                        None => { pos.stop_loss = Some(new_sl); true }
+                        _ => false,
+                    };
+                    if moved { pos.trailing_stop_activated = true; }
                 }
             }
         }
@@ -544,7 +811,8 @@ fn process_subbars_tick_columnar(
             // SL check (short exits at ask — stop-market fills at ask)
             if let Some(sl) = pos.stop_loss {
                 if ask >= sl {
-                    return Some((ask, micros_to_datetime_string(timestamps[j]), CloseReason::StopLoss));
+                    let reason = if pos.trailing_stop_activated { CloseReason::TrailingStop } else { CloseReason::StopLoss };
+                    return Some((ask, micros_to_datetime_string(timestamps[j]), reason));
                 }
             }
             // TP check (short exits at ask — limit fills at TP level)
@@ -558,11 +826,12 @@ fn process_subbars_tick_columnar(
                 if ask < pos.lowest_since_entry {
                     pos.lowest_since_entry = ask;
                     let new_sl = ask + distance;
-                    match pos.stop_loss {
-                        Some(ref mut sl) if new_sl < *sl => *sl = new_sl,
-                        None => pos.stop_loss = Some(new_sl),
-                        _ => {}
-                    }
+                    let moved = match pos.stop_loss {
+                        Some(ref mut sl) if new_sl < *sl => { *sl = new_sl; true }
+                        None => { pos.stop_loss = Some(new_sl); true }
+                        _ => false,
+                    };
+                    if moved { pos.trailing_stop_activated = true; }
                 }
             }
         }
@@ -611,6 +880,7 @@ fn close_position(
         pnl,
         pnl_pips,
         commission,
+        swap: pos.accumulated_swap,
         close_reason: reason,
         duration_bars,
         duration_time: format_duration_bars(duration_bars, mpb),
@@ -631,45 +901,62 @@ fn format_duration_bars(bars: usize, minutes_per_bar: u32) -> String {
     }
 }
 
-/// Compute ATR values if the strategy uses ATR-based SL, TP, or trailing stop.
-/// Uses the ATR period configured on the first ATR-based component found.
-fn compute_atr_if_needed(strategy: &Strategy, candles: &[Candle]) -> Option<Vec<f64>> {
-    // Collect ATR period from whichever component uses ATR (first found wins)
-    let atr_period = strategy
-        .stop_loss
-        .as_ref()
-        .filter(|sl| matches!(sl.sl_type, crate::models::strategy::StopLossType::ATR))
-        .and_then(|sl| sl.atr_period)
-        .or_else(|| {
+/// Per-component ATR series, one for each SL/TP/TrailingStop that uses ATR.
+/// Each field is `None` if the component doesn't use ATR or its period is unset.
+pub(super) struct AtrValues {
+    pub for_sl: Option<Vec<f64>>,
+    pub for_tp: Option<Vec<f64>>,
+    pub for_ts: Option<Vec<f64>>,
+}
+
+/// Compute separate ATR series for SL, TP, and trailing stop.
+///
+/// Each component may specify its own `atr_period`. Previously a single
+/// "first found wins" period was shared, silently giving wrong ATR values
+/// when SL, TP, and TS used different periods.
+fn compute_atr_if_needed(strategy: &Strategy, candles: &[Candle]) -> AtrValues {
+    AtrValues {
+        for_sl: compute_atr_for_period(
+            strategy
+                .stop_loss
+                .as_ref()
+                .filter(|sl| matches!(sl.sl_type, crate::models::strategy::StopLossType::ATR))
+                .and_then(|sl| sl.atr_period),
+            candles,
+        ),
+        for_tp: compute_atr_for_period(
             strategy
                 .take_profit
                 .as_ref()
                 .filter(|tp| matches!(tp.tp_type, crate::models::strategy::TakeProfitType::ATR))
-                .and_then(|tp| tp.atr_period)
-        })
-        .or_else(|| {
+                .and_then(|tp| tp.atr_period),
+            candles,
+        ),
+        for_ts: compute_atr_for_period(
             strategy
                 .trailing_stop
                 .as_ref()
                 .filter(|ts| matches!(ts.ts_type, crate::models::strategy::TrailingStopType::ATR))
-                .and_then(|ts| ts.atr_period)
-        });
+                .and_then(|ts| ts.atr_period),
+            candles,
+        ),
+    }
+}
 
-    if let Some(period) = atr_period {
-        let config = IndicatorConfig {
-            indicator_type: IndicatorType::ATR,
-            params: crate::models::strategy::IndicatorParams {
-                period: Some(period),
-                ..Default::default()
-            },
-            output_field: None,
-        };
-        match super::indicators::compute_indicator(&config, candles) {
-            Ok(output) => Some(output.primary),
-            Err(_) => None,
-        }
-    } else {
-        None
+/// Compute an ATR series for a specific period. Returns `None` if period is `None`.
+fn compute_atr_for_period(period: Option<usize>, candles: &[Candle]) -> Option<Vec<f64>> {
+    let period = period?;
+    let config = IndicatorConfig {
+        indicator_type: IndicatorType::ATR,
+        params: crate::models::strategy::IndicatorParams {
+            period: Some(period),
+            ..Default::default()
+        },
+        output_field: None,
+    };
+    match super::indicators::compute_indicator(&config, candles) {
+        Ok(output) => Some(output.primary),
+        Err(_) => None,
     }
 }
 
@@ -688,6 +975,20 @@ fn extract_hour_minute(datetime: &str) -> (u8, u8) {
     } else {
         (0, 0)
     }
+}
+
+/// Extract hour and minute from a microseconds-since-epoch timestamp using pure integer arithmetic.
+///
+/// Called on every tick in the hot tick loop — avoids all String allocation compared to
+/// `micros_to_datetime_string` + `extract_hour_minute`.
+#[inline(always)]
+fn hour_minute_from_micros(micros: i64) -> (u8, u8) {
+    let secs = micros / 1_000_000;
+    // Seconds within the day (UTC)
+    let secs_in_day = secs.rem_euclid(86_400) as u32;
+    let h = (secs_in_day / 3600) as u8;
+    let m = ((secs_in_day % 3600) / 60) as u8;
+    (h, m)
 }
 
 /// Check if the current bar's time matches or exceeds the close_trades_at time.
@@ -727,13 +1028,14 @@ fn is_within_trading_hours(hours: &TradingHours, h: u8, m: u8) -> bool {
 fn chunked_f64_to_vec(ca: &polars::prelude::Float64Chunked) -> Vec<f64> {
     let rechunked = ca.rechunk();
     if !rechunked.has_nulls() {
-        // Fast path: no nulls → direct memcpy from Arrow buffer
-        let arr = rechunked.downcast_iter().next().unwrap();
-        arr.values().as_slice().to_vec()
-    } else {
-        // Slow path with null handling (rare for our data)
-        (0..rechunked.len()).map(|i| rechunked.get(i).unwrap_or(0.0)).collect()
+        // Fast path: no nulls → direct memcpy from Arrow buffer.
+        // rechunk() guarantees exactly one chunk; if somehow empty, fall through to slow path.
+        if let Some(arr) = rechunked.downcast_iter().next() {
+            return arr.values().as_slice().to_vec();
+        }
     }
+    // Slow path: null values present or empty array
+    (0..rechunked.len()).map(|i| rechunked.get(i).unwrap_or(0.0)).collect()
 }
 
 /// Fast bulk extraction of i64 values from an Int64 ChunkedArray.
@@ -742,13 +1044,14 @@ fn chunked_f64_to_vec(ca: &polars::prelude::Float64Chunked) -> Vec<f64> {
 fn chunked_i64_to_vec(ca: &polars::prelude::Int64Chunked) -> Vec<i64> {
     let rechunked = ca.rechunk();
     if !rechunked.has_nulls() {
-        // Fast path: no nulls → direct memcpy from Arrow buffer
-        let arr = rechunked.downcast_iter().next().unwrap();
-        arr.values().as_slice().to_vec()
-    } else {
-        // Slow path with null handling (rare for our data)
-        (0..rechunked.len()).map(|i| rechunked.get(i).unwrap_or(0)).collect()
+        // Fast path: no nulls → direct memcpy from Arrow buffer.
+        // rechunk() guarantees exactly one chunk; if somehow empty, fall through to slow path.
+        if let Some(arr) = rechunked.downcast_iter().next() {
+            return arr.values().as_slice().to_vec();
+        }
     }
+    // Slow path: null values present or empty array
+    (0..rechunked.len()).map(|i| rechunked.get(i).unwrap_or(0)).collect()
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -946,6 +1249,21 @@ pub fn tick_columns_from_ohlcv_with_spread(
     Ok(TickColumns { timestamps, bids, asks })
 }
 
+/// Normalize an end_date string for inclusive comparison against datetime strings.
+///
+/// Datetime strings in the data look like "2024-01-15 23:59:59.000000", so a
+/// date-only end_date like "2024-01-15" would compare as LESS than any bar on
+/// that day (the space character makes the full string lexicographically greater).
+/// Appending end-of-day time ensures the entire last day is included.
+fn normalize_end_date(end_date: &str) -> String {
+    if end_date.len() == 10 {
+        // Pure date "YYYY-MM-DD" — append max time so all bars on this day are included.
+        format!("{} 23:59:59.999999", end_date)
+    } else {
+        end_date.to_string()
+    }
+}
+
 /// Filter a DataFrame by date range using Polars lazy expressions.
 /// Much faster than converting to structs first — filters at the columnar level.
 /// Data must have a 'datetime' column.
@@ -969,10 +1287,11 @@ pub fn filter_dataframe_by_date(
     }
 
     if !end_date.is_empty() {
+        let end = normalize_end_date(end_date);
         lf = lf.filter(
             col("datetime")
                 .cast(DataType::String)
-                .lt_eq(lit(end_date)),
+                .lt_eq(lit(end)),
         );
     }
 
@@ -989,12 +1308,136 @@ pub fn filter_candles_by_date(
     if start_date.is_empty() && end_date.is_empty() {
         return candles.to_vec();
     }
+    let end_normalized = normalize_end_date(end_date);
     candles
         .iter()
         .filter(|c| {
             (start_date.is_empty() || c.datetime.as_str() >= start_date)
-                && (end_date.is_empty() || c.datetime.as_str() <= end_date)
+                && (end_date.is_empty() || c.datetime.as_str() <= end_normalized.as_str())
         })
         .cloned()
         .collect()
+}
+
+/// Load TickColumns from flat binary tick files (`tick_raw_YYYY.bin`).
+///
+/// Binary format: `i64_le timestamp_µs (8B) + f64_le bid (8B) + f64_le ask (8B)` = 24 bytes/tick.
+/// Files are sorted chronologically and filtered by year from `start_date`/`end_date`.
+/// Date filtering is applied at the record level for precise range slicing.
+pub fn tick_columns_from_binary_dir(
+    tick_raw_path: &str,
+    start_date: &str,
+    end_date: &str,
+) -> Result<TickColumns, AppError> {
+    use std::io::Read as IoRead;
+
+    let dir = std::path::Path::new(tick_raw_path);
+    if !dir.is_dir() {
+        return Err(AppError::FileNotFound(format!(
+            "Binary tick directory not found: {}",
+            tick_raw_path
+        )));
+    }
+
+    // Parse year range from dates to skip irrelevant files
+    let parse_year = |s: &str| -> Option<i32> {
+        chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
+            .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S"))
+            .or_else(|_| chrono::NaiveDateTime::parse_from_str(
+                &format!("{} 00:00:00", &s[..10.min(s.len())]), "%Y-%m-%d %H:%M:%S"))
+            .ok()
+            .map(|ndt| ndt.year())
+    };
+
+    let start_year = if start_date.is_empty() { None } else { parse_year(start_date) };
+    let end_year = if end_date.is_empty() { None } else { parse_year(end_date) };
+
+    // Discover .bin files, filter by year range, sort chronologically
+    let mut bin_files: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .map_err(|e| AppError::Internal(format!("read binary tick dir: {}", e)))?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".bin"))
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            if let Some(year_str) = name.strip_suffix(".bin")
+                .and_then(|s| s.rsplit('_').next())
+            {
+                if let Ok(file_year) = year_str.parse::<i32>() {
+                    let after_start = start_year.map_or(true, |sy| file_year >= sy);
+                    let before_end = end_year.map_or(true, |ey| file_year <= ey);
+                    return after_start && before_end;
+                }
+            }
+            true
+        })
+        .map(|e| e.path())
+        .collect();
+    bin_files.sort();
+
+    if bin_files.is_empty() {
+        return Err(AppError::NotFound(
+            "No binary tick files found for the requested date range".into(),
+        ));
+    }
+
+    // Compute microsecond bounds for date filtering
+    let start_micros: i64 = if start_date.is_empty() {
+        i64::MIN
+    } else {
+        parse_datetime_to_micros(&format!("{} 00:00:00", &start_date[..10.min(start_date.len())]))
+    };
+    let end_micros: i64 = if end_date.is_empty() {
+        i64::MAX
+    } else {
+        parse_datetime_to_micros(&format!("{} 23:59:59.999999", &end_date[..10.min(end_date.len())]))
+    };
+
+    // Estimate capacity: each file is ~24 bytes/tick
+    let total_bytes: u64 = bin_files.iter()
+        .filter_map(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len())
+        .sum();
+    let capacity = ((total_bytes / 24) as usize).min(500_000_000);
+
+    let mut timestamps = Vec::with_capacity(capacity);
+    let mut bids = Vec::with_capacity(capacity);
+    let mut asks = Vec::with_capacity(capacity);
+
+    let mut chunk = [0u8; 24];
+
+    for path in &bin_files {
+        let file = std::fs::File::open(path)
+            .map_err(|e| AppError::FileRead(format!("open binary tick file: {}", e)))?;
+        let mut reader = std::io::BufReader::with_capacity(512 * 1024, file);
+
+        loop {
+            match reader.read_exact(&mut chunk) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(AppError::FileRead(format!("read binary tick: {}", e))),
+            }
+
+            let ts = i64::from_le_bytes(chunk[0..8].try_into().unwrap());
+
+            // Apply date filter
+            if ts < start_micros || ts > end_micros {
+                continue;
+            }
+
+            let bid = f64::from_le_bytes(chunk[8..16].try_into().unwrap());
+            let ask = f64::from_le_bytes(chunk[16..24].try_into().unwrap());
+
+            timestamps.push(ts);
+            bids.push(bid);
+            asks.push(ask);
+        }
+    }
+
+    info!(
+        "Loaded {} ticks from binary (SoA, ~{}MB)",
+        timestamps.len(),
+        (timestamps.len() * 24) / (1024 * 1024)
+    );
+
+    Ok(TickColumns { timestamps, bids, asks })
 }

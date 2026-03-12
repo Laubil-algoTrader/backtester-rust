@@ -1,11 +1,13 @@
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { toast } from "sonner";
 import { useAppStore } from "@/stores/useAppStore";
 import { exportTradesCsv, exportReportHtml } from "@/lib/tauri";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
 import { Button } from "@/components/ui/Button";
-import { BarChart3, Download, FileSpreadsheet } from "lucide-react";
+import { BarChart3, Download, FileSpreadsheet, Loader2 } from "lucide-react";
 import { BacktestPanel } from "./BacktestPanel";
 import { MetricsGrid } from "./MetricsGrid";
 import { EquityCurve } from "./EquityCurve";
@@ -15,7 +17,10 @@ import { TradesList } from "./TradesList";
 
 export function BacktestPage() {
   const { t } = useTranslation("backtest");
+  const { t: tc } = useTranslation("common");
   const { backtestResults, initialCapital, equityMarkers } = useAppStore();
+  const [exportingTrades, setExportingTrades] = useState(false);
+  const [exportingReport, setExportingReport] = useState(false);
 
   const handleExportTrades = async () => {
     if (!backtestResults) return;
@@ -23,8 +28,16 @@ export function BacktestPage() {
       defaultPath: "trades.csv",
       filters: [{ name: "CSV", extensions: ["csv"] }],
     });
-    if (path) {
+    if (!path) return;
+    setExportingTrades(true);
+    try {
       await exportTradesCsv(backtestResults.trades, path);
+      toast.success(tc("toast.exportTradesOk"));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(`${tc("toast.exportErr")}: ${msg}`);
+    } finally {
+      setExportingTrades(false);
     }
   };
 
@@ -34,8 +47,16 @@ export function BacktestPage() {
       defaultPath: "backtest_report.html",
       filters: [{ name: "HTML", extensions: ["html"] }],
     });
-    if (path) {
+    if (!path) return;
+    setExportingReport(true);
+    try {
       await exportReportHtml(backtestResults, path);
+      toast.success(tc("toast.exportReportOk"));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(`${tc("toast.exportErr")}: ${msg}`);
+    } finally {
+      setExportingReport(false);
     }
   };
 
@@ -63,8 +84,11 @@ export function BacktestPage() {
                   size="sm"
                   className="h-8 text-sm"
                   onClick={handleExportTrades}
+                  disabled={exportingTrades}
                 >
-                  <Download className="mr-1.5 h-3.5 w-3.5" />
+                  {exportingTrades
+                    ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                    : <Download className="mr-1.5 h-3.5 w-3.5" />}
                   {t("exportTrades")}
                 </Button>
                 <Button
@@ -72,8 +96,11 @@ export function BacktestPage() {
                   size="sm"
                   className="h-8 text-sm"
                   onClick={handleExportReport}
+                  disabled={exportingReport}
                 >
-                  <FileSpreadsheet className="mr-1.5 h-3.5 w-3.5" />
+                  {exportingReport
+                    ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                    : <FileSpreadsheet className="mr-1.5 h-3.5 w-3.5" />}
                   {t("exportReport")}
                 </Button>
               </div>

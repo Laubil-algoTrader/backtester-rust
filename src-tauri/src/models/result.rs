@@ -19,6 +19,89 @@ pub struct DrawdownPoint {
     pub drawdown_pct: f64,
 }
 
+/// Monthly return entry for year × month breakdown.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonthlyReturn {
+    pub year: i32,
+    pub month: u32,
+    pub return_pct: f64,
+}
+
+/// Configuration for a Monte Carlo simulation run.
+///
+/// When both `use_resampling` and `use_skip_trades` are enabled, each simulation
+/// applies them sequentially: first bootstrap-resample the trades, then randomly
+/// skip some from the resampled set. This is the same behaviour as StrategyQuant X
+/// when both methods are checked simultaneously.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonteCarloConfig {
+    pub n_simulations: usize,
+    /// Apply bootstrap resampling (draw N trades with replacement from the historical pool).
+    #[serde(default)]
+    pub use_resampling: bool,
+    /// Randomly skip each trade with `skip_probability`. Models missed executions.
+    #[serde(default)]
+    pub use_skip_trades: bool,
+    /// Probability of skipping each trade (0.0–1.0). Only used when `use_skip_trades` is true.
+    #[serde(default)]
+    pub skip_probability: f64,
+    /// Ruin threshold as a percentage loss of initial capital (0–100).
+    /// A simulation is considered "ruined" when equity drops below
+    /// `initial_capital * (1 - ruin_threshold_pct / 100)`.
+    /// Default 20.0 means: losing 20 % of capital = ruin.
+    #[serde(default = "default_ruin_threshold")]
+    pub ruin_threshold_pct: f64,
+}
+
+fn default_ruin_threshold() -> f64 {
+    20.0
+}
+
+/// One row in the confidence-level table returned by Monte Carlo simulation.
+///
+/// A confidence level of C % means: "there is only (100 − C)% chance that the
+/// metric will be worse than the value shown here."  For profit-like metrics
+/// (net_profit, ret_dd_ratio, expectancy) the displayed value is the pessimistic
+/// tail; for drawdown it is the worst-case tail.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonteCarloConfidenceRow {
+    /// Confidence level in percent (e.g. 95.0).
+    pub level: f64,
+    /// Net profit at this confidence level ($).
+    pub net_profit: f64,
+    /// Maximum drawdown at this confidence level ($, absolute peak-to-trough).
+    pub max_drawdown_abs: f64,
+    /// Return / Drawdown ratio at this confidence level.
+    pub ret_dd_ratio: f64,
+    /// Average profit per executed trade ($) at this confidence level.
+    pub expectancy: f64,
+}
+
+/// Results of a Monte Carlo simulation run on historical trades.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonteCarloResult {
+    pub n_simulations: usize,
+
+    /// Fraction of simulations (0–1) where equity fell below initial capital at any point.
+    pub ruin_probability: f64,
+
+    // ── Original strategy metrics (comparison row in table) ──────────────────
+    pub original_net_profit: f64,
+    pub original_max_drawdown_abs: f64,
+    pub original_ret_dd_ratio: f64,
+    pub original_expectancy: f64,
+    pub original_return_pct: f64,
+    pub original_max_drawdown_pct: f64,
+
+    /// Confidence table rows at levels [50, 60, 70, 80, 90, 92, 95, 97, 98].
+    pub confidence_table: Vec<MonteCarloConfidenceRow>,
+
+    /// Sampled simulation equity curves for visualization (max 200, each ≤300 points).
+    pub sim_equity_curves: Vec<Vec<f64>>,
+    /// Original (historical) equity curve, downsampled to the same resolution.
+    pub original_equity_curve: Vec<f64>,
+}
+
 /// All performance metrics from a backtest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BacktestMetrics {
@@ -77,6 +160,10 @@ pub struct BacktestMetrics {
     pub mfe_avg: f64,
     pub mfe_max: f64,
 
+    // Costs breakdown
+    pub total_swap_charged: f64,
+    pub total_commission_charged: f64,
+
     // Stagnation & Ulcer
     pub stagnation_bars: usize,
     pub stagnation_time: String,
@@ -84,6 +171,11 @@ pub struct BacktestMetrics {
 
     // Return / Drawdown ratio
     pub return_dd_ratio: f64,
+
+    // Additional metrics (P4.4)
+    pub k_ratio: f64,
+    pub omega_ratio: f64,
+    pub monthly_returns: Vec<MonthlyReturn>,
 }
 
 /// Complete results of a backtest run.
@@ -94,6 +186,8 @@ pub struct BacktestResults {
     pub drawdown_curve: Vec<DrawdownPoint>,
     pub returns: Vec<f64>,
     pub metrics: BacktestMetrics,
+    /// The backtest configuration used to generate these results (capital, timeframe, dates, etc.)
+    pub backtest_config: BacktestConfig,
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -148,6 +242,10 @@ pub struct GeneticAlgorithmConfig {
     pub generations: usize,
     pub mutation_rate: f64,
     pub crossover_rate: f64,
+    /// Stop early if the best fitness has not improved for this many consecutive generations.
+    /// `None` means no early stopping (run all generations).
+    #[serde(default)]
+    pub patience: Option<usize>,
 }
 
 /// A date range for Out-of-Sample testing.
@@ -198,6 +296,7 @@ pub struct OptimizationResult {
     pub total_trades: usize,
     pub profit_factor: f64,
     pub return_dd_ratio: f64,
+    pub win_rate_pct: f64,
     pub stagnation_bars: usize,
     pub ulcer_index_pct: f64,
     /// Out-of-Sample results for each OOS period (empty if no OOS configured).
@@ -206,4 +305,41 @@ pub struct OptimizationResult {
     /// Downsampled equity curve for sparkline visualization (max ~60 points).
     #[serde(default)]
     pub equity_curve: Vec<EquityPoint>,
+}
+
+// ══════════════════════════════════════════════════════════════
+// Walk-Forward Analysis types
+// ══════════════════════════════════════════════════════════════
+
+/// Configuration for Walk-Forward Analysis.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalkForwardConfig {
+    /// Number of sequential windows to divide the data into.
+    pub num_windows: usize,
+    /// Fraction of each window used for in-sample optimization (0.1–0.9).
+    pub in_sample_pct: f64,
+    /// Optimization configuration used on the in-sample portion of each window.
+    pub optimization_config: OptimizationConfig,
+}
+
+/// Per-window results from a Walk-Forward Analysis.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalkForwardWindowResult {
+    pub window_index: usize,
+    pub in_sample_start: String,
+    pub in_sample_end: String,
+    pub out_of_sample_start: String,
+    pub out_of_sample_end: String,
+    pub best_params: HashMap<String, f64>,
+    pub in_sample_metrics: BacktestMetrics,
+    pub out_of_sample_metrics: BacktestMetrics,
+}
+
+/// Aggregated results of a complete Walk-Forward Analysis.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalkForwardResult {
+    pub windows: Vec<WalkForwardWindowResult>,
+    pub combined_out_of_sample_metrics: BacktestMetrics,
+    /// OOS net profit / IS net profit. Values ≥ 0.5 suggest a robust strategy.
+    pub efficiency_ratio: f64,
 }

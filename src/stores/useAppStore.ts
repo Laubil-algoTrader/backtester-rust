@@ -19,6 +19,7 @@ import type {
   OosPeriod,
   ParameterRange,
   LicenseTier,
+  MonteCarloResult,
 } from "@/lib/types";
 
 // ── Default values ──
@@ -60,6 +61,7 @@ interface AppState {
   setSymbols: (symbols: Symbol[]) => void;
   addSymbol: (symbol: Symbol) => void;
   removeSymbol: (id: string) => void;
+  updateSymbol: (symbol: Symbol) => void;
   setSelectedSymbolId: (id: string | null) => void;
 
   // Strategy
@@ -119,6 +121,10 @@ interface AppState {
   setOptimizationParamRanges: (ranges: ParameterRange[]) => void;
   setOptimizationOosPeriods: (periods: OosPeriod[]) => void;
 
+  // Monte Carlo (Robustez)
+  monteCarloResults: MonteCarloResult | null;
+  setMonteCarloResults: (results: MonteCarloResult | null) => void;
+
   // Active Downloads
   activeDownloads: Record<string, { progress: number; message: string; startTime: number }>;
   addActiveDownload: (symbolName: string) => void;
@@ -164,6 +170,10 @@ export const useAppStore = create<AppState>((set) => ({
       symbols: state.symbols.filter((s) => s.id !== id),
       selectedSymbolId:
         state.selectedSymbolId === id ? null : state.selectedSymbolId,
+    })),
+  updateSymbol: (symbol) =>
+    set((state) => ({
+      symbols: state.symbols.map((s) => (s.id === symbol.id ? symbol : s)),
     })),
   setSelectedSymbolId: (id) => set({ selectedSymbolId: id }),
 
@@ -255,6 +265,10 @@ export const useAppStore = create<AppState>((set) => ({
   setOptimizationResults: (results) => set({ optimizationResults: results }),
   setOptimizationParamRanges: (ranges) => set({ optimizationParamRanges: ranges }),
   setOptimizationOosPeriods: (periods) => set({ optimizationOosPeriods: periods }),
+
+  // Monte Carlo (Robustez)
+  monteCarloResults: null,
+  setMonteCarloResults: (results) => set({ monteCarloResults: results }),
 
   // Active Downloads
   activeDownloads: {},

@@ -16,6 +16,19 @@
   "minLot": "Min Lot",
   "tickSize": "Tick Size",
   "digits": "Digits",
+  "tzOffset": "Timezone",
+  "tzOffsetHint": "Timezone applied to timestamps at import time. Select UTC+0 if data is already in UTC.",
+  "tzTransform": {
+    "button": "Transform timezone",
+    "title": "Transform Timezone",
+    "desc": "Shift all timestamps of \"{{name}}\" to a new timezone. This rewrites the stored data files.",
+    "current": "Current timezone",
+    "newTz": "New timezone",
+    "apply": "Apply",
+    "applying": "Applying...",
+    "cancel": "Cancel",
+    "failed": "Timezone transform failed"
+  },
   "preset": "Preset",
   "presets": {
     "forexMajor": "Forex Major",
@@ -51,11 +64,27 @@
     "startDate": "Start Date",
     "endDate": "End Date",
     "instrumentType": "Instrument Type",
+    "symbolNameHint": "Rename to avoid duplicates when downloading the same instrument multiple times.",
     "alreadyDownloading": "This symbol is already being downloaded.",
-    "downloading": "Downloading..."
+    "downloading": "Downloading...",
+    "storageFormat": "Storage Format",
+    "storageFormatParquet": "Parquet",
+    "storageFormatBinary": "Binary",
+    "storageFormatParquetDesc": "Compressed columnar format. Compatible with Polars tooling and data inspection.",
+    "storageFormatBinaryDesc": "Flat binary: 24 bytes/tick. Fastest load time for large datasets — no parsing overhead.",
+    "pipeline": "Pipeline",
+    "pipelineDirect": "Direct (fast)",
+    "pipelineViaCsv": "Via CSV (parity)",
+    "pipelineDirectDesc": "Downloads bi5 data directly to storage — fastest option.",
+    "pipelineViaCsvDesc": "Routes through an intermediate CSV — identical to manual CSV import. Use if Direct results differ.",
+    "keepCsv": "Keep intermediate CSV after conversion"
   },
   "cancelDownload": "Cancel download",
   "showingRows": "Showing first {{count}} rows",
   "loading": "Loading...",
-  "noDataAvailable": "No data available"
+  "noDataAvailable": "No data available",
+  "exportMt5": {
+    "buttonTitle": "Export for MT5",
+    "saveTitle": "Save MT5 Tick CSV"
+  }
 }

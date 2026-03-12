@@ -51,6 +51,7 @@ const SIZING_TYPE_OPTIONS: { value: PositionSizingType; labelKey: string }[] = [
   { value: "FixedAmount", labelKey: "config.fixedAmount" },
   { value: "PercentEquity", labelKey: "config.percentEquity" },
   { value: "RiskBased", labelKey: "config.riskBased" },
+  { value: "AntiMartingale", labelKey: "config.antiMartingale" },
 ];
 
 const SIZING_VALUE_LABEL_KEYS: Record<PositionSizingType, string> = {
@@ -58,6 +59,7 @@ const SIZING_VALUE_LABEL_KEYS: Record<PositionSizingType, string> = {
   FixedAmount: "config.amount",
   PercentEquity: "config.equityPct",
   RiskBased: "config.riskPct",
+  AntiMartingale: "config.lots",
 };
 
 const SL_TYPE_OPTIONS: { value: StopLossType; labelKey: string }[] = [
@@ -198,6 +200,17 @@ export function ConfigPanel({
             onPositionSizingChange({ ...positionSizing, value })
           }
         />
+        {positionSizing.sizing_type === "AntiMartingale" && (
+          <LabeledInput
+            label={t("config.decreaseFactor")}
+            value={positionSizing.decrease_factor ?? 0.9}
+            min={0.01}
+            step="0.01"
+            onChange={(decrease_factor) =>
+              onPositionSizingChange({ ...positionSizing, decrease_factor })
+            }
+          />
+        )}
       </TabsContent>
 
       {/* Stop Loss */}

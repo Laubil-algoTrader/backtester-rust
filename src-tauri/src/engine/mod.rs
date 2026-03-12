@@ -1,7 +1,10 @@
 pub mod executor;
 pub mod indicators;
 pub mod metrics;
+pub mod monte_carlo;
 pub mod optimizer;
 pub mod orders;
 pub mod position;
 pub mod strategy;
+pub mod streaming;
+pub mod walk_forward;

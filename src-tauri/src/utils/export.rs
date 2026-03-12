@@ -6,6 +6,183 @@ use crate::errors::AppError;
 use crate::models::result::{BacktestMetrics, BacktestResults, DrawdownPoint, EquityPoint};
 use crate::models::trade::TradeResult;
 
+/// Write raw tick data to a CSV file in MetaTrader 5 import format.
+///
+/// MT5 format: `Date,Bid,Ask,Last,Volume,Flags`
+/// Date format: `YYYY.MM.DD HH:MM:SS.mmm` (dot-separated date, millisecond precision)
+///
+/// `tick_raw_path` should point to a directory containing `tick_raw_YYYY.parquet` files
+/// or to a single `.parquet` file with columns: `datetime`, `bid`, `ask`, `volume`.
+pub fn write_tick_mt5_csv(tick_raw_path: &str, output_path: &Path) -> Result<usize, AppError> {
+    use polars::prelude::*;
+
+    let p = std::path::Path::new(tick_raw_path);
+    if !p.exists() {
+        return Err(AppError::FileNotFound(format!(
+            "Tick raw path not found: {}",
+            tick_raw_path
+        )));
+    }
+
+    // Collect all parquet files to read (directory or single file)
+    let parquet_files: Vec<std::path::PathBuf> = if p.is_dir() {
+        let mut files: Vec<_> = std::fs::read_dir(p)
+            .map_err(|e| AppError::Internal(format!("read dir: {}", e)))?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".parquet"))
+            .map(|e| e.path())
+            .collect();
+        files.sort(); // Chronological order (tick_raw_YYYY.parquet)
+        files
+    } else {
+        vec![p.to_path_buf()]
+    };
+
+    if parquet_files.is_empty() {
+        return Err(AppError::NotFound(
+            "No parquet files found in tick_raw directory".into(),
+        ));
+    }
+
+    // Open output file and write header
+    let out_file = std::fs::File::create(output_path)
+        .map_err(|e| AppError::FileWrite(format!("Cannot create CSV: {}", e)))?;
+    let mut writer = std::io::BufWriter::new(out_file);
+    writeln!(writer, "Date,Bid,Ask,Last,Volume,Flags")
+        .map_err(|e| AppError::FileWrite(e.to_string()))?;
+
+    let mut total_rows: usize = 0;
+
+    for file in &parquet_files {
+        let df = ParquetReader::new(
+            std::fs::File::open(file)
+                .map_err(|e| AppError::FileRead(format!("open parquet: {}", e)))?,
+        )
+        .finish()
+        .map_err(|e| AppError::Internal(format!("read parquet: {}", e)))?;
+
+        let n = df.height();
+        if n == 0 {
+            continue;
+        }
+
+        // Cast datetime column to i64 milliseconds
+        let dt_col = df
+            .column("datetime")
+            .map_err(|_| AppError::Internal("No 'datetime' column in tick_raw".into()))?;
+        let bid_col = df
+            .column("bid")
+            .map_err(|_| AppError::Internal("No 'bid' column in tick_raw".into()))?;
+        let ask_col = df
+            .column("ask")
+            .map_err(|_| AppError::Internal("No 'ask' column in tick_raw".into()))?;
+
+        // Get volume if available (fall back to 1.0)
+        let vol_vals: Option<Vec<f64>> = if let Ok(vc) = df.column("volume") {
+            let ca = vc.f64().map_err(|e| AppError::Internal(e.to_string()))?;
+            Some(ca.into_iter().map(|v| v.unwrap_or(1.0)).collect())
+        } else {
+            None
+        };
+
+        // Extract i64 millisecond timestamps
+        let ts_i64: Vec<i64> = match dt_col.dtype() {
+            DataType::Datetime(tu, _) => {
+                let raw = dt_col
+                    .cast(&DataType::Int64)
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                let ca = raw.i64().map_err(|e| AppError::Internal(e.to_string()))?;
+                let mul = match tu {
+                    TimeUnit::Milliseconds => 1i64,
+                    TimeUnit::Microseconds => 1, // divide by 1000 below
+                    TimeUnit::Nanoseconds => 1,  // divide by 1_000_000 below
+                };
+                let div: i64 = match tu {
+                    TimeUnit::Milliseconds => 1,
+                    TimeUnit::Microseconds => 1_000,
+                    TimeUnit::Nanoseconds => 1_000_000,
+                };
+                ca.into_iter()
+                    .map(|v| v.unwrap_or(0) * mul / div)
+                    .collect()
+            }
+            _ => {
+                return Err(AppError::Internal(
+                    "Unexpected datetime column type in tick_raw parquet".into(),
+                ))
+            }
+        };
+
+        let bids = bid_col
+            .f64()
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let asks = ask_col
+            .f64()
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let bid_vec: Vec<f64> = bids.into_iter().map(|v| v.unwrap_or(0.0)).collect();
+        let ask_vec: Vec<f64> = asks.into_iter().map(|v| v.unwrap_or(0.0)).collect();
+
+        for i in 0..n {
+            let ms = ts_i64[i];
+            let date_str = millis_to_mt5_date(ms);
+            let bid = bid_vec[i];
+            let ask = ask_vec[i];
+            let last = ask; // MT5 "Last" = last trade price; use Ask as proxy
+            let vol = vol_vals.as_ref().map(|v| v[i]).unwrap_or(1.0);
+            // Flags: 6 = TICK_FLAG_BID(1) | TICK_FLAG_ASK(2) | TICK_FLAG_LAST(4)
+            writeln!(writer, "{},{},{},{},{:.0},6", date_str, bid, ask, last, vol)
+                .map_err(|e| AppError::FileWrite(e.to_string()))?;
+        }
+
+        total_rows += n;
+    }
+
+    writer
+        .flush()
+        .map_err(|e| AppError::FileWrite(e.to_string()))?;
+
+    Ok(total_rows)
+}
+
+/// Convert a UTC millisecond timestamp to MT5 date string: `YYYY.MM.DD HH:MM:SS.mmm`
+fn millis_to_mt5_date(ms: i64) -> String {
+    let total_secs = ms / 1000;
+    let millis = (ms % 1000).unsigned_abs() as u32;
+
+    // Days since 1970-01-01
+    let days = (total_secs / 86400) as i32;
+    let time_of_day = (total_secs.rem_euclid(86400)) as u32;
+
+    let h = time_of_day / 3600;
+    let m = (time_of_day % 3600) / 60;
+    let s = time_of_day % 60;
+
+    // Calendar calculation (Gregorian proleptic)
+    let (year, month, day) = days_to_ymd(days);
+
+    format!(
+        "{:04}.{:02}.{:02} {:02}:{:02}:{:02}.{:03}",
+        year, month, day, h, m, s, millis
+    )
+}
+
+/// Convert days-since-epoch (1970-01-01) to (year, month, day).
+fn days_to_ymd(z: i32) -> (i32, u32, u32) {
+    // Algorithm from http://howardhinnant.github.io/date_algorithms.html
+    let z = z + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m as u32, d as u32)
+}
+
 /// Write a list of trades to a CSV file.
 pub fn write_trades_csv(trades: &[TradeResult], path: &Path) -> Result<(), AppError> {
     let mut wtr = csv::Writer::from_path(path)

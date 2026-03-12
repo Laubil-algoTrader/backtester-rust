@@ -373,6 +373,8 @@ fn mql5_inputs(out: &mut String, strategy: &Strategy, indicators: &[UniqueIndica
             writeln!(out, "input double InpRiskPct = {:.1};       // Risk % of Equity", strategy.position_sizing.value).ok(),
         PositionSizingType::RiskBased =>
             writeln!(out, "input double InpRiskPct = {:.1};       // Risk % per Trade", strategy.position_sizing.value).ok(),
+        PositionSizingType::AntiMartingale =>
+            writeln!(out, "input double InpRiskPct = {:.1};       // Risk % per Trade (AntiMartingale)", strategy.position_sizing.value).ok(),
     };
 
     // SL/TP
@@ -990,6 +992,19 @@ fn mql5_lot_size(out: &mut String, strategy: &Strategy) {
         }
         PositionSizingType::RiskBased => {
             writeln!(out, "   // Risk-based: risk equity*X% per trade based on SL distance").ok();
+            writeln!(out, "   double equity = AccountInfoDouble(ACCOUNT_EQUITY);").ok();
+            writeln!(out, "   double riskAmount = equity * InpRiskPct / 100.0;").ok();
+            writeln!(out, "   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);").ok();
+            writeln!(out, "   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);").ok();
+            writeln!(out, "   if(sl == 0 || tickValue == 0 || tickSize == 0) return SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);").ok();
+            writeln!(out, "   double slDistance = MathAbs(price - sl);").ok();
+            writeln!(out, "   double slMoneyPerLot = (slDistance / tickSize) * tickValue;").ok();
+            writeln!(out, "   double lots = riskAmount / slMoneyPerLot;").ok();
+            writeln!(out, "   return NormalizeDouble(MathMax(lots, SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN)), 2);").ok();
+        }
+        PositionSizingType::AntiMartingale => {
+            // AntiMartingale uses risk-based sizing; consecutive-loss tracking requires EA-level state
+            writeln!(out, "   // AntiMartingale: risk-based sizing (consecutive-loss decay managed externally)").ok();
             writeln!(out, "   double equity = AccountInfoDouble(ACCOUNT_EQUITY);").ok();
             writeln!(out, "   double riskAmount = equity * InpRiskPct / 100.0;").ok();
             writeln!(out, "   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);").ok();

@@ -16,6 +16,19 @@
   "minLot": "Lote Mínimo",
   "tickSize": "Tamaño de Tick",
   "digits": "Decimales",
+  "tzOffset": "Zona Horaria",
+  "tzOffsetHint": "Zona horaria aplicada a los timestamps al importar. Seleccioná UTC+0 si los datos ya están en UTC.",
+  "tzTransform": {
+    "button": "Transformar zona horaria",
+    "title": "Transformar Zona Horaria",
+    "desc": "Desplaza todos los timestamps de \"{{name}}\" a una nueva zona horaria. Esto reescribe los archivos de datos almacenados.",
+    "current": "Zona horaria actual",
+    "newTz": "Nueva zona horaria",
+    "apply": "Aplicar",
+    "applying": "Aplicando...",
+    "cancel": "Cancelar",
+    "failed": "Error al transformar la zona horaria"
+  },
   "preset": "Preset",
   "presets": {
     "forexMajor": "Forex Major",
@@ -51,11 +64,27 @@
     "startDate": "Fecha Inicio",
     "endDate": "Fecha Fin",
     "instrumentType": "Tipo de Instrumento",
+    "symbolNameHint": "Renombra para evitar duplicados si descargas el mismo instrumento varias veces.",
     "alreadyDownloading": "Este símbolo ya se está descargando.",
-    "downloading": "Descargando..."
+    "downloading": "Descargando...",
+    "storageFormat": "Formato de Almacenamiento",
+    "storageFormatParquet": "Parquet",
+    "storageFormatBinary": "Binario",
+    "storageFormatParquetDesc": "Formato columnar comprimido. Compatible con herramientas Polars e inspección de datos.",
+    "storageFormatBinaryDesc": "Binario plano: 24 bytes/tick. Carga más rápida para datasets grandes — sin sobrecarga de parseo.",
+    "pipeline": "Pipeline",
+    "pipelineDirect": "Directo (rápido)",
+    "pipelineViaCsv": "Vía CSV (paridad)",
+    "pipelineDirectDesc": "Descarga datos bi5 directamente al formato de almacenamiento — opción más rápida.",
+    "pipelineViaCsvDesc": "Pasa por un CSV intermedio — idéntico a importar un CSV manualmente. Usar si los resultados del modo Directo difieren.",
+    "keepCsv": "Conservar CSV intermedio después de la conversión"
   },
   "cancelDownload": "Cancelar descarga",
   "showingRows": "Mostrando las primeras {{count}} filas",
   "loading": "Cargando...",
-  "noDataAvailable": "No hay datos disponibles"
+  "noDataAvailable": "No hay datos disponibles",
+  "exportMt5": {
+    "buttonTitle": "Exportar para MT5",
+    "saveTitle": "Guardar CSV Tick para MT5"
+  }
 }

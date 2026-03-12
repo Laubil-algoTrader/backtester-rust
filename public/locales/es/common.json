@@ -4,6 +4,7 @@
     "strategy": "Estrategia",
     "backtest": "Backtest",
     "optimize": "Optimizar",
+    "robustez": "Robustez",
     "export": "Exportar"
   },
   "header": {
@@ -70,5 +71,12 @@
   "ytd": "YTD",
   "noData": "No hay datos suficientes para el desglose mensual.",
   "stoppedByUser": "Detenido por el usuario",
-  "combinations": "combinaciones"
+  "combinations": "combinaciones",
+  "unsavedChanges": "Cambios sin guardar",
+  "toast": {
+    "exportTradesOk": "Trades exportados correctamente",
+    "exportReportOk": "Reporte exportado correctamente",
+    "exportErr": "Error al exportar",
+    "strategySaved": "Estrategia guardada"
+  }
 }

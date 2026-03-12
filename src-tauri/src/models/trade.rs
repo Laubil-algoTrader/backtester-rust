@@ -26,6 +26,9 @@ pub struct TradeResult {
     pub pnl: f64,
     pub pnl_pips: f64,
     pub commission: f64,
+    /// Total swap charged over the life of this trade.
+    /// Negative = cost (reduces profit), positive = credit (adds to profit).
+    pub swap: f64,
     pub close_reason: CloseReason,
     pub duration_bars: usize,
     pub duration_time: String,
