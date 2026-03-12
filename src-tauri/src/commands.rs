@@ -9,7 +9,7 @@ use crate::data::{converter, loader, storage, validator};
 use crate::engine::{executor, monte_carlo, optimizer, walk_forward};
 use crate::engine::executor::SubBarData;
 use crate::errors::AppError;
-use crate::models::config::{DataFormat, InstrumentConfig, Timeframe};
+use crate::models::config::{DataFormat, InstrumentConfig, TickPipeline, TickStorageFormat, Timeframe};
 use crate::models::result::{BacktestMetrics, BacktestResults, MonteCarloConfig, MonteCarloResult, OosResult, OptimizationConfig, OptimizationMethod, OptimizationResult, WalkForwardConfig, WalkForwardResult};
 use crate::models::strategy::{BacktestConfig, BacktestPrecision, Strategy};
 use crate::models::symbol::Symbol;
@@ -19,7 +19,7 @@ use crate::AppState;
 
 // ── Data Commands ──
 
-/// Upload a CSV file, validate, convert to Parquet, generate timeframes, store in DB.
+/// Upload a CSV file, validate, convert to storage format, generate timeframes, store in DB.
 #[tauri::command]
 pub async fn upload_csv(
     app: AppHandle,
@@ -27,7 +27,9 @@ pub async fn upload_csv(
     file_path: String,
     symbol_name: String,
     instrument_config: InstrumentConfig,
+    tick_storage_format: Option<TickStorageFormat>,
 ) -> Result<Symbol, AppError> {
+    let tick_storage_format = tick_storage_format.unwrap_or_default();
     // 0. Sanitize symbol name (prevent path traversal)
     sanitize_symbol_name(&symbol_name)?;
 
@@ -64,6 +66,8 @@ pub async fn upload_csv(
                 &validation,
                 &tick_dir,
                 &tick_raw_dir,
+                tick_storage_format,
+                instrument_config.tz_offset_hours,
                 |pct, msg| emit_progress(&app, pct, msg),
             )?;
 
@@ -79,7 +83,7 @@ pub async fn upload_csv(
         } else {
             // ── Bar data: standard flow (single CSV read) ──
             emit_progress(&app, 15, "Loading CSV data...");
-            let df = loader::load_csv_to_dataframe(&path, &validation)?;
+            let df = loader::load_csv_to_dataframe(&path, &validation, instrument_config.tz_offset_hours)?;
             let total_rows = df.height();
             info!("Loaded {} rows from CSV", total_rows);
 
@@ -136,10 +140,17 @@ pub async fn delete_symbol(
     let db = state.db.lock().await;
     let symbol = storage::delete_symbol_by_id(&db, &symbol_id)?;
 
-    // Clean up Parquet files
+    // Clean up Parquet files and tick data directories.
+    // Tick data is stored as directories (one per year), so use remove_dir_all when needed.
     for (_tf, path) in &symbol.timeframe_paths {
-        if let Err(e) = std::fs::remove_file(path) {
-            tracing::warn!("Failed to remove file {}: {}", path, e);
+        let p = std::path::Path::new(path);
+        let result = if p.is_dir() {
+            std::fs::remove_dir_all(p)
+        } else {
+            std::fs::remove_file(p)
+        };
+        if let Err(e) = result {
+            tracing::warn!("Failed to remove {}: {}", path, e);
         }
     }
 
@@ -149,6 +160,71 @@ pub async fn delete_symbol(
 
     info!("Symbol deleted: {}", symbol.name);
     Ok(())
+}
+
+/// Transform all stored timestamps of a symbol to a new timezone offset.
+///
+/// Computes `delta = new_tz_offset_hours - old_tz_offset_hours` and shifts every
+/// Parquet / binary file in the symbol's directories by that delta.
+/// Updates `tz_offset_hours` in the DB instrument config and adjusts `start_date` / `end_date`.
+#[tauri::command]
+pub async fn transform_symbol_timezone(
+    state: tauri::State<'_, AppState>,
+    symbol_id: String,
+    new_tz_offset_hours: f64,
+) -> Result<Symbol, AppError> {
+    // 1. Load symbol info (brief DB lock)
+    let symbol = {
+        let db = state.db.lock().await;
+        storage::get_symbol_by_id(&db, &symbol_id)?
+    };
+
+    let old_offset = symbol.instrument_config.tz_offset_hours;
+    let delta_hours = new_tz_offset_hours - old_offset;
+
+    if delta_hours.abs() < 1e-9 {
+        return Ok(symbol);
+    }
+
+    let delta_ms = (delta_hours * 3_600_000.0) as i64;
+
+    // 2. Shift all Parquet / binary files (CPU + IO, no DB lock held)
+    for (tf_name, tf_path) in &symbol.timeframe_paths {
+        let path = std::path::Path::new(tf_path);
+        if tf_name == "tick_raw" {
+            loader::shift_tick_raw_dir(path, delta_ms)?;
+        } else {
+            loader::shift_parquet_dir_or_file(path, delta_ms)?;
+        }
+    }
+
+    // 3. Shift the stored start/end dates by the same delta
+    let new_start = shift_date_string(&symbol.start_date, delta_ms);
+    let new_end = shift_date_string(&symbol.end_date, delta_ms);
+
+    // 4. Persist updated config + dates
+    let mut new_config = symbol.instrument_config.clone();
+    new_config.tz_offset_hours = new_tz_offset_hours;
+
+    let db = state.db.lock().await;
+    storage::update_symbol_tz(&db, &symbol_id, &new_config, &new_start, &new_end)?;
+    storage::get_symbol_by_id(&db, &symbol_id)
+}
+
+/// Shift a stored date string (e.g. "2024-01-15 00:00:00.000") by `delta_ms` milliseconds.
+/// Returns the original string unchanged if parsing fails.
+fn shift_date_string(date_str: &str, delta_ms: i64) -> String {
+    use chrono::NaiveDateTime;
+    let trimmed = date_str.trim();
+    NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S%.f")
+        .or_else(|_| NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S"))
+        .map(|ndt| {
+            let ts_ms = ndt.and_utc().timestamp_millis() + delta_ms;
+            chrono::DateTime::from_timestamp_millis(ts_ms)
+                .map(|d| d.naive_utc().format("%Y-%m-%d %H:%M:%S%.3f").to_string())
+                .unwrap_or_else(|| date_str.to_string())
+        })
+        .unwrap_or_else(|_| date_str.to_string())
 }
 
 /// Preview first N rows of a symbol's data for a given timeframe.
@@ -172,13 +248,14 @@ pub async fn preview_data(
             ))
         })?;
 
-    let df = loader::load_parquet(&PathBuf::from(parquet_path))?;
-
-    // Take first `limit` rows
-    let preview = df.head(Some(limit));
+    // Lazy scan with row limit pushed down — avoids loading the full Parquet into memory.
+    let df = loader::scan_parquet_lazy(&PathBuf::from(parquet_path))?
+        .limit(limit as u32)
+        .collect()
+        .map_err(|e| AppError::Internal(format!("preview collect: {}", e)))?;
 
     // Convert to Vec<serde_json::Value> for the frontend
-    dataframe_to_json(&preview)
+    dataframe_to_json(&df)
 }
 
 /// Placeholder greet command (for testing communication).
@@ -242,15 +319,36 @@ fn load_sub_bar_data(
                 .timeframe_paths
                 .get("tick_raw")
                 .ok_or_else(|| AppError::NotFound("Raw tick data (bid/ask) not available. Re-import tick data to enable real spread mode.".into()))?;
-            // Partitioned loader: scans only relevant year files, column projection + date filter
-            let filtered_df = loader::scan_tick_partitioned(
-                tick_raw_path,
-                &["datetime", "bid", "ask"],
-                &config.start_date,
-                &config.end_date,
-            )?;
-            let ticks = executor::tick_columns_from_dataframe(&filtered_df)?;
-            info!("Loaded {} raw ticks as TickColumns with real spread", ticks.len());
+
+            // Auto-detect storage format by checking file extension of first file found
+            let is_binary = std::path::Path::new(tick_raw_path.as_str()).is_dir() && {
+                std::fs::read_dir(tick_raw_path.as_str())
+                    .ok()
+                    .and_then(|mut rd| rd.next())
+                    .and_then(|e| e.ok())
+                    .map(|e| e.file_name().to_string_lossy().ends_with(".bin"))
+                    .unwrap_or(false)
+            };
+
+            let ticks = if is_binary {
+                executor::tick_columns_from_binary_dir(
+                    tick_raw_path,
+                    &config.start_date,
+                    &config.end_date,
+                )?
+            } else {
+                // Partitioned Parquet loader: column projection + date filter via Polars
+                let filtered_df = loader::scan_tick_partitioned(
+                    tick_raw_path,
+                    &["datetime", "bid", "ask"],
+                    &config.start_date,
+                    &config.end_date,
+                )?;
+                executor::tick_columns_from_dataframe(&filtered_df)?
+            };
+
+            info!("Loaded {} raw ticks as TickColumns with real spread ({})",
+                ticks.len(), if is_binary { "binary" } else { "parquet" });
             Ok(SubBarData::Ticks(ticks))
         }
     };
@@ -417,8 +515,8 @@ pub async fn run_optimization(
         optimization_config.backtest_config.precision
     );
 
-    // Reset cancel flag
-    state.cancel_flag.store(false, Ordering::Relaxed);
+    // Reset the optimization-specific cancel flag (separate from backtest cancel).
+    state.optimization_cancel_flag.store(false, Ordering::Relaxed);
 
     // Load symbol to get instrument config and parquet path
     let bt_config = &optimization_config.backtest_config;
@@ -478,7 +576,7 @@ pub async fn run_optimization(
         oos_data.push((period.label.clone(), oos_candles, oos_sub));
     }
 
-    let cancel_flag = state.cancel_flag.clone();
+    let cancel_flag = state.optimization_cancel_flag.clone();
     let instrument = symbol.instrument_config.clone();
 
     let result = tokio::task::spawn_blocking(move || {
@@ -634,7 +732,7 @@ pub async fn cancel_optimization(
     state: tauri::State<'_, AppState>,
 ) -> Result<(), AppError> {
     info!("Cancelling optimization");
-    state.cancel_flag.store(true, Ordering::Relaxed);
+    state.optimization_cancel_flag.store(true, Ordering::Relaxed);
     Ok(())
 }
 
@@ -659,7 +757,7 @@ pub async fn run_walk_forward(
         strategy.name
     );
 
-    state.cancel_flag.store(false, Ordering::Relaxed);
+    state.optimization_cancel_flag.store(false, Ordering::Relaxed);
 
     let bt_config = &wf_config.optimization_config.backtest_config;
     let db = state.db.lock().await;
@@ -690,7 +788,7 @@ pub async fn run_walk_forward(
 
     info!("Walk-forward data: {} candles", candles.len());
 
-    let cancel_flag = state.cancel_flag.clone();
+    let cancel_flag = state.optimization_cancel_flag.clone();
     let instrument = symbol.instrument_config.clone();
 
     let result = tokio::task::spawn_blocking(move || {
@@ -748,8 +846,8 @@ pub async fn run_monte_carlo(
         config.use_skip_trades,
     );
 
-    state.cancel_flag.store(false, Ordering::Relaxed);
-    let cancel_flag = state.cancel_flag.clone();
+    state.optimization_cancel_flag.store(false, Ordering::Relaxed);
+    let cancel_flag = state.optimization_cancel_flag.clone();
 
     let result = tokio::task::spawn_blocking(move || {
         monte_carlo::run_monte_carlo(&trades, initial_capital, &config, &cancel_flag)
@@ -799,6 +897,35 @@ pub async fn export_report_html(
     Ok(())
 }
 
+/// Export raw tick data for a symbol to a CSV file in MetaTrader 5 import format.
+///
+/// MT5 format: `Date,Bid,Ask,Last,Volume,Flags`
+/// Date: `YYYY.MM.DD HH:MM:SS.mmm`
+/// Only available for symbols whose base timeframe is Tick.
+#[tauri::command]
+pub async fn export_tick_data_mt5(
+    state: tauri::State<'_, AppState>,
+    symbol_id: String,
+    file_path: String,
+) -> Result<usize, AppError> {
+    let db = state.db.lock().await;
+    let symbol = storage::get_symbol_by_id(&db, &symbol_id)?;
+    drop(db);
+
+    let tick_raw_path = symbol
+        .timeframe_paths
+        .get("tick_raw")
+        .ok_or_else(|| AppError::NotFound(
+            format!("Symbol '{}' has no raw tick data (tick_raw timeframe)", symbol.name)
+        ))?;
+
+    info!("Exporting tick data to MT5 CSV: {} → {}", symbol.name, file_path);
+    let rows = export::write_tick_mt5_csv(tick_raw_path, &PathBuf::from(&file_path))?;
+    info!("MT5 export complete: {} rows written to {}", rows, file_path);
+
+    Ok(rows)
+}
+
 // ── Code Generation Commands ──
 
 /// Generate strategy code for MQL5 or PineScript.
@@ -841,8 +968,13 @@ pub async fn download_dukascopy(
     end_date: String,
     base_timeframe: String,
     instrument_config: InstrumentConfig,
+    tick_storage_format: Option<TickStorageFormat>,
+    tick_pipeline: Option<TickPipeline>,
+    keep_csv: Option<bool>,
 ) -> Result<Symbol, AppError> {
     use crate::data::dukascopy;
+
+    let tick_storage_format = tick_storage_format.unwrap_or_default();
 
     // Sanitize symbol name (prevent path traversal)
     sanitize_symbol_name(&symbol_name)?;
@@ -868,67 +1000,109 @@ pub async fn download_dukascopy(
         flags.insert(symbol_name.clone(), cancel_flag.clone());
     }
 
-    // Create temp directory for CSV
     let data_dir = state.data_dir.clone();
-    let temp_dir = data_dir.join("temp");
-    std::fs::create_dir_all(&temp_dir)?;
-    let csv_path = temp_dir.join(format!("{}_dukascopy.csv", &symbol_name));
-
     let sym_name_for_cleanup = symbol_name.clone();
     let state_inner = state.inner().download_cancel_flags.clone();
 
     // Ensure we clean up the cancel flag when done (success or error)
     let result = async {
-        // Phase 1: Download from Dukascopy (0-70%)
-        let app_clone = app.clone();
-        let sym_clone = symbol_name.clone();
-        let _tick_count = dukascopy::download_symbol(
-            &duka_symbol,
-            point_value,
-            start,
-            end,
-            &csv_path,
-            &cancel_flag,
-            move |pct, msg| {
-                emit_download_progress(&app_clone, &sym_clone, pct, msg);
-            },
-        )
-        .await?;
-
-        // Check cancellation before proceeding
+        // Check cancellation
         if cancel_flag.load(Ordering::Relaxed) {
-            let _ = std::fs::remove_file(&csv_path);
             return Err(AppError::DownloadCancelled);
         }
 
-        // Phase 2: Convert CSV → Parquet using existing pipeline (70-95%)
-        emit_download_progress(&app, &symbol_name, 72, "Validating downloaded data...");
-        let validation = validator::validate_csv(&csv_path)?;
-        info!(
-            "Validated downloaded CSV: format={:?}, rows={}",
-            validation.format, validation.row_count_sample
-        );
-
+        // Phase 2: Convert directly to storage format (no intermediate CSV)
         let symbol_dir = data_dir.join("symbols").join(&symbol_name);
         std::fs::create_dir_all(&symbol_dir)?;
 
         let (total_rows, data_start, data_end, timeframe_paths, final_base_tf) = if is_tick_mode {
-            // ── Tick mode: store raw ticks + generate all timeframes ──
             let tick_dir = symbol_dir.join("tick");
             let tick_raw_dir = symbol_dir.join("tick_raw");
 
-            let app_clone = app.clone();
-            let sym_clone = symbol_name.clone();
-            let (total_rows, data_start, data_end) = loader::stream_tick_csv_to_parquet(
-                &csv_path,
-                &validation,
-                &tick_dir,
-                &tick_raw_dir,
-                |pct, msg| {
-                    let mapped = 72 + (pct as f64 * 0.20) as u8;
-                    emit_download_progress(&app_clone, &sym_clone, mapped, msg);
-                },
-            )?;
+            let pipeline = tick_pipeline.unwrap_or_default();
+
+            let (total_rows, data_start, data_end) = match pipeline {
+                TickPipeline::Direct => {
+                    // ── Direct path: bi5 → YearBuffer → Parquet/Binary ──
+                    let app_clone = app.clone();
+                    let sym_clone = symbol_name.clone();
+                    dukascopy::download_symbol_direct(
+                        &duka_symbol,
+                        point_value,
+                        start,
+                        end,
+                        &tick_dir,
+                        &tick_raw_dir,
+                        tick_storage_format,
+                        instrument_config.tz_offset_hours,
+                        &cancel_flag,
+                        move |pct, msg| {
+                            let mapped = (pct as f64 * 0.92) as u8;
+                            emit_download_progress(&app_clone, &sym_clone, mapped, msg);
+                        },
+                    ).await?
+                }
+
+                TickPipeline::ViaCsv => {
+                    // ── Via CSV path: bi5 → raw_ticks.csv → stream_tick_csv_to_parquet ──
+                    let csv_path = symbol_dir.join("raw_ticks.csv");
+
+                    // Phase 1: download bi5 → CSV (0–60%)
+                    {
+                        let app_clone = app.clone();
+                        let sym_clone = symbol_name.clone();
+                        dukascopy::download_symbol(
+                            &duka_symbol,
+                            point_value,
+                            start,
+                            end,
+                            &csv_path,
+                            &cancel_flag,
+                            move |pct, msg| {
+                                let mapped = (pct as f64 * 0.60) as u8;
+                                emit_download_progress(&app_clone, &sym_clone, mapped, msg);
+                            },
+                        ).await?;
+                    }
+
+                    emit_download_progress(&app, &symbol_name, 62, "Converting CSV to storage format...");
+
+                    // Phase 2: CSV → Parquet/Binary — same code path as manual import (62–92%)
+                    let validation = validator::ValidationResult {
+                        format: DataFormat::Tick,
+                        has_header: true,
+                        delimiter: b',',
+                        row_count_sample: 0,
+                        column_count: 4,
+                    };
+
+                    let app_clone = app.clone();
+                    let sym_clone = symbol_name.clone();
+                    let (total_rows, data_start, data_end) = loader::stream_tick_csv_to_parquet(
+                        &csv_path,
+                        &validation,
+                        &tick_dir,
+                        &tick_raw_dir,
+                        tick_storage_format,
+                        instrument_config.tz_offset_hours,
+                        move |pct, msg| {
+                            let mapped = 62 + (pct as f64 * 0.30) as u8;
+                            emit_download_progress(&app_clone, &sym_clone, mapped, msg);
+                        },
+                    )?;
+
+                    // Phase 3: optionally remove the intermediate CSV
+                    if !keep_csv.unwrap_or(false) {
+                        if let Err(e) = std::fs::remove_file(&csv_path) {
+                            tracing::warn!("Could not remove intermediate CSV {}: {}", csv_path.display(), e);
+                        }
+                    } else {
+                        info!("Keeping intermediate CSV at {}", csv_path.display());
+                    }
+
+                    (total_rows, data_start, data_end)
+                }
+            };
 
             emit_download_progress(&app, &symbol_name, 93, "Generating timeframes...");
             let mut timeframe_paths = converter::generate_timeframes_from_partitions(
@@ -940,22 +1114,34 @@ pub async fn download_dukascopy(
 
             (total_rows, data_start, data_end, timeframe_paths, Timeframe::Tick)
         } else {
-            // ── M1 mode: aggregate ticks → M1 OHLCV, skip raw tick storage ──
-            emit_download_progress(&app, &symbol_name, 75, "Aggregating ticks to M1 bars...");
-            let df = loader::load_csv_to_dataframe(&csv_path, &validation)?;
+            // ── M1 mode: aggregate ticks to M1 directly in memory (no CSV) ──
+            let app_clone = app.clone();
+            let sym_clone = symbol_name.clone();
+            let df = dukascopy::download_symbol_m1_direct(
+                &duka_symbol,
+                point_value,
+                start,
+                end,
+                instrument_config.tz_offset_hours,
+                &cancel_flag,
+                |pct, msg| {
+                    let mapped = (pct as f64 * 0.85) as u8;
+                    emit_download_progress(&app_clone, &sym_clone, mapped, msg);
+                },
+            ).await?;
             let total_rows = df.height();
             info!("Aggregated to {} M1 bars", total_rows);
 
             let (data_start, data_end) = loader::get_date_range(&df)?;
 
-            emit_download_progress(&app, &symbol_name, 85, "Generating timeframes...");
+            emit_download_progress(&app, &symbol_name, 88, "Generating timeframes...");
             let timeframe_paths =
                 converter::generate_all_timeframes(&df, Timeframe::M1, &symbol_dir)?;
 
             (total_rows, data_start, data_end, timeframe_paths, Timeframe::M1)
         };
 
-        // Phase 4: Save to database (98-100%)
+        // Phase 3: Save to database (98-100%)
         emit_download_progress(&app, &symbol_name, 98, "Saving to database...");
         let symbol_id = uuid::Uuid::new_v4().to_string();
         let upload_date = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
@@ -974,9 +1160,6 @@ pub async fn download_dukascopy(
 
         let db = state.db.lock().await;
         storage::insert_symbol(&db, &symbol)?;
-
-        // Clean up temp CSV
-        let _ = std::fs::remove_file(&csv_path);
 
         emit_download_progress(&app, &symbol_name, 100, "Done!");
         info!(
