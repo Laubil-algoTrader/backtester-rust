@@ -15,17 +15,6 @@ pub struct Candle {
     pub volume: f64,
 }
 
-/// Raw tick data with bid/ask prices for real-spread precision mode.
-/// NOTE: Kept for compatibility. For high-performance tick backtesting,
-/// use `TickColumns` (struct-of-arrays layout) instead.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TickData {
-    pub datetime: String,
-    pub bid: f64,
-    pub ask: f64,
-    pub volume: f64,
-}
-
 /// Columnar tick data for maximum cache efficiency in tick-level backtesting.
 ///
 /// Uses struct-of-arrays (SoA) layout instead of array-of-structs to:

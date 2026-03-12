@@ -160,6 +160,10 @@ pub struct BacktestMetrics {
     pub mfe_avg: f64,
     pub mfe_max: f64,
 
+    // Costs breakdown
+    pub total_swap_charged: f64,
+    pub total_commission_charged: f64,
+
     // Stagnation & Ulcer
     pub stagnation_bars: usize,
     pub stagnation_time: String,
@@ -292,6 +296,7 @@ pub struct OptimizationResult {
     pub total_trades: usize,
     pub profit_factor: f64,
     pub return_dd_ratio: f64,
+    pub win_rate_pct: f64,
     pub stagnation_bars: usize,
     pub ulcer_index_pct: f64,
     /// Out-of-Sample results for each OOS period (empty if no OOS configured).

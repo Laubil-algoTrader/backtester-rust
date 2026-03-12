@@ -43,6 +43,7 @@ pub fn calculate_metrics(
     let mut largest_win = 0.0f64;
     let mut largest_loss = 0.0f64;
     let mut total_commission = 0.0f64;
+    let mut total_swap = 0.0f64;
     let mut sum_pnl = 0.0f64;
     let mut winner_bars_sum = 0usize;
     let mut loser_bars_sum = 0usize;
@@ -55,6 +56,7 @@ pub fn calculate_metrics(
     for t in trades.iter() {
         sum_pnl += t.pnl;
         total_commission += t.commission;
+        total_swap += t.swap;
         total_bars_sum += t.duration_bars;
         mae_sum += t.mae;
         mfe_sum += t.mfe;
@@ -77,7 +79,7 @@ pub fn calculate_metrics(
     }
 
     let win_rate_pct = winning_trades as f64 / total_trades as f64 * 100.0;
-    let net_profit = sum_pnl - total_commission;
+    let net_profit = sum_pnl - total_commission + total_swap;
     let avg_trade = sum_pnl / total_trades as f64;
 
     // Cap at 999 when there are no losing trades — serde_json cannot serialize f64::INFINITY.
@@ -144,18 +146,19 @@ pub fn calculate_metrics(
     };
 
     // ── Risk-adjusted ──
-    // Prefer daily equity returns for Sharpe/Sortino — this gives a methodology-consistent
+    // Prefer daily equity returns for Sharpe/Sortino/Omega — this gives a methodology-consistent
     // result regardless of trade frequency. Fall back to per-trade returns only when the
     // equity curve spans fewer than 2 calendar days (very short tests).
+    let daily_returns_cache = equity_to_daily_returns(equity_curve);
     let (sharpe_ratio, sortino_ratio) =
-        if let Some((daily_returns, n_days)) = equity_to_daily_returns(equity_curve) {
+        if let Some((ref daily_returns, n_days)) = daily_returns_cache {
             // Trading days per year = observed days / calendar years.
             // This adapts automatically: ~252 for stocks, ~260 for forex, ~365 for crypto.
             let cal_years = calendar_years_from_equity(equity_curve).unwrap_or(1.0);
             let trading_days_per_year = (n_days as f64 / cal_years).max(1.0);
             (
-                calculate_sharpe(&daily_returns, trading_days_per_year),
-                calculate_sortino(&daily_returns, trading_days_per_year),
+                calculate_sharpe(daily_returns, trading_days_per_year),
+                calculate_sortino(daily_returns, trading_days_per_year),
             )
         } else {
             // Fallback: per-trade returns with frequency-adjusted annualization factor.
@@ -213,8 +216,8 @@ pub fn calculate_metrics(
 
     // ── Additional metrics ──
     let k_ratio = calculate_k_ratio(equity_curve);
-    let omega_ratio = if let Some((daily_returns, _)) = equity_to_daily_returns(equity_curve) {
-        calculate_omega_ratio(&daily_returns, 0.0)
+    let omega_ratio = if let Some((ref daily_returns, _)) = daily_returns_cache {
+        calculate_omega_ratio(daily_returns, 0.0)
     } else {
         0.0
     };
@@ -273,6 +276,8 @@ pub fn calculate_metrics(
         k_ratio,
         omega_ratio,
         monthly_returns,
+        total_swap_charged: total_swap,
+        total_commission_charged: total_commission,
     }
 }
 
@@ -325,6 +330,8 @@ fn empty_metrics(initial_capital: f64) -> BacktestMetrics {
         k_ratio: 0.0,
         omega_ratio: 0.0,
         monthly_returns: vec![],
+        total_swap_charged: 0.0,
+        total_commission_charged: 0.0,
     }
 }
 
@@ -520,17 +527,27 @@ fn calculate_consecutive(trades: &[TradeResult]) -> (usize, usize, f64, f64) {
     let mut loss_streaks: Vec<usize> = Vec::new();
 
     for trade in trades {
-        if trade.pnl > 0.0 {
+        if trade.pnl > 1e-9 {
             current_wins += 1;
             if current_losses > 0 {
                 loss_streaks.push(current_losses);
                 current_losses = 0;
             }
-        } else if trade.pnl < 0.0 {
+        } else if trade.pnl < -1e-9 {
             current_losses += 1;
             if current_wins > 0 {
                 win_streaks.push(current_wins);
                 current_wins = 0;
+            }
+        } else {
+            // Breakeven trade — flush both running streaks
+            if current_wins > 0 {
+                win_streaks.push(current_wins);
+                current_wins = 0;
+            }
+            if current_losses > 0 {
+                loss_streaks.push(current_losses);
+                current_losses = 0;
             }
         }
         max_wins = max_wins.max(current_wins);

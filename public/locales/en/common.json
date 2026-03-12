@@ -72,5 +72,11 @@
   "noData": "Not enough data for monthly breakdown.",
   "stoppedByUser": "Stopped by user",
   "combinations": "combinations",
-  "unsavedChanges": "Unsaved changes"
+  "unsavedChanges": "Unsaved changes",
+  "toast": {
+    "exportTradesOk": "Trades exported successfully",
+    "exportReportOk": "Report exported successfully",
+    "exportErr": "Export failed",
+    "strategySaved": "Strategy saved"
+  }
 }

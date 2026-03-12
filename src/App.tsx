@@ -1,6 +1,7 @@
 import { useEffect, Component } from "react";
 import type { ErrorInfo, ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { Toaster } from "sonner";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { DataPage } from "@/components/data/DataPage";
 import { StrategyPage } from "@/components/strategy/StrategyPage";
@@ -88,6 +89,7 @@ function App() {
       <ErrorBoundary>
         <TooltipProvider delayDuration={300}>
           <LoginPage />
+          <Toaster theme="dark" position="bottom-right" richColors />
         </TooltipProvider>
       </ErrorBoundary>
     );
@@ -114,6 +116,7 @@ function App() {
     <ErrorBoundary>
       <TooltipProvider delayDuration={300}>
         <AppLayout>{renderSection()}</AppLayout>
+        <Toaster theme="dark" position="bottom-right" richColors />
       </TooltipProvider>
     </ErrorBoundary>
   );

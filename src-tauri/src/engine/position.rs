@@ -1,5 +1,8 @@
+use chrono::NaiveDate;
+
+use crate::engine::orders::BidAskOhlc;
 use crate::models::candle::Candle;
-use crate::models::config::InstrumentConfig;
+use crate::models::config::{InstrumentConfig, SwapMode};
 use crate::models::strategy::{
     PositionSizing, PositionSizingType, StopLoss, StopLossType, TakeProfit, TakeProfitType,
     TradeDirection, TrailingStop, TrailingStopType,
@@ -25,21 +28,29 @@ pub struct OpenPosition {
     pub mae_pips: f64,
     /// Maximum favorable excursion (best unrealized profit in pips).
     pub mfe_pips: f64,
+    /// True once the trailing stop has actually moved the stop loss level.
+    /// Used to distinguish `CloseReason::TrailingStop` from `CloseReason::StopLoss`.
+    pub trailing_stop_activated: bool,
+    /// Date on which swap was last charged ("YYYY-MM-DD"). Empty before first charge.
+    pub last_swap_date: String,
+    /// Cumulative swap charged so far (negative = cost to the trader).
+    pub accumulated_swap: f64,
 }
 
 /// Calculate position size in lots.
+///
+/// `consecutive_losses` is used only by `AntiMartingale` mode — pass 0 for all other modes.
 pub fn calculate_lots(
     sizing: &PositionSizing,
     equity: f64,
     entry_price: f64,
     sl_price: Option<f64>,
     instrument: &InstrumentConfig,
+    consecutive_losses: u32,
 ) -> f64 {
     let raw = match sizing.sizing_type {
         PositionSizingType::FixedLots => sizing.value,
         PositionSizingType::FixedAmount => {
-            // Fixed Amount = risk exactly $X per trade based on SL distance
-            // lots = risk_amount / (sl_distance_pips * pip_value)
             if let Some(sl) = sl_price {
                 let sl_distance_pips = (entry_price - sl).abs() / instrument.pip_size;
                 if sl_distance_pips == 0.0 || instrument.pip_value == 0.0 {
@@ -47,12 +58,10 @@ pub fn calculate_lots(
                 }
                 sizing.value / (sl_distance_pips * instrument.pip_value)
             } else {
-                // No SL → can't calculate risk-based sizing, use min lot
                 instrument.min_lot
             }
         }
         PositionSizingType::PercentEquity => {
-            // Same as FixedAmount but amount = equity * percent / 100
             if let Some(sl) = sl_price {
                 let sl_distance_pips = (entry_price - sl).abs() / instrument.pip_size;
                 if sl_distance_pips == 0.0 || instrument.pip_value == 0.0 {
@@ -65,7 +74,6 @@ pub fn calculate_lots(
             }
         }
         PositionSizingType::RiskBased => {
-            // Risk-based: lots = (equity * risk%) / (SL distance in pips * pip_value)
             if let Some(sl) = sl_price {
                 let sl_distance_pips = (entry_price - sl).abs() / instrument.pip_size;
                 if sl_distance_pips == 0.0 || instrument.pip_value == 0.0 {
@@ -73,6 +81,22 @@ pub fn calculate_lots(
                 }
                 let risk_amount = equity * sizing.value / 100.0;
                 risk_amount / (sl_distance_pips * instrument.pip_value)
+            } else {
+                instrument.min_lot
+            }
+        }
+        PositionSizingType::AntiMartingale => {
+            // Base size uses risk-based sizing, then apply decay: decrease_factor^n_losses.
+            // decrease_factor is in (0, 1]: 0.9 = −10% per loss, 1.0 = no decay.
+            if let Some(sl) = sl_price {
+                let sl_distance_pips = (entry_price - sl).abs() / instrument.pip_size;
+                if sl_distance_pips == 0.0 || instrument.pip_value == 0.0 {
+                    return instrument.min_lot;
+                }
+                let risk_amount = equity * sizing.value / 100.0;
+                let base_lots = risk_amount / (sl_distance_pips * instrument.pip_value);
+                let decay = sizing.decrease_factor.max(0.0).powi(consecutive_losses as i32);
+                base_lots * decay
             } else {
                 instrument.min_lot
             }
@@ -193,65 +217,77 @@ pub fn calculate_trailing_stop_distance(
     }
 }
 
-/// Update the trailing stop for an open position. Returns the new stop loss price.
-pub fn update_trailing_stop(position: &mut OpenPosition, candle: &Candle) {
+/// Update the trailing stop for an open position using bid/ask OHLC.
+///
+/// Long: tracks highest bid price — trailing stop follows bid side.
+/// Short: tracks lowest ask price — trailing stop follows ask side.
+/// Sets `trailing_stop_activated = true` the first time the stop level is moved.
+pub fn update_trailing_stop(position: &mut OpenPosition, ba: &BidAskOhlc) {
     if let Some(distance) = position.trailing_stop_distance {
         match position.direction {
             TradeDirection::Long | TradeDirection::Both => {
-                if candle.high > position.highest_since_entry {
-                    position.highest_since_entry = candle.high;
+                // Track highest bid
+                if ba.bid_high > position.highest_since_entry {
+                    position.highest_since_entry = ba.bid_high;
                     let new_sl = position.highest_since_entry - distance;
-                    if let Some(ref mut sl) = position.stop_loss {
-                        if new_sl > *sl {
-                            *sl = new_sl;
-                        }
+                    let moved = if let Some(ref mut sl) = position.stop_loss {
+                        if new_sl > *sl { *sl = new_sl; true } else { false }
                     } else {
                         position.stop_loss = Some(new_sl);
-                    }
+                        true
+                    };
+                    if moved { position.trailing_stop_activated = true; }
                 }
             }
             TradeDirection::Short => {
-                if candle.low < position.lowest_since_entry {
-                    position.lowest_since_entry = candle.low;
+                // Track lowest ask
+                if ba.ask_low < position.lowest_since_entry {
+                    position.lowest_since_entry = ba.ask_low;
                     let new_sl = position.lowest_since_entry + distance;
-                    if let Some(ref mut sl) = position.stop_loss {
-                        if new_sl < *sl {
-                            *sl = new_sl;
-                        }
+                    let moved = if let Some(ref mut sl) = position.stop_loss {
+                        if new_sl < *sl { *sl = new_sl; true } else { false }
                     } else {
                         position.stop_loss = Some(new_sl);
-                    }
+                        true
+                    };
+                    if moved { position.trailing_stop_activated = true; }
                 }
             }
         }
     }
 }
 
-/// Check if SL or TP was hit on the current candle.
-/// Returns (exit_price, CloseReason) if triggered.
+/// Check if SL or TP was hit on the current bar using bid/ask OHLC.
+///
+/// Bid/Ask convention (MT5-matching):
+/// - Long exits at **bid**: SL checked against bid_low, TP against bid_high.
+/// - Short exits at **ask**: SL checked against ask_high, TP against ask_low.
 ///
 /// Handles three realistic scenarios:
-/// 1. **Gap-through SL**: SL is a stop-market order. If price opens beyond
-///    the SL level, fill is at the open (worse for the trader, realistic slippage).
-/// 2. **TP fill**: TP is a limit order. Fills at the TP level (conservative).
-/// 3. **Both hit on same candle**: The level closer to the open was hit first.
+/// 1. **Gap-through SL**: If price opens beyond SL, fill is at the open (bid/ask open).
+/// 2. **TP fill**: Fills at the TP level (limit order — always fills at target).
+/// 3. **Both hit same bar**: The level closer to the relevant open was hit first.
 pub fn check_sl_tp_hit(
     position: &OpenPosition,
-    candle: &Candle,
+    ba: &BidAskOhlc,
 ) -> Option<(f64, CloseReason)> {
-    let sl_result = check_stop_loss(position, candle);
-    let tp_result = check_take_profit(position, candle);
+    let sl_result = check_stop_loss(position, ba);
+    let tp_result = check_take_profit(position, ba);
 
     match (sl_result, tp_result) {
         (None, None) => None,
         (Some(sl), None) => Some(sl),
         (None, Some(tp)) => Some(tp),
-        (Some((sl_fill, _)), Some((tp_fill, _))) => {
-            // Both triggered on same candle — closer level to open was hit first
-            let dist_sl = (candle.open - sl_fill).abs();
-            let dist_tp = (candle.open - tp_fill).abs();
+        (Some((sl_fill, sl_reason)), Some((tp_fill, _))) => {
+            // Both triggered on same bar — closer level to the relevant open wins
+            let ref_open = match position.direction {
+                TradeDirection::Long | TradeDirection::Both => ba.bid_open,
+                TradeDirection::Short => ba.ask_open,
+            };
+            let dist_sl = (ref_open - sl_fill).abs();
+            let dist_tp = (ref_open - tp_fill).abs();
             if dist_sl <= dist_tp {
-                Some((sl_fill, CloseReason::StopLoss))
+                Some((sl_fill, sl_reason))
             } else {
                 Some((tp_fill, CloseReason::TakeProfit))
             }
@@ -259,25 +295,32 @@ pub fn check_sl_tp_hit(
     }
 }
 
-/// Check if stop loss was triggered. SL is a stop-market order:
-/// gap-through fills at open (worse price for the trader).
-fn check_stop_loss(pos: &OpenPosition, candle: &Candle) -> Option<(f64, CloseReason)> {
+/// Check if stop loss was triggered. SL is a stop-market order.
+/// Long: checks bid_low; Short: checks ask_high.
+/// Gap-through fills at the relevant open price (worse price for the trader).
+/// Returns `CloseReason::TrailingStop` when the trailing stop moved the SL level.
+fn check_stop_loss(pos: &OpenPosition, ba: &BidAskOhlc) -> Option<(f64, CloseReason)> {
     let sl = pos.stop_loss?;
+    let reason = if pos.trailing_stop_activated {
+        CloseReason::TrailingStop
+    } else {
+        CloseReason::StopLoss
+    };
     match pos.direction {
         TradeDirection::Long | TradeDirection::Both => {
-            if candle.low <= sl {
-                // Gap-through: open already below SL → fill at open (worse)
-                let fill = if candle.open <= sl { candle.open } else { sl };
-                Some((fill, CloseReason::StopLoss))
+            if ba.bid_low <= sl {
+                // Gap-through: bid opened already below SL → fill at bid_open (worse)
+                let fill = if ba.bid_open <= sl { ba.bid_open } else { sl };
+                Some((fill, reason))
             } else {
                 None
             }
         }
         TradeDirection::Short => {
-            if candle.high >= sl {
-                // Gap-through: open already above SL → fill at open (worse)
-                let fill = if candle.open >= sl { candle.open } else { sl };
-                Some((fill, CloseReason::StopLoss))
+            if ba.ask_high >= sl {
+                // Gap-through: ask opened already above SL → fill at ask_open (worse)
+                let fill = if ba.ask_open >= sl { ba.ask_open } else { sl };
+                Some((fill, reason))
             } else {
                 None
             }
@@ -285,24 +328,162 @@ fn check_stop_loss(pos: &OpenPosition, candle: &Candle) -> Option<(f64, CloseRea
     }
 }
 
-/// Check if take profit was triggered. TP is a limit order:
-/// always fills at the TP level (conservative, standard behavior).
-fn check_take_profit(pos: &OpenPosition, candle: &Candle) -> Option<(f64, CloseReason)> {
+/// Check if take profit was triggered. TP is a limit order — always fills at TP level.
+/// Long: checks bid_high; Short: checks ask_low.
+fn check_take_profit(pos: &OpenPosition, ba: &BidAskOhlc) -> Option<(f64, CloseReason)> {
     let tp = pos.take_profit?;
     match pos.direction {
         TradeDirection::Long | TradeDirection::Both => {
-            if candle.high >= tp {
+            if ba.bid_high >= tp {
                 Some((tp, CloseReason::TakeProfit))
             } else {
                 None
             }
         }
         TradeDirection::Short => {
-            if candle.low <= tp {
+            if ba.ask_low <= tp {
                 Some((tp, CloseReason::TakeProfit))
             } else {
                 None
             }
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════
+// Swap / overnight financing
+// ══════════════════════════════════════════════════════════════
+
+/// Calculate daily swap charge for an open position.
+///
+/// `multiplier` = 1.0 for normal days, 3.0 on `triple_swap_day` (covers weekend).
+/// Returns a signed amount: negative = cost to the trader, positive = credit.
+pub fn calculate_swap_charge(
+    direction: TradeDirection,
+    lots: f64,
+    entry_price: f64,
+    instrument: &InstrumentConfig,
+    multiplier: f64,
+) -> f64 {
+    let rate = match direction {
+        TradeDirection::Long | TradeDirection::Both => instrument.swap_long,
+        TradeDirection::Short => instrument.swap_short,
+    };
+    let daily_swap = match instrument.swap_mode {
+        SwapMode::InPips => rate * instrument.pip_value * lots,
+        SwapMode::InPoints => {
+            // 1 point = tick_size; convert to pip-equivalent value
+            if instrument.tick_size > 0.0 {
+                rate * (instrument.tick_size / instrument.pip_size) * instrument.pip_value * lots
+            } else {
+                rate * instrument.pip_value * lots
+            }
+        }
+        SwapMode::InMoney => rate * lots,
+        SwapMode::AsPercent => {
+            // Annual rate (%) divided by 365 days
+            let pos_value = entry_price * lots * instrument.lot_size;
+            pos_value * rate / 100.0 / 365.0
+        }
+    };
+    daily_swap * multiplier
+}
+
+/// Determine if swap should be charged on this bar.
+///
+/// Returns `(should_charge, multiplier)` where:
+/// - `should_charge` = true when the bar's date has advanced past `last_swap_date`
+/// - `multiplier` = 3.0 on `triple_swap_day`, 1.0 otherwise
+pub fn should_charge_swap(
+    position: &OpenPosition,
+    candle_datetime: &str,
+    instrument: &InstrumentConfig,
+) -> (bool, f64) {
+    if candle_datetime.len() < 10 {
+        return (false, 1.0);
+    }
+    let bar_date = &candle_datetime[..10];
+    if position.last_swap_date.is_empty() || bar_date > position.last_swap_date.as_str() {
+        // Determine weekday to check for triple swap (Mon=1 … Sun=7)
+        let multiplier = NaiveDate::parse_from_str(bar_date, "%Y-%m-%d")
+            .map(|d| {
+                use chrono::Datelike;
+                let weekday = d.weekday().number_from_monday() as u8;
+                if weekday == instrument.triple_swap_day { 3.0 } else { 1.0 }
+            })
+            .unwrap_or(1.0);
+        (true, multiplier)
+    } else {
+        (false, 1.0)
+    }
+}
+
+// ══════════════════════════════════════════════════════════════
+// Stops-level enforcement
+// ══════════════════════════════════════════════════════════════
+
+/// Clamp a stop loss price to respect the instrument's minimum stop distance.
+///
+/// `min_stop_distance_pips` mirrors MT5's `SYMBOL_TRADE_STOPS_LEVEL`.
+/// For Long positions: SL must be ≥ `min_stop_distance_pips` below entry.
+/// For Short positions: SL must be ≥ `min_stop_distance_pips` above entry.
+pub fn enforce_stops_level_sl(
+    sl_price: f64,
+    entry_price: f64,
+    direction: TradeDirection,
+    instrument: &InstrumentConfig,
+) -> f64 {
+    if instrument.min_stop_distance_pips <= 0.0 {
+        return sl_price;
+    }
+    let min_dist = instrument.min_stop_distance_pips * instrument.pip_size;
+    match direction {
+        TradeDirection::Long | TradeDirection::Both => sl_price.min(entry_price - min_dist),
+        TradeDirection::Short => sl_price.max(entry_price + min_dist),
+    }
+}
+
+/// Clamp a take profit price to respect the instrument's minimum stop distance.
+pub fn enforce_stops_level_tp(
+    tp_price: f64,
+    entry_price: f64,
+    direction: TradeDirection,
+    instrument: &InstrumentConfig,
+) -> f64 {
+    if instrument.min_stop_distance_pips <= 0.0 {
+        return tp_price;
+    }
+    let min_dist = instrument.min_stop_distance_pips * instrument.pip_size;
+    match direction {
+        TradeDirection::Long | TradeDirection::Both => tp_price.max(entry_price + min_dist),
+        TradeDirection::Short => tp_price.min(entry_price - min_dist),
+    }
+}
+
+// ══════════════════════════════════════════════════════════════
+// MAE/MFE with bid/ask split
+// ══════════════════════════════════════════════════════════════
+
+/// Update MAE/MFE using bid/ask OHLC.
+/// Long: MAE from bid_low, MFE from bid_high.
+/// Short: MAE from ask_high, MFE from ask_low.
+pub fn update_mae_mfe_ba(
+    position: &mut OpenPosition,
+    ba: &BidAskOhlc,
+    instrument: &InstrumentConfig,
+) {
+    match position.direction {
+        TradeDirection::Long | TradeDirection::Both => {
+            let adverse = (position.entry_price - ba.bid_low) / instrument.pip_size;
+            let favorable = (ba.bid_high - position.entry_price) / instrument.pip_size;
+            if adverse > position.mae_pips { position.mae_pips = adverse; }
+            if favorable > position.mfe_pips { position.mfe_pips = favorable; }
+        }
+        TradeDirection::Short => {
+            let adverse = (ba.ask_high - position.entry_price) / instrument.pip_size;
+            let favorable = (position.entry_price - ba.ask_low) / instrument.pip_size;
+            if adverse > position.mae_pips { position.mae_pips = adverse; }
+            if favorable > position.mfe_pips { position.mfe_pips = favorable; }
         }
     }
 }

@@ -1,5 +1,42 @@
+use crate::models::candle::Candle;
 use crate::models::config::InstrumentConfig;
 use crate::models::strategy::{CommissionType, TradeDirection, TradingCosts};
+
+// ── Bid/Ask split ──────────────────────────────────────────────────────────
+
+/// Synthetic bid and ask OHLC derived from a mid-price candle.
+///
+/// In bar-mode the candle data is treated as bid prices (standard Forex convention).
+/// Ask = bid + full_spread. SL/TP for long positions are checked against bid,
+/// SL/TP for short positions are checked against ask.
+#[derive(Debug, Clone, Copy)]
+pub struct BidAskOhlc {
+    pub bid_open: f64,
+    pub bid_high: f64,
+    pub bid_low: f64,
+    pub ask_open: f64,
+    pub ask_high: f64,
+    pub ask_low: f64,
+}
+
+impl BidAskOhlc {
+    /// Build from a mid/bid candle and the full spread in price units.
+    pub fn from_candle(candle: &Candle, spread: f64) -> Self {
+        BidAskOhlc {
+            bid_open: candle.open,
+            bid_high: candle.high,
+            bid_low: candle.low,
+            ask_open: candle.open + spread,
+            ask_high: candle.high + spread,
+            ask_low: candle.low + spread,
+        }
+    }
+}
+
+/// Compute the full spread in price units from costs + instrument config.
+pub fn spread_price(costs: &TradingCosts, instrument: &InstrumentConfig) -> f64 {
+    costs.spread_pips * instrument.pip_size
+}
 
 /// Apply trading costs (spread + slippage) to the entry price.
 /// For long: buy at ask (price + spread), for short: sell at bid (price - spread).
@@ -99,14 +136,7 @@ mod tests {
     use super::*;
 
     fn forex_instrument() -> InstrumentConfig {
-        InstrumentConfig {
-            pip_size: 0.0001,
-            pip_value: 10.0,
-            lot_size: 100_000.0,
-            min_lot: 0.01,
-            tick_size: 0.00001,
-            digits: 5,
-        }
+        InstrumentConfig::default()
     }
 
     #[test]

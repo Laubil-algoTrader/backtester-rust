@@ -21,8 +21,12 @@ use tracing_subscriber::EnvFilter;
 pub struct AppState {
     pub db: Mutex<Connection>,
     pub data_dir: PathBuf,
-    /// Cancellation flag for long-running operations (backtest, optimization).
+    /// Cancellation flag for backtest operations.
     pub cancel_flag: Arc<AtomicBool>,
+    /// Cancellation flag for optimization / walk-forward / Monte Carlo operations.
+    /// Separate from `cancel_flag` so that cancelling a backtest does not
+    /// accidentally abort a concurrently running optimization (or vice versa).
+    pub optimization_cancel_flag: Arc<AtomicBool>,
     /// Per-download cancellation flags, keyed by symbol name.
     pub download_cancel_flags: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     /// Current license tier (Arc for sharing with background monitor).
@@ -79,6 +83,7 @@ pub fn run() {
         db: Mutex::new(conn),
         data_dir,
         cancel_flag: Arc::new(AtomicBool::new(false)),
+        optimization_cancel_flag: Arc::new(AtomicBool::new(false)),
         download_cancel_flags: Arc::new(Mutex::new(HashMap::new())),
         license_tier: Arc::new(Mutex::new(license::LicenseTier::Free)),
     };
@@ -104,6 +109,7 @@ pub fn run() {
             commands::export_trades_csv,
             commands::export_metrics_csv,
             commands::export_report_html,
+            commands::export_tick_data_mt5,
             commands::generate_strategy_code,
             commands::download_dukascopy,
             commands::cancel_download,
@@ -113,6 +119,7 @@ pub fn run() {
             commands::start_license_monitor,
             commands::run_walk_forward,
             commands::run_monte_carlo,
+            commands::transform_symbol_timezone,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -240,12 +240,24 @@ pub enum PositionSizingType {
     FixedAmount,
     PercentEquity,
     RiskBased,
+    /// Anti-martingale: reduce lot size proportionally after consecutive losses.
+    /// Base size is risk-based (like RiskBased). After each consecutive loss the
+    /// effective size is multiplied by `decrease_factor^n_losses` (< 1 = reduction).
+    AntiMartingale,
+}
+
+fn default_decrease_factor() -> f64 {
+    0.9
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PositionSizing {
     pub sizing_type: PositionSizingType,
     pub value: f64,
+    /// Used by `AntiMartingale` only. Multiplier per consecutive losing trade.
+    /// Must be in (0.0, 1.0]; e.g. 0.9 = reduce by 10% per loss.
+    #[serde(default = "default_decrease_factor")]
+    pub decrease_factor: f64,
 }
 
 // ── Stop Loss ──

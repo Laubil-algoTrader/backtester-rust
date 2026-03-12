@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { toast } from "sonner";
 import { useAppStore } from "@/stores/useAppStore";
 import { saveStrategy, loadStrategies } from "@/lib/tauri";
 import type { Strategy } from "@/lib/types";
@@ -111,6 +112,8 @@ export function StrategyPage() {
     // Refresh saved strategies list
     const updated = await loadStrategies();
     setSavedStrategies(updated);
+
+    toast.success(tc("toast.strategySaved"));
   };
 
   const handleLoad = (strategy: Strategy) => {

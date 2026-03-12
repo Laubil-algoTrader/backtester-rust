@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -99,6 +99,14 @@ pub fn apply_params(strategy: &Strategy, ranges: &[ParameterRange], values: &[f6
             }
             source => {
                 // Indicator parameter — find the rule in the correct group
+                if range.rule_index < 0 {
+                    tracing::warn!(
+                        "Skipping param '{}': negative rule_index {}",
+                        range.param_name,
+                        range.rule_index
+                    );
+                    continue;
+                }
                 let idx = range.rule_index as usize;
                 let rule = match source {
                     "long_entry" => s.long_entry_rules.get_mut(idx),
@@ -287,6 +295,7 @@ fn build_result(
         max_drawdown_pct: metrics.max_drawdown_pct,
         total_trades: metrics.total_trades,
         profit_factor: metrics.profit_factor,
+        win_rate_pct: metrics.win_rate_pct,
         return_dd_ratio: metrics.return_dd_ratio,
         stagnation_bars: metrics.stagnation_bars,
         ulcer_index_pct: metrics.ulcer_index_pct,
@@ -386,7 +395,7 @@ pub fn run_grid_search(
     info!("Grid search: {} combinations", total);
 
     let counter = AtomicUsize::new(0);
-    let best_so_far = Arc::new(Mutex::new(f64::NEG_INFINITY));
+    let best_so_far = Arc::new(AtomicU64::new(f64::NEG_INFINITY.to_bits()));
     let start = Instant::now();
 
     // Shared indicator cache: indicators unchanged across combinations are computed once.
@@ -421,11 +430,23 @@ pub fn run_grid_search(
                 Ok(bt) => {
                     let opt_result = build_result(ranges, &values, &bt.metrics, objectives, &bt.equity_curve);
 
-                    // Update best
+                    // Update best (lock-free CAS loop)
                     {
-                        let mut best = best_so_far.lock().unwrap();
-                        if opt_result.objective_value > *best {
-                            *best = opt_result.objective_value;
+                        let new_val = opt_result.objective_value;
+                        let mut cur = best_so_far.load(Ordering::Relaxed);
+                        loop {
+                            if f64::from_bits(cur) >= new_val {
+                                break;
+                            }
+                            match best_so_far.compare_exchange_weak(
+                                cur,
+                                new_val.to_bits(),
+                                Ordering::Relaxed,
+                                Ordering::Relaxed,
+                            ) {
+                                Ok(_) => break,
+                                Err(actual) => cur = actual,
+                            }
                         }
                     }
 
@@ -433,7 +454,7 @@ pub fn run_grid_search(
                     let report_interval = (total / 100).max(1);
                     if current % report_interval == 0 || current == total {
                         let pct = ((current as f64 / total as f64) * 100.0) as u8;
-                        let best_val = *best_so_far.lock().unwrap();
+                        let best_val = f64::from_bits(best_so_far.load(Ordering::Relaxed));
                         progress_callback(pct, current, total, best_val);
                     }
 
@@ -599,8 +620,9 @@ pub fn run_genetic_algorithm(
             }
         }
 
-        // Early stopping via patience
-        if global_best > prev_best + f64::EPSILON {
+        // Early stopping via patience — require at least 0.01% relative improvement
+        let improvement_threshold = prev_best.abs() * 1e-4;
+        if global_best > prev_best + improvement_threshold.max(1e-10) {
             stagnant_gens = 0;
         } else {
             stagnant_gens += 1;
@@ -758,6 +780,7 @@ fn build_failed_result(ranges: &[ParameterRange], values: &[f64]) -> Optimizatio
         max_drawdown_pct: 0.0,
         total_trades: 0,
         profit_factor: 0.0,
+        win_rate_pct: 0.0,
         return_dd_ratio: 0.0,
         stagnation_bars: 0,
         ulcer_index_pct: 0.0,
@@ -823,7 +846,7 @@ fn extract_objective_from_result(r: &OptimizationResult, obj: &ObjectiveFunction
         ObjectiveFunction::TotalProfit => r.total_return_pct * 100.0, // use return %
         ObjectiveFunction::SharpeRatio => r.sharpe_ratio,
         ObjectiveFunction::ProfitFactor => r.profit_factor,
-        ObjectiveFunction::WinRate => 0.0, // not stored directly, use objective_value if primary
+        ObjectiveFunction::WinRate => r.win_rate_pct,
         ObjectiveFunction::ReturnDdRatio => r.return_dd_ratio,
         ObjectiveFunction::MinStagnation => -(r.stagnation_bars as f64),
         ObjectiveFunction::MinUlcerIndex => -r.ulcer_index_pct,

@@ -61,6 +61,7 @@ interface AppState {
   setSymbols: (symbols: Symbol[]) => void;
   addSymbol: (symbol: Symbol) => void;
   removeSymbol: (id: string) => void;
+  updateSymbol: (symbol: Symbol) => void;
   setSelectedSymbolId: (id: string | null) => void;
 
   // Strategy
@@ -169,6 +170,10 @@ export const useAppStore = create<AppState>((set) => ({
       symbols: state.symbols.filter((s) => s.id !== id),
       selectedSymbolId:
         state.selectedSymbolId === id ? null : state.selectedSymbolId,
+    })),
+  updateSymbol: (symbol) =>
+    set((state) => ({
+      symbols: state.symbols.map((s) => (s.id === symbol.id ? symbol : s)),
     })),
   setSelectedSymbolId: (id) => set({ selectedSymbolId: id }),
 

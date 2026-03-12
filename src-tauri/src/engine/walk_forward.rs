@@ -350,6 +350,8 @@ fn combine_oos_metrics(windows: &[WalkForwardWindowResult]) -> BacktestMetrics {
         k_ratio: windows.iter().map(|w| w.out_of_sample_metrics.k_ratio).sum::<f64>() / n,
         omega_ratio: windows.iter().map(|w| w.out_of_sample_metrics.omega_ratio).sum::<f64>() / n,
         monthly_returns: vec![],
+        total_swap_charged: windows.iter().map(|w| w.out_of_sample_metrics.total_swap_charged).sum(),
+        total_commission_charged: windows.iter().map(|w| w.out_of_sample_metrics.total_commission_charged).sum(),
     }
 }
 
@@ -401,5 +403,7 @@ fn default_metrics() -> BacktestMetrics {
         k_ratio: 0.0,
         omega_ratio: 0.0,
         monthly_returns: vec![],
+        total_swap_charged: 0.0,
+        total_commission_charged: 0.0,
     }
 }
