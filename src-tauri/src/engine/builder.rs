@@ -428,6 +428,90 @@ impl GrammarContext {
             meta_updates: 0,
         }
     }
+
+    /// Create a minimal probe strategy for cache warm-up purposes.
+    /// The strategy contains a single rule that references the given indicator,
+    /// which is enough to trigger `pre_compute_indicators_with_shared_cache`
+    /// to populate the persistent cache for that (indicator_type, period) pair.
+    pub(crate) fn make_single_indicator_probe(
+        &self,
+        ind_type: IndicatorType,
+        period: usize,
+    ) -> Option<Strategy> {
+        let ind_cfg = IndicatorConfig {
+            indicator_type: ind_type,
+            params: IndicatorParams {
+                period: Some(period),
+                ..Default::default()
+            },
+            output_field: None,
+            cached_hash: 0,
+        };
+        let left = Operand {
+            operand_type: OperandType::Indicator,
+            indicator: Some(ind_cfg),
+            price_field: None,
+            constant_value: None,
+            time_field: None,
+            candle_pattern: None,
+            offset: None,
+            compound_left: None,
+            compound_op: None,
+            compound_right: None,
+        };
+        let right = Operand {
+            operand_type: OperandType::Constant,
+            indicator: None,
+            price_field: None,
+            constant_value: Some(0.0),
+            time_field: None,
+            candle_pattern: None,
+            offset: None,
+            compound_left: None,
+            compound_op: None,
+            compound_right: None,
+        };
+        let rule = Rule {
+            id: "probe".to_string(),
+            left_operand: left,
+            comparator: Comparator::GreaterThan,
+            right_operand: right,
+            logical_operator: Some(LogicalOperator::And),
+        };
+        let strat = Strategy {
+            id: "probe".to_string(),
+            name: "probe".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            long_entry_rules: vec![rule],
+            short_entry_rules: vec![],
+            long_exit_rules: vec![],
+            short_exit_rules: vec![],
+            long_entry_groups: vec![],
+            short_entry_groups: vec![],
+            long_exit_groups: vec![],
+            short_exit_groups: vec![],
+            position_sizing: PositionSizing {
+                sizing_type: PositionSizingType::FixedLots,
+                value: 0.01,
+                decrease_factor: 1.0,
+            },
+            stop_loss: None,
+            take_profit: None,
+            trailing_stop: None,
+            trading_costs: self.trading_costs.clone(),
+            trade_direction: TradeDirection::Long,
+            trading_hours: None,
+            max_daily_trades: None,
+            close_trades_at: None,
+            entry_order: OrderType::Market,
+            entry_order_offset_pips: 0.0,
+            close_after_bars: None,
+            move_sl_to_be: false,
+            entry_order_indicator: None,
+        };
+        Some(strat)
+    }
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -3174,6 +3258,56 @@ pub fn run_builder(
         // eliminating O(gens × pop × n_indicators × n_bars) recomputation.
         let persistent_cache: Arc<Mutex<IndicatorCache>> =
             Arc::new(Mutex::new(IndicatorCache::new()));
+
+        // ── Pre-warm indicator cache before gen 0 ────────────────────────────────
+        {
+            let _ = tx.send(BuilderProgressEvent::Log(
+                "Warming up indicator cache\u{2026}".to_string(),
+            ));
+
+            let w2b = &config.what_to_build;
+            let period_min = w2b.indicator_period_min.max(2);
+            let period_max = w2b.indicator_period_max.max(period_min + 2);
+
+            // Sample up to 3 evenly-spaced periods in [period_min, period_max]
+            let mut periods = std::collections::BTreeSet::new();
+            periods.insert(period_min);
+            periods.insert((period_min + period_max) / 2);
+            periods.insert(period_max);
+            let periods: Vec<usize> = periods.into_iter().collect();
+
+            // Build one probe strategy per enabled indicator x sampled period
+            let probes: Vec<Strategy> = config
+                .building_blocks
+                .indicators
+                .iter()
+                .filter(|b| b.enabled)
+                .flat_map(|b| {
+                    periods
+                        .iter()
+                        .filter_map(|&p| grammar.make_single_indicator_probe(b.indicator_type, p))
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+
+            // Warm the cache in parallel
+            probes.par_iter().for_each(|probe| {
+                let _ = pre_compute_indicators_with_shared_cache(
+                    probe,
+                    fitness_candles,
+                    &persistent_cache,
+                );
+            });
+
+            let cache_size = persistent_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len();
+            let _ = tx.send(BuilderProgressEvent::Log(format!(
+                "Cache warm-up complete: {} indicator series pre-computed",
+                cache_size
+            )));
+        }
 
         for island_id in 0..num_islands {
             if cancel_flag.load(Ordering::Relaxed) {
