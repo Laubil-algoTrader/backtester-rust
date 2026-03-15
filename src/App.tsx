@@ -9,6 +9,9 @@ import { BacktestPage } from "@/components/backtest/BacktestPage";
 import { OptimizationPage } from "@/components/optimization/OptimizationPage";
 import { RobustezPage } from "@/components/robustez/RobustezPage";
 import { ExportPage } from "@/components/export/ExportPage";
+import { BuilderPage } from "@/components/builder/BuilderPage";
+import { ProjectsPage } from "@/components/projects/ProjectsPage";
+import { ProjectView } from "@/components/projects/ProjectView";
 import { LoginPage } from "@/components/auth/LoginPage";
 import { TooltipProvider } from "@/components/ui/Tooltip";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
@@ -55,16 +58,21 @@ class ErrorBoundary extends Component<{ children: ReactNode }, EBState> {
 
 function App() {
   const activeSection = useAppStore((s) => s.activeSection);
-  const darkMode = useAppStore((s) => s.darkMode);
+  const themeMode = useAppStore((s) => s.themeMode);
   const isLicenseChecked = useAppStore((s) => s.isLicenseChecked);
   const setLicenseInfo = useAppStore((s) => s.setLicenseInfo);
   const licenseUsername = useAppStore((s) => s.licenseUsername);
+  const activeProjectId = useAppStore((s) => s.activeProjectId);
+  const loadProjects = useAppStore((s) => s.loadProjects);
 
   useKeyboardShortcuts();
 
   useEffect(() => {
-    document.documentElement.classList.toggle("dark", darkMode);
-  }, [darkMode]);
+    const el = document.documentElement;
+    el.classList.remove("dark", "olympus");
+    if (themeMode === "dark") el.classList.add("dark");
+    else if (themeMode === "olympus") el.classList.add("olympus");
+  }, [themeMode]);
 
   // Start license monitor and listen for tier changes after login
   useEffect(() => {
@@ -84,12 +92,17 @@ function App() {
     };
   }, [isLicenseChecked, setLicenseInfo, licenseUsername]);
 
+  useEffect(() => {
+    if (!isLicenseChecked) return;
+    loadProjects().catch(console.error);
+  }, [isLicenseChecked, loadProjects]);
+
   if (!isLicenseChecked) {
     return (
       <ErrorBoundary>
         <TooltipProvider delayDuration={300}>
           <LoginPage />
-          <Toaster theme="dark" position="bottom-right" richColors />
+          <Toaster theme={themeMode === "light" ? "light" : "dark"} position="bottom-right" richColors />
         </TooltipProvider>
       </ErrorBoundary>
     );
@@ -109,6 +122,10 @@ function App() {
         return <RobustezPage />;
       case "export":
         return <ExportPage />;
+      case "builder":
+        return <BuilderPage />;
+      case "projects":
+        return activeProjectId ? <ProjectView /> : <ProjectsPage />;
     }
   };
 
@@ -116,7 +133,7 @@ function App() {
     <ErrorBoundary>
       <TooltipProvider delayDuration={300}>
         <AppLayout>{renderSection()}</AppLayout>
-        <Toaster theme="dark" position="bottom-right" richColors />
+        <Toaster theme={themeMode === "light" ? "light" : "dark"} position="bottom-right" richColors />
       </TooltipProvider>
     </ErrorBoundary>
   );

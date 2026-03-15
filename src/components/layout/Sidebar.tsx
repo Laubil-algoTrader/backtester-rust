@@ -1,7 +1,9 @@
 import {
+  Bot,
   Code2,
   Database,
   FlaskConical,
+  FolderOpen,
   LineChart,
   Settings2,
 } from "lucide-react";
@@ -16,16 +18,32 @@ interface NavItem {
 }
 
 const navItems: NavItem[] = [
-  { id: "data", label: "Data", icon: Database },
-  { id: "strategy", label: "Strategy", icon: FlaskConical },
-  { id: "backtest", label: "Backtest", icon: LineChart },
-  { id: "optimization", label: "Optimize", icon: Settings2 },
-  { id: "export", label: "Export", icon: Code2 },
+  { id: "data",         label: "Data",     icon: Database     },
+  { id: "strategy",    label: "Strategy",  icon: FlaskConical },
+  { id: "backtest",    label: "Backtest",  icon: LineChart    },
+  { id: "optimization",label: "Optimize",  icon: Settings2    },
+  { id: "builder",     label: "Builder",   icon: Bot          },
+  { id: "projects",    label: "Projects",  icon: FolderOpen   },
+  { id: "export",      label: "Export",    icon: Code2        },
 ];
 
 export function Sidebar() {
   const activeSection = useAppStore((s) => s.activeSection);
   const setActiveSection = useAppStore((s) => s.setActiveSection);
+  const closeProjectTask = useAppStore((s) => s.closeProjectTask);
+  const activeProjectTaskId = useAppStore((s) => s.activeProjectTaskId);
+
+  const handleNav = async (id: AppSection) => {
+    // If a project task is open and user clicks away from builder, auto-save and close
+    if (activeProjectTaskId && id !== "builder") {
+      await closeProjectTask();
+      // closeProjectTask sets activeSection = "projects"
+      // If the user clicked something other than "projects", navigate there too
+      if (id !== "projects") setActiveSection(id);
+      return;
+    }
+    setActiveSection(id);
+  };
 
   return (
     <aside className="flex h-full w-16 shrink-0 flex-col border-r border-border/30 bg-background pt-4 pb-3">
@@ -39,7 +57,7 @@ export function Sidebar() {
           return (
             <button
               key={item.id}
-              onClick={() => setActiveSection(item.id)}
+              onClick={() => handleNav(item.id)}
               title={item.label}
               className={cn(
                 "flex w-full flex-col items-center justify-center gap-1 rounded px-1 py-2.5 transition-colors",
