@@ -1,5 +1,7 @@
+pub mod builder;
 pub mod candle;
 pub mod config;
+pub mod project;
 pub mod result;
 pub mod strategy;
 pub mod symbol;
