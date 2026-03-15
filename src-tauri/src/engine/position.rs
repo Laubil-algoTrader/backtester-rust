@@ -4,8 +4,8 @@ use crate::engine::orders::BidAskOhlc;
 use crate::models::candle::Candle;
 use crate::models::config::{InstrumentConfig, SwapMode};
 use crate::models::strategy::{
-    PositionSizing, PositionSizingType, StopLoss, StopLossType, TakeProfit, TakeProfitType,
-    TradeDirection, TrailingStop, TrailingStopType,
+    OrderType, PositionSizing, PositionSizingType, StopLoss, StopLossType, TakeProfit,
+    TakeProfitType, TradeDirection, TrailingStop, TrailingStopType,
 };
 use crate::models::trade::CloseReason;
 
@@ -35,6 +35,23 @@ pub struct OpenPosition {
     pub last_swap_date: String,
     /// Cumulative swap charged so far (negative = cost to the trader).
     pub accumulated_swap: f64,
+    /// True once the stop loss has been moved to breakeven (avoids double-trigger).
+    pub sl_moved_to_be: bool,
+}
+
+/// A pending limit or stop entry order waiting to be filled.
+#[derive(Debug, Clone)]
+pub struct PendingOrder {
+    pub direction: TradeDirection,
+    pub order_type: OrderType,
+    /// Price level at which the order fills.
+    pub target_price: f64,
+    pub lots: f64,
+    pub created_bar: usize,
+    /// ATR values at signal time — used to compute SL/TP/TS when the order fills.
+    pub atr_for_sl: Option<f64>,
+    pub atr_for_tp: Option<f64>,
+    pub atr_for_ts: Option<f64>,
 }
 
 /// Calculate position size in lots.
@@ -381,9 +398,10 @@ pub fn calculate_swap_charge(
         }
         SwapMode::InMoney => rate * lots,
         SwapMode::AsPercent => {
-            // Annual rate (%) divided by 365 days
+            // Annual rate (%) divided by configured annual days (default 365; use 252 for equities)
             let pos_value = entry_price * lots * instrument.lot_size;
-            pos_value * rate / 100.0 / 365.0
+            let annual_days = instrument.swap_annual_days.max(1) as f64;
+            pos_value * rate / 100.0 / annual_days
         }
     };
     daily_swap * multiplier

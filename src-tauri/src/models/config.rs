@@ -18,6 +18,10 @@ fn default_triple_swap_day() -> u8 {
     3 // Wednesday (ISO weekday: Mon=1 … Sun=7)
 }
 
+fn default_swap_annual_days() -> u32 {
+    365
+}
+
 /// Instrument-specific configuration. Set per symbol at import time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstrumentConfig {
@@ -50,6 +54,10 @@ pub struct InstrumentConfig {
     /// Default 3 = Wednesday (covers Saturday + Sunday in Forex).
     #[serde(default = "default_triple_swap_day")]
     pub triple_swap_day: u8,
+    /// Calendar days per year for `SwapMode::AsPercent` annualization.
+    /// Forex = 365, equities = 252, crypto = 365.
+    #[serde(default = "default_swap_annual_days")]
+    pub swap_annual_days: u32,
 
     // ── Stops level ──
 
@@ -82,6 +90,7 @@ impl Default for InstrumentConfig {
             swap_short: 0.0,
             swap_mode: SwapMode::InPips,
             triple_swap_day: 3,
+            swap_annual_days: 365,
             min_stop_distance_pips: 0.0,
             tz_offset_hours: 0.0,
         }

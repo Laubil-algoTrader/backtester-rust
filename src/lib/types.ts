@@ -18,6 +18,7 @@ export interface InstrumentConfig {
   swap_short?: number;
   swap_mode?: SwapMode;
   triple_swap_day?: number; // ISO weekday Mon=1…Sun=7, default 3 (Wednesday)
+  swap_annual_days?: number; // days per year for AsPercent annualization; 365 = forex/crypto, 252 = equities
   // Stops level
   min_stop_distance_pips?: number;
   // Timezone shift applied at import time (hours, e.g. -2 for UTC-2, 5.5 for UTC+5:30)

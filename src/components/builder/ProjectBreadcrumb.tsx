@@ -20,8 +20,12 @@ export function ProjectBreadcrumb() {
   };
 
   const handleSave = async () => {
-    await saveActiveProjectTask();
-    toast.success("Task saved");
+    try {
+      await saveActiveProjectTask();
+      toast.success("Task saved");
+    } catch {
+      toast.error("Failed to save task");
+    }
   };
 
   return (
