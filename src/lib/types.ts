@@ -1081,6 +1081,13 @@ export interface BuilderSavedStrategy {
   strategyJson: string;
   /** Hash for fast duplicate detection — set by backend, optional for backward compat. */
   fingerprint?: number;
+  // OOS metrics — present only when builder had an OOS split configured
+  oosNetProfit?: number;
+  oosTrades?: number;
+  oosProfitFactor?: number;
+  oosSharpeRatio?: number;
+  oosMaxDrawdownAbs?: number;
+  oosWinRatePct?: number;
 }
 
 // ── Custom Projects ──────────────────────────────────────────────────────────
