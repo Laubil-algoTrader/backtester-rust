@@ -40,6 +40,8 @@ export function ProjectView() {
     } catch (e: unknown) {
       if (e instanceof Error && e.message.includes("Stop the builder")) {
         toast.warning("Stop the builder before switching tasks");
+      } else {
+        toast.error("Failed to save task before switching");
       }
     }
   };

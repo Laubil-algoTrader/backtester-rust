@@ -685,7 +685,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   activeProjectTaskId: null,
   activeProjectTaskDirty: false,
   loadProjects: async () => {
-    const list = await loadProjectsFromDisk();
+    const raw = await loadProjectsFromDisk();
+    // Normalize task status — a task cannot be "running"/"paused" after a fresh app start
+    const list = raw.map((p) => ({
+      ...p,
+      tasks: p.tasks.map((t) => ({ ...t, status: "idle" as const })),
+    }));
     set({ projects: list });
   },
   createProject: async (name) => {
@@ -698,11 +703,13 @@ export const useAppStore = create<AppState>((set, get) => ({
   renameProject: async (id, name) => {
     const now = new Date().toISOString();
     let target: Project | undefined;
-    const updated = get().projects.map((p) => {
-      if (p.id === id) { target = { ...p, name, updatedAt: now }; return target; }
-      return p;
+    set((s) => {
+      const projects = s.projects.map((p) => {
+        if (p.id === id) { target = { ...p, name, updatedAt: now }; return target; }
+        return p;
+      });
+      return { projects };
     });
-    set({ projects: updated });
     if (target) await saveProject(target);
   },
   deleteProject: async (id) => {
@@ -718,18 +725,24 @@ export const useAppStore = create<AppState>((set, get) => ({
           activeProjectTaskDirty: false,
           builderConfig: defaultBuilderConfig,
           builderDatabanks: [{ id: "results", name: "Results", strategies: [] }],
+          activeSection: "projects",
         }),
       };
     });
   },
   importProject: async (project) => {
-    await saveProject(project);
+    // Normalize task status — imported project may have stale "running"/"paused" status
+    const normalized: Project = {
+      ...project,
+      tasks: project.tasks.map((t) => ({ ...t, status: "idle" as const })),
+    };
+    await saveProject(normalized);
     set((s) => {
-      const exists = s.projects.some((p) => p.id === project.id);
+      const exists = s.projects.some((p) => p.id === normalized.id);
       return {
         projects: exists
-          ? s.projects.map((p) => (p.id === project.id ? project : p))
-          : [...s.projects, project],
+          ? s.projects.map((p) => (p.id === normalized.id ? normalized : p))
+          : [...s.projects, normalized],
       };
     });
   },
@@ -745,7 +758,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       id,
       name,
       type,
-      config: s.builderConfig,
+      config: defaultBuilderConfig,
       databanks: [{ id: "results", name: "Results", strategies: [] }],
       status: "idle",
       strategiesCount: 0,
@@ -753,14 +766,16 @@ export const useAppStore = create<AppState>((set, get) => ({
       createdAt: now,
     };
     let updated: Project | undefined;
-    const projects = s.projects.map((p) => {
-      if (p.id === projectId) {
-        updated = { ...p, tasks: [...p.tasks, task], updatedAt: now };
-        return updated;
-      }
-      return p;
+    set((state) => {
+      const projects = state.projects.map((p) => {
+        if (p.id === projectId) {
+          updated = { ...p, tasks: [...p.tasks, task], updatedAt: now };
+          return updated;
+        }
+        return p;
+      });
+      return { projects };
     });
-    set({ projects });
     if (updated) await saveProject(updated);
   },
   deleteTaskFromProject: async (projectId, taskId) => {

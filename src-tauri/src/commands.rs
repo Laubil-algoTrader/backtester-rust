@@ -1649,7 +1649,7 @@ pub async fn save_project(
     state: tauri::State<'_, AppState>,
     project: Project,
 ) -> Result<(), AppError> {
-    if project.id.contains('/') || project.id.contains('\\') || project.id.contains("..") {
+    if !project.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') || project.id.is_empty() {
         return Err(AppError::InvalidConfig("Invalid project id".to_string()));
     }
     let projects_dir = state.data_dir.join("projects");
@@ -1693,7 +1693,7 @@ pub async fn delete_project(
     state: tauri::State<'_, AppState>,
     id: String,
 ) -> Result<(), AppError> {
-    if id.contains('/') || id.contains('\\') || id.contains("..") {
+    if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') || id.is_empty() {
         return Err(AppError::InvalidConfig("Invalid project id".to_string()));
     }
     let file_path = state.data_dir.join("projects").join(format!("{}.json", id));
