@@ -93,6 +93,9 @@ struct Island {
     /// underlying best strategy hasn't changed, causing false stagnation signals.
     best_raw_fitness: f64,
     stagnation_count: usize,
+    /// Effective mutation probability — adapts per-island based on diversity.
+    /// Starts at the configured value; increases when diversity drops, decays otherwise.
+    effective_mutation_prob: f64,
     /// Per-island grammar: starts as a copy of the global grammar and is
     /// updated in-place each generation by meta-learning.
     grammar: GrammarContext,
@@ -3424,6 +3427,7 @@ pub fn run_builder(
                 best_fitness: best,
                 best_raw_fitness: best,
                 stagnation_count: 0,
+                effective_mutation_prob: mutation_prob,
                 grammar: grammar.clone(),
             });
 
@@ -3547,10 +3551,10 @@ pub fn run_builder(
                             &mut rng,
                         );
 
-                        if rng.gen::<f64>() < mutation_prob {
+                        if rng.gen::<f64>() < island.effective_mutation_prob {
                             mutate_strategy(&mut c1, &island.grammar, &mut rng, phase);
                         }
-                        if rng.gen::<f64>() < mutation_prob {
+                        if rng.gen::<f64>() < island.effective_mutation_prob {
                             mutate_strategy(&mut c2, &island.grammar, &mut rng, phase);
                         }
 
@@ -3617,7 +3621,7 @@ pub fn run_builder(
                         }
                     } else {
                         let mut child = island.population[p1_idx].strategy.clone();
-                        if rng.gen::<f64>() < mutation_prob {
+                        if rng.gen::<f64>() < island.effective_mutation_prob {
                             mutate_strategy(&mut child, &island.grammar, &mut rng, phase);
                         }
                         let (fp, rc) = fingerprint_and_count(&child);
@@ -3809,6 +3813,21 @@ pub fn run_builder(
                     island.stagnation_count = 0;
                 }
 
+                // Adaptive mutation: boost when population diversity drops
+                let diversity = if island.population.is_empty() {
+                    1.0_f64
+                } else {
+                    island.fingerprint_set.len() as f64 / island.population.len() as f64
+                };
+                if diversity < 0.5 {
+                    island.effective_mutation_prob =
+                        (island.effective_mutation_prob + 0.05_f64).min(0.95_f64);
+                } else if diversity > 0.8 {
+                    // Decay back toward the configured base value
+                    island.effective_mutation_prob = island.effective_mutation_prob
+                        .mul_add(0.98_f64, mutation_prob * 0.02_f64);
+                }
+
                 // Fresh blood: replace worst N% with random individuals every M generations
                 if ga.fresh_blood_replace_every > 0
                     && gen > 0
@@ -3939,6 +3958,7 @@ pub fn run_builder(
                     });
 
                     island.stagnation_count = 0;
+                    island.effective_mutation_prob = mutation_prob;
                     total_generated.fetch_add(island.population.len() - 1, Ordering::Relaxed);
                     // fingerprint_set updated incrementally inside the stagnation loop.
                 }
