@@ -31,6 +31,10 @@ pub struct AppState {
     pub download_cancel_flags: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     /// Current license tier (Arc for sharing with background monitor).
     pub license_tier: Arc<Mutex<license::LicenseTier>>,
+    /// Cancellation flag for builder operations.
+    pub builder_cancel_flag: Arc<AtomicBool>,
+    /// Pause flag for builder operations.
+    pub builder_pause_flag: Arc<AtomicBool>,
 }
 
 /// Resolve the application data directory and ensure it exists.
@@ -39,6 +43,7 @@ fn get_data_dir() -> PathBuf {
     fs::create_dir_all(&dir).ok();
     fs::create_dir_all(dir.join("symbols")).ok();
     fs::create_dir_all(dir.join("strategies")).ok();
+    fs::create_dir_all(dir.join("projects")).ok();
     dir
 }
 
@@ -86,6 +91,8 @@ pub fn run() {
         optimization_cancel_flag: Arc::new(AtomicBool::new(false)),
         download_cancel_flags: Arc::new(Mutex::new(HashMap::new())),
         license_tier: Arc::new(Mutex::new(license::LicenseTier::Free)),
+        builder_cancel_flag: Arc::new(AtomicBool::new(false)),
+        builder_pause_flag: Arc::new(AtomicBool::new(false)),
     };
 
     tauri::Builder::default()
@@ -120,6 +127,13 @@ pub fn run() {
             commands::run_walk_forward,
             commands::run_monte_carlo,
             commands::transform_symbol_timezone,
+            commands::start_builder,
+            commands::stop_builder,
+            commands::pause_builder,
+            commands::save_project,
+            commands::load_projects,
+            commands::delete_project,
+            commands::open_project_from_path,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
