@@ -275,7 +275,9 @@ export type Comparator =
 
 export type LogicalOperator = "AND" | "OR";
 
-export type OperandType = "Indicator" | "Price" | "Constant" | "BarTime" | "CandlePattern";
+export type OperandType = "Indicator" | "Price" | "Constant" | "BarTime" | "CandlePattern" | "Compound";
+
+export type ArithmeticOp = "Add" | "Sub" | "Mul" | "Div";
 
 export type PriceField = "Open" | "High" | "Low" | "Close" | "DailyOpen" | "DailyHigh" | "DailyLow" | "DailyClose";
 
@@ -308,6 +310,17 @@ export interface Operand {
   time_field?: TimeField;
   candle_pattern?: CandlePatternType;
   offset?: number; // N bars back
+  // Compound operand fields (only used when operand_type === "Compound")
+  compound_left?: Operand;
+  compound_op?: ArithmeticOp;
+  compound_right?: Operand;
+}
+
+export interface RuleGroup {
+  id: string;
+  rules: Rule[];
+  internal: LogicalOperator; // How rules within this group combine
+  join?: LogicalOperator;    // How this group connects to the next group
 }
 
 export interface Rule {
@@ -396,6 +409,10 @@ export interface Strategy {
   short_entry_rules: Rule[];
   long_exit_rules: Rule[];
   short_exit_rules: Rule[];
+  long_entry_groups?: RuleGroup[];
+  short_entry_groups?: RuleGroup[];
+  long_exit_groups?: RuleGroup[];
+  short_exit_groups?: RuleGroup[];
   position_sizing: PositionSizing;
   stop_loss?: StopLoss;
   take_profit?: TakeProfit;
@@ -405,6 +422,29 @@ export interface Strategy {
   trading_hours?: TradingHours;
   max_daily_trades?: number;
   close_trades_at?: CloseTradesAt;
+  entry_order?: "market" | "limit" | "stop";
+  entry_order_offset_pips?: number;
+  close_after_bars?: number;
+  move_sl_to_be?: boolean;
+  entry_order_indicator?: OrderPriceConfig;
+}
+
+export type OrderPriceBaseField = "open" | "high" | "low" | "close";
+
+export interface OrderPriceConfig {
+  indicator: IndicatorConfig;
+  multiplier: number;
+  base_price_stop: OrderPriceBaseField;
+  base_price_limit: OrderPriceBaseField;
+}
+
+export interface BuilderOrderPriceBlock {
+  indicatorType: IndicatorType;
+  enabled: boolean;
+  weight: number;
+  multiplierMin: number;
+  multiplierMax: number;
+  multiplierStep: number;
 }
 
 // ── Backtest Precision ──
@@ -436,7 +476,7 @@ export interface BacktestConfig {
 
 // ── Trade Result ──
 
-export type TradeCloseReason = "Signal" | "StopLoss" | "TakeProfit" | "TrailingStop" | "EndOfData" | "TimeClose";
+export type TradeCloseReason = "Signal" | "StopLoss" | "TakeProfit" | "TrailingStop" | "EndOfData" | "TimeClose" | "ExitAfterBars";
 
 export interface TradeResult {
   id: string;
@@ -666,7 +706,7 @@ export interface CodeGenerationResult {
 
 // ── App Section ──
 
-export type AppSection = "data" | "strategy" | "backtest" | "optimization" | "robustez" | "export";
+export type AppSection = "data" | "strategy" | "backtest" | "optimization" | "robustez" | "export" | "builder" | "projects";
 
 // ── Monte Carlo ──
 
@@ -744,4 +784,324 @@ export interface LicenseResponse {
 export interface SavedCredentials {
   username: string;
   license_key: string;
+}
+
+// ── Builder / Strategy Miner ──────────────────────────────────────────────────
+
+export type BuilderDirection = "long_only" | "short_only" | "both_symmetric" | "both_asymmetric";
+export type BuilderBuildMode = "genetic_evolution";
+export type BuilderSLType = "atr" | "pips" | "percentage";
+export type BuilderTPType = "atr" | "pips" | "rr";
+export type BuilderStagnationSample = "in_sample" | "out_of_sample" | "full";
+export type BuilderMMMethod =
+  | "fixed_size"
+  | "risk_fixed_balance"
+  | "risk_fixed_account"
+  | "fixed_amount"
+  | "crypto_by_price"
+  | "stocks_by_price"
+  | "simple_martingale";
+export type BuilderFitnessSource = "main_data" | "in_sample" | "out_of_sample" | "full";
+export type BuilderComputeFrom =
+  | "net_profit"
+  | "return_dd"
+  | "r_expectancy"
+  | "annual_max_dd"
+  | "weighted_fitness";
+export type BuilderStopWhen = "never" | "totally" | "databank_full" | "after_time";
+export type BuilderOrderTypesToClose = "all" | "market" | "stop" | "limit";
+export type BuilderDataRangePartType = "is" | "oos";
+export type BuilderFilterOperator = ">=" | ">" | "<=" | "<" | "==";
+
+export interface BuilderFilterCondition {
+  id: string;
+  leftValue: string;
+  operator: BuilderFilterOperator;
+  rightValue: number;
+}
+
+export interface BuilderWeightedCriterion {
+  id: string;
+  criterium: string;
+  type: "minimize" | "maximize";
+  weight: number;
+  target: number;
+}
+
+export interface BuilderDataRangePart {
+  id: string;
+  type: BuilderDataRangePartType;
+  percent: number;
+}
+
+export interface BuilderIndicatorBlock {
+  indicatorType: IndicatorType;
+  enabled: boolean;
+  weight: number;
+  /** Custom period range override for this indicator. Undefined = use global range. */
+  periodMin?: number;
+  periodMax?: number;
+  periodStep?: number;
+}
+
+export interface BuilderOrderTypeBlock {
+  orderType: "stop" | "limit" | "market";
+  enabled: boolean;
+  weight: number;
+}
+
+export interface BuilderExitTypeBlock {
+  exitType:
+    | "exit_after_bars"
+    | "move_sl_be"
+    | "profit_target"
+    | "stop_loss"
+    | "trailing_stop"
+    | "exit_rule";
+  enabled: boolean;
+  required: boolean;
+}
+
+// ── Sub-configs per settings tab ──
+
+export interface BuilderWhatToBuild {
+  direction: BuilderDirection;
+  buildMode: BuilderBuildMode;
+  minEntryRules: number;
+  maxEntryRules: number;
+  minExitRules: number;
+  maxExitRules: number;
+  maxLookback: number;
+  indicatorPeriodMin: number;
+  indicatorPeriodMax: number;
+  indicatorPeriodStep: number;
+  slRequired: boolean;
+  slType: BuilderSLType;
+  slCoeffMin: number;
+  slCoeffMax: number;
+  slCoeffStep: number;
+  slAtrPeriodMin: number;
+  slAtrPeriodMax: number;
+  slAtrPeriodStep: number;
+  tpRequired: boolean;
+  tpType: BuilderTPType;
+  tpCoeffMin: number;
+  tpCoeffMax: number;
+  tpCoeffStep: number;
+  tpAtrPeriodMin: number;
+  tpAtrPeriodMax: number;
+  tpAtrPeriodStep: number;
+}
+
+export interface BuilderGeneticOptions {
+  maxGenerations: number;
+  populationPerIsland: number;
+  crossoverProbability: number;
+  mutationProbability: number;
+  islands: number;
+  migrateEveryN: number;
+  migrationRate: number;
+  initialPopulationSize: number;
+  useFromDatabank: boolean;
+  decimationCoefficient: number;
+  initialFilters: BuilderFilterCondition[];
+  freshBloodDetectDuplicates: boolean;
+  freshBloodReplacePercent: number;
+  freshBloodReplaceEvery: number;
+  showLastGeneration: boolean;
+  startAgainWhenFinished: boolean;
+  restartOnStagnation: boolean;
+  stagnationSample: BuilderStagnationSample;
+  stagnationGenerations: number;
+  prefilterWindowPct: number;
+  prefilterMinTrades: number;
+  phaseBasedAdaptation: boolean;
+  fitnessSharingSigma: number;
+  fitnessSharingAlpha: number;
+  /** Distance metric for fitness sharing niching. Default: "structural". */
+  nichingMode: BehavioralNichingMode;
+  /** EMA learning rate for meta-learning grammar adaptation. 0 = disabled, e.g. 0.05. */
+  metaLearningRate: number;
+  /** Top fraction of population used for meta-learning updates. e.g. 0.25. */
+  metaLearningTopPct: number;
+}
+
+export type BehavioralNichingMode =
+  | "structural"     // Jaccard on indicator types (fast, always available)
+  | "equity_curve"   // 1 - Pearson correlation of equity curves
+  | "trade_overlap"  // Jaccard on trade entry timestamps
+  | "combined";      // average of equity_curve + trade_overlap
+
+export interface BuilderDataConfig {
+  symbolId: string | null;
+  timeframe: Timeframe;
+  startDate: string;
+  endDate: string;
+  precision: BacktestPrecision;
+  spreadPips: number;
+  slippagePips: number;
+  minDistancePips: number;
+  dataRangeParts: BuilderDataRangePart[];
+}
+
+export interface BuilderTradingOptions {
+  dontTradeWeekends: boolean;
+  fridayCloseTime: string;
+  sundayOpenTime: string;
+  exitAtEndOfDay: boolean;
+  endOfDayExitTime: string;
+  exitOnFriday: boolean;
+  fridayExitTime: string;
+  limitTimeRange: boolean;
+  timeRangeFrom: string;
+  timeRangeTo: string;
+  exitAtEndOfRange: boolean;
+  orderTypesToClose: BuilderOrderTypesToClose;
+  maxDistanceFromMarket: boolean;
+  maxDistancePercent: number;
+  maxTradesPerDay: number;
+  minimumSL: number;
+  maximumSL: number;
+  minimumPT: number;
+  maximumPT: number;
+}
+
+export interface BuilderBuildingBlocks {
+  indicators: BuilderIndicatorBlock[];
+  orderTypes: BuilderOrderTypeBlock[];
+  exitTypes: BuilderExitTypeBlock[];
+  orderPriceIndicators: BuilderOrderPriceBlock[];
+  orderPriceBaseStop: OrderPriceBaseField;
+  orderPriceBaseLimit: OrderPriceBaseField;
+}
+
+export interface BuilderMoneyManagement {
+  initialCapital: number;
+  method: BuilderMMMethod;
+  riskedMoney: number;
+  sizeDecimals: number;
+  sizeIfNoMM: number;
+  maximumLots: number;
+}
+
+export interface BuilderRanking {
+  maxStrategiesToStore: number;
+  stopWhen: BuilderStopWhen;
+  stopTotallyCount: number;
+  stopAfterDays: number;
+  stopAfterHours: number;
+  stopAfterMinutes: number;
+  fitnessSource: BuilderFitnessSource;
+  computeFrom: BuilderComputeFrom;
+  weightedCriteria: BuilderWeightedCriterion[];
+  customFilters: BuilderFilterCondition[];
+  dismissSimilar: boolean;
+  complexityAlpha: number;
+}
+
+export interface BuilderCrossChecks {
+  disableAll: boolean;
+  whatIf: boolean;
+  monteCarlo: boolean;
+  higherPrecision: boolean;
+  additionalMarkets: boolean;
+  monteCarloRetest: boolean;
+  sequentialOpt: boolean;
+  walkForward: boolean;
+  walkForwardMatrix: boolean;
+}
+
+export interface BuilderConfig {
+  whatToBuild: BuilderWhatToBuild;
+  geneticOptions: BuilderGeneticOptions;
+  dataConfig: BuilderDataConfig;
+  tradingOptions: BuilderTradingOptions;
+  buildingBlocks: BuilderBuildingBlocks;
+  moneyManagement: BuilderMoneyManagement;
+  ranking: BuilderRanking;
+  crossChecks: BuilderCrossChecks;
+}
+
+// ── Builder Runtime State ──────────────────────────────────────────────────
+
+/** Per-island stats emitted after each generation. */
+export interface BuilderIslandStats {
+  islandId: number;
+  generation: number;
+  population: number;
+  bestFitness: number;
+}
+
+/** Live stats emitted by the builder engine during a run. */
+export interface BuilderRuntimeStats {
+  generated: number;
+  accepted: number;
+  rejected: number;
+  inDatabank: number;
+  startTime: number | null;   // Date.now() when run started
+  strategiesPerHour: number;
+  acceptedPerHour: number;
+  timePerStrategyMs: number;
+  generation: number;
+  island: number;
+  bestFitness: number;
+}
+
+/** A named collection of strategies produced by the builder. */
+export interface BuilderDatabank {
+  id: string;
+  name: string;
+  strategies: BuilderSavedStrategy[];
+}
+
+/** A strategy saved to the results databank by the builder. */
+export interface BuilderSavedStrategy {
+  id: string;
+  name: string;
+  createdAt: string;
+  fitness: number;
+  symbolId: string | null;
+  symbolName: string;
+  timeframe: Timeframe;
+  // IS metrics
+  netProfit: number;
+  miniEquityCurve: number[];
+  trades: number;
+  profitFactor: number;
+  sharpeRatio: number;
+  rExpectancy: number;
+  annualReturnPct: number;
+  maxDrawdownAbs: number;
+  winLossRatio: number;
+  retDDRatio: number;
+  cagrMaxDDPct: number;
+  avgWin: number;
+  avgLoss: number;
+  avgBarsWin: number;
+  strategyJson: string;
+  /** Hash for fast duplicate detection — set by backend, optional for backward compat. */
+  fingerprint?: number;
+}
+
+// ── Custom Projects ──────────────────────────────────────────────────────────
+
+export interface ProjectTask {
+  id: string;
+  name: string;
+  type: "builder";
+  config: BuilderConfig;
+  databanks: BuilderDatabank[];
+  status: "idle" | "running" | "paused";
+  strategiesCount: number;
+  databankCount: number;
+  createdAt: string;
+  lastRunAt?: string;
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  tasks: ProjectTask[];
+  createdAt: string;
+  updatedAt: string;
 }
