@@ -5,6 +5,8 @@
     "backtest": "Backtest",
     "optimize": "Optimize",
     "robustez": "Robustness",
+    "builder": "Builder",
+    "projects": "Projects",
     "export": "Export"
   },
   "header": {

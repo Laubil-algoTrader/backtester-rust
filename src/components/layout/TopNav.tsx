@@ -1,4 +1,4 @@
-import { Moon, Sun, LogOut, Lock, Globe } from "lucide-react";
+import { Moon, Sun, Landmark, LogOut, Lock, Globe } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/stores/useAppStore";
@@ -17,6 +17,8 @@ const navItems: NavItem[] = [
   { id: "backtest", labelKey: "nav.backtest" },
   { id: "optimization", labelKey: "nav.optimize", proOnly: true },
   { id: "robustez", labelKey: "nav.robustez", proOnly: true },
+  { id: "builder", labelKey: "nav.builder", proOnly: true },
+  { id: "projects", labelKey: "nav.projects", proOnly: true },
   { id: "export", labelKey: "nav.export", proOnly: true },
 ];
 
@@ -24,8 +26,10 @@ export function TopNav() {
   const { t } = useTranslation("common");
   const activeSection = useAppStore((s) => s.activeSection);
   const setActiveSection = useAppStore((s) => s.setActiveSection);
-  const darkMode = useAppStore((s) => s.darkMode);
-  const toggleDarkMode = useAppStore((s) => s.toggleDarkMode);
+  const closeProjectTask = useAppStore((s) => s.closeProjectTask);
+  const activeProjectTaskId = useAppStore((s) => s.activeProjectTaskId);
+  const themeMode = useAppStore((s) => s.themeMode);
+  const setThemeMode = useAppStore((s) => s.setThemeMode);
   const language = useAppStore((s) => s.language);
   const setLanguage = useAppStore((s) => s.setLanguage);
   const selectedSymbolId = useAppStore((s) => s.selectedSymbolId);
@@ -78,7 +82,14 @@ export function TopNav() {
           return (
             <button
               key={item.id}
-              onClick={() => setActiveSection(item.id)}
+              onClick={async () => {
+                if (activeProjectTaskId && item.id !== "builder") {
+                  await closeProjectTask();
+                  if (item.id !== "projects") setActiveSection(item.id);
+                  return;
+                }
+                setActiveSection(item.id);
+              }}
               className={cn(
                 "relative flex items-center gap-1 px-3 py-1.5 text-sm font-medium transition-colors rounded-md",
                 isActive
@@ -111,13 +122,19 @@ export function TopNav() {
           <span className="text-[10px] font-bold uppercase">{language}</span>
         </button>
         <button
-          onClick={toggleDarkMode}
+          onClick={() => {
+            const cycle = { light: "dark", dark: "olympus", olympus: "light" } as const;
+            setThemeMode(cycle[themeMode]);
+          }}
+          title={themeMode}
           className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-foreground/[0.06] hover:text-foreground"
         >
-          {darkMode ? (
+          {themeMode === "light" ? (
             <Sun className="h-3.5 w-3.5" />
-          ) : (
+          ) : themeMode === "dark" ? (
             <Moon className="h-3.5 w-3.5" />
+          ) : (
+            <Landmark className="h-3.5 w-3.5" />
           )}
         </button>
         <button
