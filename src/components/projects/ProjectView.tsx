@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { ArrowLeft, Pencil, Plus, Play, Trash2 } from "lucide-react";
+import { ArrowLeft, Pencil, Plus, Play, Trash2, GitCompare } from "lucide-react";
 import { toast } from "sonner";
 import { useAppStore } from "@/stores/useAppStore";
 import { TaskTypePicker } from "./TaskTypePicker";
+import { TaskCompareModal } from "./TaskCompareModal";
 
 export function ProjectView() {
   const projects = useAppStore((s) => s.projects);
@@ -13,6 +14,7 @@ export function ProjectView() {
   const renameProject = useAppStore((s) => s.renameProject);
 
   const [showPicker, setShowPicker] = useState(false);
+  const [showCompare, setShowCompare] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [nameInput, setNameInput] = useState("");
 
@@ -151,7 +153,7 @@ export function ProjectView() {
       )}
 
       {/* Footer */}
-      <div className="border-t border-border/30 pt-2">
+      <div className="flex items-center gap-2 border-t border-border/30 pt-2">
         <button
           onClick={() => setShowPicker(true)}
           className="flex items-center gap-1.5 rounded px-3 py-1.5 text-xs bg-primary text-primary-foreground hover:opacity-90"
@@ -159,16 +161,28 @@ export function ProjectView() {
           <Plus className="h-3.5 w-3.5" />
           Add task
         </button>
+        <button
+          onClick={() => setShowCompare(true)}
+          disabled={project.tasks.length < 2}
+          className="flex items-center gap-1.5 rounded border border-border/40 px-3 py-1.5 text-xs text-muted-foreground hover:border-primary/50 hover:text-primary disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          <GitCompare className="h-3.5 w-3.5" />
+          Compare
+        </button>
       </div>
 
       {showPicker && (
         <TaskTypePicker
-          onSelect={async (type) => {
+          onSelect={(type, templateKey) => {
+            addTaskToProject(project.id, type, templateKey);
             setShowPicker(false);
-            await addTaskToProject(project.id, type);
           }}
           onClose={() => setShowPicker(false)}
         />
+      )}
+
+      {showCompare && (
+        <TaskCompareModal project={project} onClose={() => setShowCompare(false)} />
       )}
     </div>
   );

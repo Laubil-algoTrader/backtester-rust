@@ -227,6 +227,31 @@ const defaultBuilderConfig: BuilderConfig = {
   },
 };
 
+export type TemplateKey = "blank" | "scalper" | "swing" | "trend";
+
+export const BUILDER_TEMPLATE_PRESETS: Record<TemplateKey, Partial<BuilderConfig["whatToBuild"]>> = {
+  blank: {},
+  scalper: {
+    minEntryRules: 1,
+    maxEntryRules: 2,
+    minExitRules: 0,
+    maxExitRules: 1,
+  },
+  swing: {
+    minEntryRules: 2,
+    maxEntryRules: 4,
+    minExitRules: 1,
+    maxExitRules: 2,
+  },
+  trend: {
+    direction: "long_only",
+    minEntryRules: 2,
+    maxEntryRules: 3,
+    minExitRules: 1,
+    maxExitRules: 2,
+  },
+};
+
 // ── Store interface ──
 
 interface AppState {
@@ -378,7 +403,7 @@ interface AppState {
   renameProject: (id: string, name: string) => Promise<void>;
   deleteProject: (id: string) => Promise<void>;
   importProject: (project: Project) => Promise<void>;
-  addTaskToProject: (projectId: string, type: "builder") => Promise<void>;
+  addTaskToProject: (projectId: string, type: "builder", templateKey?: TemplateKey) => Promise<void>;
   deleteTaskFromProject: (projectId: string, taskId: string) => Promise<void>;
   openProjectTask: (projectId: string, taskId: string) => Promise<void>;
   saveActiveProjectTask: () => Promise<void>;
@@ -746,7 +771,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       };
     });
   },
-  addTaskToProject: async (projectId, type) => {
+  addTaskToProject: async (projectId, type, templateKey) => {
     const s = get();
     const parent = s.projects.find((p) => p.id === projectId);
     if (!parent) return;
@@ -754,11 +779,19 @@ export const useAppStore = create<AppState>((set, get) => ({
     const name = builderCount === 0 ? "Builder" : `Builder(${builderCount + 1})`;
     const id = crypto.randomUUID();
     const now = new Date().toISOString();
+    const preset = templateKey ? (BUILDER_TEMPLATE_PRESETS[templateKey] ?? {}) : {};
+    const taskConfig: BuilderConfig = {
+      ...defaultBuilderConfig,
+      whatToBuild: {
+        ...defaultBuilderConfig.whatToBuild,
+        ...preset,
+      },
+    };
     const task: ProjectTask = {
       id,
       name,
       type,
-      config: defaultBuilderConfig,
+      config: taskConfig,
       databanks: [{ id: "results", name: "Results", strategies: [] }],
       status: "idle",
       strategiesCount: 0,
