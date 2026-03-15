@@ -6,10 +6,12 @@ use tauri::{AppHandle, Emitter};
 use tracing::info;
 
 use crate::data::{converter, loader, storage, validator};
-use crate::engine::{executor, monte_carlo, optimizer, walk_forward};
+use crate::engine::{builder, executor, monte_carlo, optimizer, walk_forward};
 use crate::engine::executor::SubBarData;
 use crate::errors::AppError;
+use crate::models::builder::BuilderConfig;
 use crate::models::config::{DataFormat, InstrumentConfig, TickPipeline, TickStorageFormat, Timeframe};
+use crate::models::project::Project;
 use crate::models::result::{BacktestMetrics, BacktestResults, MonteCarloConfig, MonteCarloResult, OosResult, OptimizationConfig, OptimizationMethod, OptimizationResult, WalkForwardConfig, WalkForwardResult};
 use crate::models::strategy::{BacktestConfig, BacktestPrecision, Strategy};
 use crate::models::symbol::Symbol;
@@ -1480,4 +1482,236 @@ fn anyvalue_to_json(val: &polars::prelude::AnyValue) -> Value {
         AnyValue::String(s) => Value::String(s.to_string()),
         _ => Value::String(format!("{}", val)),
     }
+}
+
+// ── Builder Commands ──
+
+/// Start the builder (GP strategy evolution).
+#[tauri::command]
+pub async fn start_builder(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    builder_config: BuilderConfig,
+    symbol_id: String,
+    timeframe: Timeframe,
+    start_date: String,
+    end_date: String,
+    initial_capital: f64,
+) -> Result<(), AppError> {
+    use std::sync::atomic::Ordering;
+
+    // Reset flags
+    state.builder_cancel_flag.store(false, Ordering::SeqCst);
+    state.builder_pause_flag.store(false, Ordering::SeqCst);
+
+    // Load symbol
+    let db = state.db.lock().await;
+    let symbol = storage::get_symbol_by_id(&db, &symbol_id)?;
+    drop(db);
+
+    // Load candles (with optional date filter pushed down to Parquet)
+    let tf_key = timeframe.as_str().to_string();
+    let tf_path = symbol.timeframe_paths.get(&tf_key)
+        .ok_or_else(|| AppError::Internal(format!("No data for timeframe {tf_key}")))?;
+    let path = std::path::Path::new(tf_path);
+    let date_filter = loader::build_date_filter(&start_date, &end_date);
+    let mut lf = loader::scan_parquet_lazy(path)?;
+    if let Some(f) = &date_filter {
+        lf = lf.filter(f.clone());
+    }
+    let df = lf.collect()
+        .map_err(|e| AppError::Internal(format!("parquet collect: {}", e)))?;
+    let candles = executor::candles_from_dataframe(&df)?;
+
+    let instrument = symbol.instrument_config.clone();
+    let cancel_flag = state.builder_cancel_flag.clone();
+    let pause_flag = state.builder_pause_flag.clone();
+    let app_handle = app.clone();
+
+    let precision = builder_config.data_config.precision;
+    let backtest_config = BacktestConfig {
+        symbol_id: symbol_id.clone(),
+        timeframe: timeframe.clone(),
+        start_date,
+        end_date,
+        initial_capital,
+        leverage: 1.0,
+        precision,
+        // Abort evaluation early if a strategy hasn't traded in the first 30% of bars.
+        // Eliminates ~60-80% of wasted compute on zero-trade random strategies.
+        early_stop_no_trades_pct: Some(0.30),
+    };
+
+    // Channel + drain thread: builder sends progress events through a channel,
+    // a dedicated drain thread forwards them as Tauri events.
+    // When the builder finishes (tx dropped), the drain thread emits builder-finished.
+    let (tx, rx) = std::sync::mpsc::sync_channel::<builder::BuilderProgressEvent>(1024);
+    let drain_handle = app_handle.clone();
+    std::thread::spawn(move || {
+        while let Ok(event) = rx.recv() {
+            match event {
+                builder::BuilderProgressEvent::Stats(stats) => {
+                    let _ = drain_handle.emit("builder-stats", &stats);
+                }
+                builder::BuilderProgressEvent::Log(msg) => {
+                    let _ = drain_handle.emit("builder-log", &msg);
+                }
+                builder::BuilderProgressEvent::StrategyFound(strat) => {
+                    let _ = drain_handle.emit("builder-strategy-found", &strat);
+                }
+                builder::BuilderProgressEvent::IslandStats(stats) => {
+                    let _ = drain_handle.emit("builder-island-stats", &stats);
+                }
+            }
+        }
+        // tx dropped → builder finished → emit finished event
+        let _ = drain_handle.emit("builder-finished", ());
+    });
+
+    tokio::task::spawn_blocking(move || {
+        // Keep a clone so we can send the final log BEFORE the channel closes
+        let tx_final = tx.clone();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            builder::run_builder(
+                &candles,
+                &instrument,
+                &backtest_config,
+                &builder_config,
+                &cancel_flag,
+                &pause_flag,
+                tx,
+            )
+        }));
+
+        // Send completion/error log through the channel BEFORE dropping tx_final,
+        // so the drain thread forwards it before emitting builder-finished.
+        match result {
+            Ok(Ok(strategies)) => {
+                let _ = tx_final.send(builder::BuilderProgressEvent::Log(
+                    format!("Builder completed: {} strategies in databank", strategies.len()),
+                ));
+            }
+            Ok(Err(ref e)) => {
+                if !matches!(e, AppError::BuilderCancelled) {
+                    let _ = tx_final.send(builder::BuilderProgressEvent::Log(
+                        format!("Builder error: {}", e),
+                    ));
+                }
+            }
+            Err(panic_info) => {
+                let msg = if let Some(s) = panic_info.downcast_ref::<String>() {
+                    s.clone()
+                } else if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    s.to_string()
+                } else {
+                    "Unknown panic".to_string()
+                };
+                let _ = tx_final.send(builder::BuilderProgressEvent::Log(
+                    format!("Builder PANIC: {}", msg),
+                ));
+            }
+        }
+        drop(tx_final);
+        // tx_final dropped here → drain thread gets Err on recv() → emits builder-finished
+    });
+
+    Ok(())
+}
+
+/// Stop the builder.
+#[tauri::command]
+pub async fn stop_builder(
+    state: tauri::State<'_, AppState>,
+) -> Result<(), AppError> {
+    state.builder_cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    state.builder_pause_flag.store(false, std::sync::atomic::Ordering::SeqCst);
+    info!("Builder stop requested");
+    Ok(())
+}
+
+/// Pause or resume the builder.
+#[tauri::command]
+pub async fn pause_builder(
+    state: tauri::State<'_, AppState>,
+    paused: bool,
+) -> Result<(), AppError> {
+    state.builder_pause_flag.store(paused, std::sync::atomic::Ordering::SeqCst);
+    info!("Builder pause = {paused}");
+    Ok(())
+}
+
+// ── Project Commands ──────────────────────────────────────────────────────────
+
+/// Save (create or update) a project to disk as `{data_dir}/projects/{id}.json`.
+#[tauri::command]
+pub async fn save_project(
+    state: tauri::State<'_, AppState>,
+    project: Project,
+) -> Result<(), AppError> {
+    let projects_dir = state.data_dir.join("projects");
+    std::fs::create_dir_all(&projects_dir)?;
+    let file_path = projects_dir.join(format!("{}.json", project.id));
+    let json = serde_json::to_string_pretty(&project)?;
+    std::fs::write(&file_path, json)?;
+    Ok(())
+}
+
+/// Load all projects from `{data_dir}/projects/*.json`.
+/// Skips files that fail to parse and logs a warning.
+#[tauri::command]
+pub async fn load_projects(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<Project>, AppError> {
+    let projects_dir = state.data_dir.join("projects");
+    if !projects_dir.exists() {
+        return Ok(vec![]);
+    }
+    let mut projects = Vec::new();
+    for entry in std::fs::read_dir(&projects_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("json") {
+            let json = std::fs::read_to_string(&path)?;
+            match serde_json::from_str::<Project>(&json) {
+                Ok(p) => projects.push(p),
+                Err(e) => tracing::warn!("Skipping invalid project {:?}: {}", path, e),
+            }
+        }
+    }
+    Ok(projects)
+}
+
+/// Delete `{data_dir}/projects/{id}.json`. No-op if the file does not exist.
+#[tauri::command]
+pub async fn delete_project(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<(), AppError> {
+    let file_path = state.data_dir.join("projects").join(format!("{}.json", id));
+    if file_path.exists() {
+        std::fs::remove_file(&file_path)?;
+    }
+    Ok(())
+}
+
+/// Open a project JSON from an arbitrary path via native file picker.
+/// Returns `None` if the user cancelled the dialog.
+#[tauri::command]
+pub async fn open_project_from_path(
+    app: AppHandle,
+) -> Result<Option<Project>, AppError> {
+    use tauri_plugin_dialog::DialogExt;
+    let path = app
+        .dialog()
+        .file()
+        .add_filter("Project files", &["json"])
+        .blocking_pick_file();
+    let Some(path) = path else { return Ok(None) };
+    let file_path = path
+        .into_path()
+        .map_err(|e| AppError::FileRead(e.to_string()))?;
+    let json = std::fs::read_to_string(&file_path)?;
+    let project = serde_json::from_str::<Project>(&json)?;
+    Ok(Some(project))
 }
