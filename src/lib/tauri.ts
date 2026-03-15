@@ -15,6 +15,8 @@ import type {
   CodeGenerationResult,
   LicenseResponse,
   SavedCredentials,
+  BuilderConfig,
+  Project,
 } from "./types";
 
 /// Upload a CSV file and create a new symbol.
@@ -231,4 +233,58 @@ export async function clearLicense(): Promise<void> {
 /// Start background license monitor (re-validates every hour).
 export async function startLicenseMonitor(): Promise<void> {
   return invoke<void>("start_license_monitor");
+}
+
+// ── Builder ──
+
+/// Start the builder (GP strategy evolution).
+export async function startBuilder(
+  builderConfig: BuilderConfig,
+  symbolId: string,
+  timeframe: Timeframe,
+  startDate: string,
+  endDate: string,
+  initialCapital: number,
+): Promise<void> {
+  return invoke<void>("start_builder", {
+    builderConfig,
+    symbolId,
+    timeframe,
+    startDate,
+    endDate,
+    initialCapital,
+  });
+}
+
+/// Stop the builder.
+export async function stopBuilder(): Promise<void> {
+  return invoke<void>("stop_builder");
+}
+
+/// Pause or resume the builder.
+export async function pauseBuilder(paused: boolean): Promise<void> {
+  return invoke<void>("pause_builder", { paused });
+}
+
+// ── Projects ──
+
+/// Save (create or update) a project to disk.
+export async function saveProject(project: Project): Promise<void> {
+  return invoke<void>("save_project", { project });
+}
+
+/// Load all projects from disk.
+export async function loadProjectsFromDisk(): Promise<Project[]> {
+  return invoke<Project[]>("load_projects");
+}
+
+/// Delete a project by id.
+export async function deleteProjectFromDisk(id: string): Promise<void> {
+  return invoke<void>("delete_project", { id });
+}
+
+/// Open a project from an arbitrary path via native file picker.
+/// Returns null if the user cancelled the dialog.
+export async function openProjectFromPath(): Promise<Project | null> {
+  return invoke<Project | null>("open_project_from_path");
 }
