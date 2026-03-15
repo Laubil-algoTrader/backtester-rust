@@ -608,25 +608,28 @@ export const useAppStore = create<AppState>((set, get) => ({
   createBuilderDatabank: (name) => {
     const id = `db_${Date.now()}`;
     const bankName = name ?? `Databank ${id.slice(-4)}`;
-    set((state) => ({
-      builderDatabanks: [...state.builderDatabanks, { id, name: bankName, strategies: [] }],
+    set((s) => ({
+      builderDatabanks: [...s.builderDatabanks, { id, name: bankName, strategies: [] }],
+      activeProjectTaskDirty: s.activeProjectTaskId ? true : s.activeProjectTaskDirty,
     }));
     return id;
   },
   renameBuilderDatabank: (id, name) =>
-    set((state) => ({
-      builderDatabanks: state.builderDatabanks.map((db) =>
+    set((s) => ({
+      builderDatabanks: s.builderDatabanks.map((db) =>
         db.id === id ? { ...db, name } : db
       ),
+      activeProjectTaskDirty: s.activeProjectTaskId ? true : s.activeProjectTaskDirty,
     })),
   deleteBuilderDatabank: (id) =>
-    set((state) => {
-      const remaining = state.builderDatabanks.filter((db) => db.id !== id);
+    set((s) => {
+      const remaining = s.builderDatabanks.filter((db) => db.id !== id);
       const fallback = remaining[0]?.id ?? "results";
       return {
         builderDatabanks: remaining,
-        activeDatabankId: state.activeDatabankId === id ? fallback : state.activeDatabankId,
-        targetDatabankId: state.targetDatabankId === id ? fallback : state.targetDatabankId,
+        activeDatabankId: s.activeDatabankId === id ? fallback : s.activeDatabankId,
+        targetDatabankId: s.targetDatabankId === id ? fallback : s.targetDatabankId,
+        activeProjectTaskDirty: s.activeProjectTaskId ? true : s.activeProjectTaskDirty,
       };
     }),
   clearBuilderDatabank: (id) =>
@@ -704,10 +707,20 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   deleteProject: async (id) => {
     await deleteProjectFromDisk(id);
-    set((s) => ({
-      projects: s.projects.filter((p) => p.id !== id),
-      activeProjectId: s.activeProjectId === id ? null : s.activeProjectId,
-    }));
+    set((s) => {
+      const taskBelongsToProject =
+        s.projects.find((p) => p.id === id)?.tasks.some((t) => t.id === s.activeProjectTaskId) ?? false;
+      return {
+        projects: s.projects.filter((p) => p.id !== id),
+        activeProjectId: s.activeProjectId === id ? null : s.activeProjectId,
+        ...(taskBelongsToProject && {
+          activeProjectTaskId: null,
+          activeProjectTaskDirty: false,
+          builderConfig: defaultBuilderConfig,
+          builderDatabanks: [{ id: "results", name: "Results", strategies: [] }],
+        }),
+      };
+    });
   },
   importProject: async (project) => {
     await saveProject(project);
@@ -758,6 +771,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       reset.builderConfig = defaultBuilderConfig;
       reset.builderDatabanks = [{ id: "results", name: "Results", strategies: [] }];
       reset.activeProjectTaskDirty = false;
+      reset.activeSection = "projects";
     }
     const now = new Date().toISOString();
     let updated: Project | undefined;
@@ -773,13 +787,13 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   openProjectTask: async (projectId, taskId) => {
     const s = get();
-    if (s.builderRunning) {
+    if (s.builderRunning || s.builderPaused) {
       throw new Error("Stop the builder before switching tasks");
     }
     if (s.activeProjectTaskDirty) {
       await get().saveActiveProjectTask();
     }
-    const project = s.projects.find((p) => p.id === projectId);
+    const project = get().projects.find((p) => p.id === projectId);
     const task = project?.tasks.find((t) => t.id === taskId);
     if (!task) return;
     set({

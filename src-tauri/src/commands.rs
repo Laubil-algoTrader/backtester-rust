@@ -1649,6 +1649,9 @@ pub async fn save_project(
     state: tauri::State<'_, AppState>,
     project: Project,
 ) -> Result<(), AppError> {
+    if project.id.contains('/') || project.id.contains('\\') || project.id.contains("..") {
+        return Err(AppError::InvalidConfig("Invalid project id".to_string()));
+    }
     let projects_dir = state.data_dir.join("projects");
     std::fs::create_dir_all(&projects_dir)?;
     let file_path = projects_dir.join(format!("{}.json", project.id));
@@ -1672,10 +1675,12 @@ pub async fn load_projects(
         let entry = entry?;
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) == Some("json") {
-            let json = std::fs::read_to_string(&path)?;
-            match serde_json::from_str::<Project>(&json) {
-                Ok(p) => projects.push(p),
-                Err(e) => tracing::warn!("Skipping invalid project {:?}: {}", path, e),
+            match std::fs::read_to_string(&path) {
+                Ok(json) => match serde_json::from_str::<Project>(&json) {
+                    Ok(p) => projects.push(p),
+                    Err(e) => tracing::warn!("Skipping invalid project JSON {:?}: {}", path, e),
+                },
+                Err(e) => tracing::warn!("Skipping unreadable project {:?}: {}", path, e),
             }
         }
     }
@@ -1688,6 +1693,9 @@ pub async fn delete_project(
     state: tauri::State<'_, AppState>,
     id: String,
 ) -> Result<(), AppError> {
+    if id.contains('/') || id.contains('\\') || id.contains("..") {
+        return Err(AppError::InvalidConfig("Invalid project id".to_string()));
+    }
     let file_path = state.data_dir.join("projects").join(format!("{}.json", id));
     if file_path.exists() {
         std::fs::remove_file(&file_path)?;
