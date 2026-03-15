@@ -62,9 +62,30 @@ const fmt = (n: number, dec = 2) =>
 const fmtMoney = (n: number) =>
   (n >= 0 ? "+" : "") + "$" + Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 0 });
 
+function isOverfit(s: BuilderSavedStrategy): boolean {
+  if (s.oosSharpeRatio === undefined || s.sharpeRatio <= 0) return false;
+  if (s.oosSharpeRatio < s.sharpeRatio * 0.5) return true;
+  if (s.oosNetProfit !== undefined && s.oosNetProfit < 0 && s.netProfit > 0) return true;
+  return false;
+}
+
+const renderName = (s: BuilderSavedStrategy) => (
+  <span className="flex items-center gap-1">
+    <span className="truncate font-medium text-foreground" title={s.name}>{s.name}</span>
+    {isOverfit(s) && (
+      <span
+        title="Possible overfitting: OOS Sharpe is less than half of IS Sharpe, or OOS profit is negative"
+        className="shrink-0 rounded bg-orange-500/20 px-1 py-0.5 text-[8px] font-bold text-orange-400"
+      >
+        OVR
+      </span>
+    )}
+  </span>
+);
+
 const COLUMNS: ColDef[] = [
   { key: "name", label: "Strategy Name", width: "140px", align: "left",
-    render: (s) => <span className="truncate font-medium text-foreground" title={s.name}>{s.name}</span> },
+    render: renderName },
   { key: "fitness", label: "Fitness", width: "72px", align: "right",
     render: (s) => <span className="font-bold text-primary tabular-nums">{s.fitness.toFixed(4)}</span> },
   { key: "symbolName", label: "Symbol", width: "90px", align: "left",
@@ -109,7 +130,7 @@ const COLUMNS: ColDef[] = [
 
 const OOS_COLUMNS: ColDef[] = [
   { key: "name", label: "Strategy Name", width: "140px", align: "left",
-    render: (s) => <span className="truncate font-medium text-foreground" title={s.name}>{s.name}</span> },
+    render: renderName },
   { key: "fitness", label: "Fitness", width: "72px", align: "right",
     render: (s) => <span className="font-bold text-primary tabular-nums">{s.fitness.toFixed(4)}</span> },
   { key: "oosNetProfit", label: "OOS Profit", width: "96px", align: "right",
