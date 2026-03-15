@@ -3767,12 +3767,15 @@ pub fn run_builder(
                 // Capture raw best BEFORE fitness sharing modifies individual fitnesses.
                 // Stagnation detection must compare raw values; sharing-adjusted values fluctuate
                 // with diversity even when the underlying best strategy hasn't changed.
+                // Elite at population[0] carries sharing-adjusted fitness from the previous
+                // generation — it would contaminate raw_new_best. Instead, use prev_best_raw as
+                // the fold floor (elitism guarantees the raw best can't regress below it).
                 let raw_new_best = island
                     .population
                     .iter()
                     .filter(|i| i.fitness != f64::NEG_INFINITY)
                     .map(|i| i.fitness)
-                    .fold(f64::NEG_INFINITY, f64::max);
+                    .fold(prev_best_raw, f64::max);
                 island.best_raw_fitness = raw_new_best;
 
                 // Apply fitness sharing before selection to maintain population diversity

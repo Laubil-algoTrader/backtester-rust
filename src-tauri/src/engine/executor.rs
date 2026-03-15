@@ -10,8 +10,8 @@ use crate::models::candle::{Candle, TickColumns};
 use crate::models::config::InstrumentConfig;
 use crate::models::result::{BacktestResults, DrawdownPoint, EquityPoint};
 use crate::models::strategy::{
-    BacktestConfig, CloseTradesAt, IndicatorConfig, IndicatorType, Strategy, TradeDirection,
-    TradingHours,
+    BacktestConfig, CloseTradesAt, IndicatorConfig, IndicatorType, OrderType, Strategy,
+    TradeDirection, TradingHours,
 };
 use crate::models::trade::{CloseReason, TradeResult};
 
@@ -22,9 +22,9 @@ use super::position::{
     calculate_trailing_stop_distance, calculate_swap_charge, check_sl_tp_hit,
     enforce_stops_level_sl, enforce_stops_level_tp,
     should_charge_swap, update_mae_mfe_ba, update_trailing_stop,
-    OpenPosition,
+    OpenPosition, PendingOrder,
 };
-use super::strategy::{compile_rules_streaming, compute_candle_pattern_cache, compute_daily_ohlc, compute_time_cache, evaluate_rules, evaluate_rules_fast, max_lookback, pre_compute_indicators, pre_compute_indicators_with_shared_cache, precompute_cross_prev_vals, strategy_uses_candle_patterns, strategy_uses_time_fields};
+use super::strategy::{compile_rules_streaming, compute_candle_pattern_cache, compute_daily_ohlc, compute_time_cache, evaluate_rule_groups, evaluate_rules, evaluate_rules_fast, init_strategy_hashes, max_lookback, pre_compute_indicators, pre_compute_indicators_with_shared_cache, precompute_cross_prev_vals, strategy_uses_candle_patterns, strategy_uses_time_fields};
 use super::strategy::IndicatorCache;
 use super::streaming;
 
@@ -97,6 +97,12 @@ fn run_backtest_inner(
         return Err(AppError::NoDataInRange);
     }
 
+    // Clone strategy and pre-compute cached_hash for all IndicatorConfigs once.
+    // This eliminates O(bars × operands) hash computations in the hot bar loop.
+    let mut strategy_owned = strategy.clone();
+    init_strategy_hashes(&mut strategy_owned);
+    let strategy = &strategy_owned;
+
     // Pre-compute all indicators (use shared cache in optimizer context)
     let cache = if let Some(shared) = shared_indicator_cache {
         pre_compute_indicators_with_shared_cache(strategy, candles, &shared)?
@@ -124,8 +130,12 @@ fn run_backtest_inner(
     // Get ATR values if needed for SL/TP/trailing stop
     let atr_values = compute_atr_if_needed(strategy, candles);
 
+    // Pre-compute order-price indicator values (for Stop/Limit target price)
+    let order_price_values = compute_order_price_indicator(strategy, candles);
+
     let lookback = max_lookback(strategy);
-    let start_bar = lookback.min(total_bars);
+    // Must start at least at bar 1: the loop uses i-1 for indicator values
+    let start_bar = lookback.max(1).min(total_bars);
 
     // Pre-compute spread in price units (used for bid/ask OHLC derivation)
     let spread = orders::spread_price(&strategy.trading_costs, instrument);
@@ -133,6 +143,7 @@ fn run_backtest_inner(
     let mut equity = config.initial_capital;
     let mut peak_equity = equity;
     let mut position: Option<OpenPosition> = Option::None;
+    let mut pending_order: Option<PendingOrder> = None;
     let mut trades: Vec<TradeResult> = Vec::new();
     let mut equity_curve: Vec<EquityPoint> = Vec::with_capacity(total_bars);
     let mut drawdown_curve: Vec<DrawdownPoint> = Vec::with_capacity(total_bars);
@@ -168,6 +179,11 @@ fn run_backtest_inner(
     // but bar[i]'s time (time_offset=1). Execute entries/exits at bar[i]'s open.
     // This matches MT5 "Open prices only" mode exactly.
 
+    // Pre-compute early-stop bar for zero-trade builder optimization (None = disabled)
+    let early_stop_bar: Option<usize> = config.early_stop_no_trades_pct.map(|pct| {
+        start_bar + ((total_bars - start_bar) as f32 * pct.clamp(0.0, 1.0)) as usize
+    });
+
     for i in start_bar..total_bars {
         // Check cancellation
         if i % 1000 == 0 {
@@ -177,6 +193,20 @@ fn run_backtest_inner(
             }
             let pct = ((i - start_bar) as f64 / (total_bars - start_bar) as f64 * 100.0) as u8;
             progress_callback(pct, i, total_bars);
+        }
+
+        // Early termination: abort if no trades have occurred by the early-stop checkpoint
+        if let Some(stop_bar) = early_stop_bar {
+            if i == stop_bar && trades.is_empty() && position.is_none() {
+                return Ok(crate::models::result::BacktestResults {
+                    metrics: crate::models::result::BacktestMetrics::default(),
+                    trades: vec![],
+                    equity_curve: vec![],
+                    drawdown_curve: vec![],
+                    returns: vec![],
+                    backtest_config: config.clone(),
+                });
+            }
         }
 
         let candle = &candles[i];
@@ -198,16 +228,77 @@ fn run_backtest_inner(
             next_ts,
         );
 
+        // ── Phase 0: Fill or expire pending limit/stop order ──
+        if position.is_none() {
+            if let Some(ref pending) = pending_order {
+                let filled = match (pending.direction, pending.order_type) {
+                    (TradeDirection::Long,  OrderType::Limit) => candle.open <= pending.target_price || candle.low  <= pending.target_price,
+                    (TradeDirection::Long,  OrderType::Stop)  => candle.open >= pending.target_price || candle.high >= pending.target_price,
+                    (TradeDirection::Short, OrderType::Limit) => candle.open >= pending.target_price || candle.high >= pending.target_price,
+                    (TradeDirection::Short, OrderType::Stop)  => candle.open <= pending.target_price || candle.low  <= pending.target_price,
+                    _ => false,
+                };
+                let expired = i.saturating_sub(pending.created_bar) > 20;
+                if filled {
+                    let fill_price = orders::apply_entry_costs(pending.target_price, pending.direction, &strategy.trading_costs, instrument);
+                    let sl_price = strategy.stop_loss.as_ref().map(|sl_cfg| {
+                        let sl = calculate_stop_loss(sl_cfg, fill_price, pending.direction, pending.atr_for_sl, instrument);
+                        enforce_stops_level_sl(sl, fill_price, pending.direction, instrument)
+                    });
+                    let fill_lots = calculate_lots(&strategy.position_sizing, equity, fill_price, sl_price, instrument, consecutive_losses);
+                    let tp_price = strategy.take_profit.as_ref().map(|tp_cfg| {
+                        let tp = calculate_take_profit(tp_cfg, fill_price, sl_price, pending.direction, pending.atr_for_tp, instrument);
+                        enforce_stops_level_tp(tp, fill_price, pending.direction, instrument)
+                    });
+                    let ts_distance = strategy.trailing_stop.as_ref().map(|ts_cfg| {
+                        calculate_trailing_stop_distance(ts_cfg, fill_price, sl_price, pending.atr_for_ts, instrument)
+                    });
+                    position = Some(OpenPosition {
+                        direction: pending.direction,
+                        entry_price: fill_price,
+                        entry_bar: i,
+                        entry_time: candle.datetime.clone(),
+                        lots: fill_lots,
+                        stop_loss: sl_price,
+                        take_profit: tp_price,
+                        trailing_stop_distance: ts_distance,
+                        highest_since_entry: candle.high,
+                        lowest_since_entry: candle.low,
+                        mae_pips: 0.0,
+                        mfe_pips: 0.0,
+                        trailing_stop_activated: false,
+                        last_swap_date: candle.datetime[..10.min(candle.datetime.len())].to_string(),
+                        accumulated_swap: 0.0,
+                        sl_moved_to_be: false,
+                    });
+                    daily_trade_count += 1;
+                    pending_order = None;
+                } else if expired {
+                    pending_order = None;
+                }
+            }
+        }
+
         // ── Phase 1: Rule-based exit at bar[i] open ──
         // Evaluate using bar[i-1]'s indicator data, bar[i]'s time (time_offset=1)
         if let Some(ref pos) = position {
-            let exit_rules = match pos.direction {
-                TradeDirection::Long => &strategy.long_exit_rules,
-                TradeDirection::Short => &strategy.short_exit_rules,
-                TradeDirection::Both => &strategy.long_exit_rules,
+            let exit_signal = match pos.direction {
+                TradeDirection::Long | TradeDirection::Both => {
+                    if !strategy.long_exit_groups.is_empty() {
+                        evaluate_rule_groups(&strategy.long_exit_groups, i - 1, &cache, candles, Some(&daily_ohlc), time_cache.as_ref(), pattern_cache.as_ref(), 1)
+                    } else {
+                        !strategy.long_exit_rules.is_empty() && evaluate_rules(&strategy.long_exit_rules, i - 1, &cache, candles, Some(&daily_ohlc), time_cache.as_ref(), pattern_cache.as_ref(), 1)
+                    }
+                }
+                TradeDirection::Short => {
+                    if !strategy.short_exit_groups.is_empty() {
+                        evaluate_rule_groups(&strategy.short_exit_groups, i - 1, &cache, candles, Some(&daily_ohlc), time_cache.as_ref(), pattern_cache.as_ref(), 1)
+                    } else {
+                        !strategy.short_exit_rules.is_empty() && evaluate_rules(&strategy.short_exit_rules, i - 1, &cache, candles, Some(&daily_ohlc), time_cache.as_ref(), pattern_cache.as_ref(), 1)
+                    }
+                }
             };
-            if !exit_rules.is_empty()
-                && evaluate_rules(exit_rules, i - 1, &cache, candles, Some(&daily_ohlc), time_cache.as_ref(), pattern_cache.as_ref(), 1)
+            if exit_signal
             {
                 let exit_price = candle.open;
                 let trade = close_position(
@@ -223,10 +314,27 @@ fn run_backtest_inner(
             }
         }
 
+        // ── Phase 1.5: Close after N bars ──
+        if let Some(ref pos) = position {
+            if let Some(max_bars) = strategy.close_after_bars {
+                if i.saturating_sub(pos.entry_bar) >= max_bars as usize {
+                    let trade = close_position(
+                        pos, candle.open, &candle.datetime, i, CloseReason::ExitAfterBars,
+                        instrument, strategy, config,
+                    );
+                    equity += trade.pnl - trade.commission;
+                    if trade.pnl >= 1e-6 { consecutive_losses = 0; }
+                    else if trade.pnl <= -1e-6 { consecutive_losses = consecutive_losses.saturating_add(1); }
+                    trades.push(trade);
+                    position = None;
+                }
+            }
+        }
+
         // ── Phase 2: Rule-based entry at bar[i] open ──
         // Evaluate using bar[i-1]'s indicator data, bar[i]'s time (time_offset=1)
-        if position.is_none() {
-            let bar_date = &candle.datetime[..10];
+        if position.is_none() && pending_order.is_none() {
+            let bar_date = &candle.datetime[..10.min(candle.datetime.len())];
             if bar_date != current_date {
                 current_date = bar_date.to_string();
                 daily_trade_count = 0;
@@ -243,15 +351,20 @@ fn run_backtest_inner(
             if within_hours && under_daily_limit {
                 let mut entry_dir: Option<TradeDirection> = None;
 
-                if can_go_long
-                    && !strategy.long_entry_rules.is_empty()
-                    && evaluate_rules(&strategy.long_entry_rules, i - 1, &cache, candles, Some(&daily_ohlc), time_cache.as_ref(), pattern_cache.as_ref(), 1)
-                {
+                let long_entry_signal = if !strategy.long_entry_groups.is_empty() {
+                    evaluate_rule_groups(&strategy.long_entry_groups, i - 1, &cache, candles, Some(&daily_ohlc), time_cache.as_ref(), pattern_cache.as_ref(), 1)
+                } else {
+                    !strategy.long_entry_rules.is_empty() && evaluate_rules(&strategy.long_entry_rules, i - 1, &cache, candles, Some(&daily_ohlc), time_cache.as_ref(), pattern_cache.as_ref(), 1)
+                };
+                let short_entry_signal = if !strategy.short_entry_groups.is_empty() {
+                    evaluate_rule_groups(&strategy.short_entry_groups, i - 1, &cache, candles, Some(&daily_ohlc), time_cache.as_ref(), pattern_cache.as_ref(), 1)
+                } else {
+                    !strategy.short_entry_rules.is_empty() && evaluate_rules(&strategy.short_entry_rules, i - 1, &cache, candles, Some(&daily_ohlc), time_cache.as_ref(), pattern_cache.as_ref(), 1)
+                };
+
+                if can_go_long && long_entry_signal {
                     entry_dir = Some(TradeDirection::Long);
-                } else if can_go_short
-                    && !strategy.short_entry_rules.is_empty()
-                    && evaluate_rules(&strategy.short_entry_rules, i - 1, &cache, candles, Some(&daily_ohlc), time_cache.as_ref(), pattern_cache.as_ref(), 1)
-                {
+                } else if can_go_short && short_entry_signal {
                     entry_dir = Some(TradeDirection::Short);
                 }
 
@@ -270,50 +383,95 @@ fn run_backtest_inner(
                     let atr_for_ts = get_atr(&atr_values.for_ts);
 
                     let raw_price = candle.open;
-                    let entry_price =
-                        orders::apply_entry_costs(raw_price, dir, &strategy.trading_costs, instrument);
 
-                    let sl_price = strategy.stop_loss.as_ref().map(|sl_cfg| {
-                        let sl = calculate_stop_loss(sl_cfg, entry_price, dir, atr_for_sl, instrument);
-                        enforce_stops_level_sl(sl, entry_price, dir, instrument)
-                    });
-
-                    let lots = calculate_lots(
-                        &strategy.position_sizing,
-                        equity,
-                        entry_price,
-                        sl_price,
-                        instrument,
-                        consecutive_losses,
-                    );
-
-                    let tp_price = strategy.take_profit.as_ref().map(|tp_cfg| {
-                        let tp = calculate_take_profit(tp_cfg, entry_price, sl_price, dir, atr_for_tp, instrument);
-                        enforce_stops_level_tp(tp, entry_price, dir, instrument)
-                    });
-
-                    let ts_distance = strategy.trailing_stop.as_ref().map(|ts_cfg| {
-                        calculate_trailing_stop_distance(ts_cfg, entry_price, sl_price, atr_for_ts, instrument)
-                    });
-
-                    position = Some(OpenPosition {
-                        direction: dir,
-                        entry_price,
-                        entry_bar: i,
-                        entry_time: candle.datetime.clone(),
-                        lots,
-                        stop_loss: sl_price,
-                        take_profit: tp_price,
-                        trailing_stop_distance: ts_distance,
-                        highest_since_entry: candle.high + if dir == TradeDirection::Short { spread } else { 0.0 },
-                        lowest_since_entry: candle.low + if dir == TradeDirection::Short { spread } else { 0.0 },
-                        mae_pips: 0.0,
-                        mfe_pips: 0.0,
-                        trailing_stop_activated: false,
-                        last_swap_date: candle.datetime[..10.min(candle.datetime.len())].to_string(),
-                        accumulated_swap: 0.0,
-                    });
-                    daily_trade_count += 1;
+                    match strategy.entry_order {
+                        OrderType::Market => {
+                            let entry_price = orders::apply_entry_costs(raw_price, dir, &strategy.trading_costs, instrument);
+                            let sl_price = strategy.stop_loss.as_ref().map(|sl_cfg| {
+                                let sl = calculate_stop_loss(sl_cfg, entry_price, dir, atr_for_sl, instrument);
+                                enforce_stops_level_sl(sl, entry_price, dir, instrument)
+                            });
+                            let lots = calculate_lots(&strategy.position_sizing, equity, entry_price, sl_price, instrument, consecutive_losses);
+                            let tp_price = strategy.take_profit.as_ref().map(|tp_cfg| {
+                                let tp = calculate_take_profit(tp_cfg, entry_price, sl_price, dir, atr_for_tp, instrument);
+                                enforce_stops_level_tp(tp, entry_price, dir, instrument)
+                            });
+                            let ts_distance = strategy.trailing_stop.as_ref().map(|ts_cfg| {
+                                calculate_trailing_stop_distance(ts_cfg, entry_price, sl_price, atr_for_ts, instrument)
+                            });
+                            position = Some(OpenPosition {
+                                direction: dir,
+                                entry_price,
+                                entry_bar: i,
+                                entry_time: candle.datetime.clone(),
+                                lots,
+                                stop_loss: sl_price,
+                                take_profit: tp_price,
+                                trailing_stop_distance: ts_distance,
+                                highest_since_entry: candle.high + if dir == TradeDirection::Short { spread } else { 0.0 },
+                                lowest_since_entry: candle.low + if dir == TradeDirection::Short { spread } else { 0.0 },
+                                mae_pips: 0.0,
+                                mfe_pips: 0.0,
+                                trailing_stop_activated: false,
+                                last_swap_date: candle.datetime[..10.min(candle.datetime.len())].to_string(),
+                                accumulated_swap: 0.0,
+                                sl_moved_to_be: false,
+                            });
+                            daily_trade_count += 1;
+                        }
+                        order_type @ (OrderType::Limit | OrderType::Stop) => {
+                            let target = if let (Some(opi), Some(ref vals)) = (strategy.entry_order_indicator.as_ref(), order_price_values.as_ref()) {
+                                // Use indicator-based offset from the signal bar (i-1)
+                                let indicator_val = vals.get(i.saturating_sub(1)).copied().unwrap_or(0.0);
+                                let offset = indicator_val * opi.multiplier;
+                                let prev = &candles[i.saturating_sub(1)];
+                                let base_stop = match opi.base_price_stop {
+                                    crate::models::strategy::PriceField::Open  => prev.open,
+                                    crate::models::strategy::PriceField::High  => prev.high,
+                                    crate::models::strategy::PriceField::Low   => prev.low,
+                                    crate::models::strategy::PriceField::Close => prev.close,
+                                    _ => prev.high,
+                                };
+                                let base_limit = match opi.base_price_limit {
+                                    crate::models::strategy::PriceField::Open  => prev.open,
+                                    crate::models::strategy::PriceField::High  => prev.high,
+                                    crate::models::strategy::PriceField::Low   => prev.low,
+                                    crate::models::strategy::PriceField::Close => prev.close,
+                                    _ => prev.low,
+                                };
+                                match (dir, order_type) {
+                                    (TradeDirection::Long,  OrderType::Stop)  => base_stop + offset,
+                                    (TradeDirection::Long,  OrderType::Limit) => base_limit - offset,
+                                    (TradeDirection::Short, OrderType::Stop)  => base_stop - offset,
+                                    (TradeDirection::Short, OrderType::Limit) => base_limit + offset,
+                                    _ => raw_price,
+                                }
+                            } else {
+                                // Fallback: fixed pip offset from bar open
+                                let offset = strategy.entry_order_offset_pips * instrument.pip_size;
+                                match (dir, order_type) {
+                                    (TradeDirection::Long,  OrderType::Limit) => raw_price - offset,
+                                    (TradeDirection::Long,  OrderType::Stop)  => raw_price + offset,
+                                    (TradeDirection::Short, OrderType::Limit) => raw_price + offset,
+                                    (TradeDirection::Short, OrderType::Stop)  => raw_price - offset,
+                                    _ => raw_price,
+                                }
+                            };
+                            // Pre-calculate lots using signal-bar price as proxy
+                            let proxy_lots = calculate_lots(&strategy.position_sizing, equity, target, None, instrument, consecutive_losses);
+                            pending_order = Some(PendingOrder {
+                                direction: dir,
+                                order_type,
+                                target_price: target,
+                                lots: proxy_lots,
+                                created_bar: i,
+                                atr_for_sl,
+                                atr_for_tp,
+                                atr_for_ts,
+                            });
+                            daily_trade_count += 1;
+                        }
+                    }
                 }
             }
         }
@@ -457,10 +615,11 @@ fn run_backtest_inner(
                                 stop_loss: sl_price,
                                 take_profit: tp_price,
                                 trailing_stop_distance: ts_distance,
-                                highest_since_entry: running_high
-                                    + if dir == TradeDirection::Short { spread } else { 0.0 },
-                                lowest_since_entry: running_low
-                                    + if dir == TradeDirection::Short { spread } else { 0.0 },
+                                // running_high/low are mid-prices (avg of bid+ask ticks).
+                                // Convert to bid side (Long TS) and ask side (Short TS):
+                                //   bid ≈ mid − spread/2,  ask ≈ mid + spread/2
+                                highest_since_entry: running_high - spread * 0.5,
+                                lowest_since_entry: running_low + spread * 0.5,
                                 mae_pips: 0.0,
                                 mfe_pips: 0.0,
                                 trailing_stop_activated: false,
@@ -468,6 +627,7 @@ fn run_backtest_inner(
                                     [..10.min(candle.datetime.len())]
                                     .to_string(),
                                 accumulated_swap: 0.0,
+                                sl_moved_to_be: false,
                             });
                             daily_trade_count += 1;
                             // Phase 3 must start from the tick AFTER entry
@@ -529,6 +689,25 @@ fn run_backtest_inner(
             if matches!(sub_bars, SubBarData::None) {
                 let ba = orders::BidAskOhlc::from_candle(candle, spread);
                 update_trailing_stop(pos, &ba);
+            }
+        }
+
+        // ── Phase 5.5: Move SL to breakeven ──
+        if strategy.move_sl_to_be {
+            if let Some(ref mut pos) = position {
+                if !pos.sl_moved_to_be {
+                    if let Some(sl) = pos.stop_loss {
+                        let sl_distance = (pos.entry_price - sl).abs();
+                        let profit = match pos.direction {
+                            TradeDirection::Long | TradeDirection::Both => candle.close - pos.entry_price,
+                            TradeDirection::Short => pos.entry_price - candle.close,
+                        };
+                        if profit >= sl_distance {
+                            pos.stop_loss = Some(pos.entry_price);
+                            pos.sl_moved_to_be = true;
+                        }
+                    }
+                }
             }
         }
 
@@ -943,6 +1122,15 @@ fn compute_atr_if_needed(strategy: &Strategy, candles: &[Candle]) -> AtrValues {
     }
 }
 
+/// Pre-compute the primary output values of the order-price indicator, if configured.
+fn compute_order_price_indicator(strategy: &Strategy, candles: &[Candle]) -> Option<Vec<f64>> {
+    let opi = strategy.entry_order_indicator.as_ref()?;
+    match super::indicators::compute_indicator(&opi.indicator, candles) {
+        Ok(output) => Some(output.primary),
+        Err(_) => None,
+    }
+}
+
 /// Compute an ATR series for a specific period. Returns `None` if period is `None`.
 fn compute_atr_for_period(period: Option<usize>, candles: &[Candle]) -> Option<Vec<f64>> {
     let period = period?;
@@ -953,6 +1141,7 @@ fn compute_atr_for_period(period: Option<usize>, candles: &[Candle]) -> Option<V
             ..Default::default()
         },
         output_field: None,
+        cached_hash: 0,
     };
     match super::indicators::compute_indicator(&config, candles) {
         Ok(output) => Some(output.primary),

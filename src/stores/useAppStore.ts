@@ -710,13 +710,17 @@ export const useAppStore = create<AppState>((set, get) => ({
   activeProjectTaskId: null,
   activeProjectTaskDirty: false,
   loadProjects: async () => {
-    const raw = await loadProjectsFromDisk();
-    // Normalize task status — a task cannot be "running"/"paused" after a fresh app start
-    const list = raw.map((p) => ({
-      ...p,
-      tasks: p.tasks.map((t) => ({ ...t, status: "idle" as const })),
-    }));
-    set({ projects: list });
+    try {
+      const raw = await loadProjectsFromDisk();
+      // Normalize task status — a task cannot be "running"/"paused" after a fresh app start
+      const list = raw.map((p) => ({
+        ...p,
+        tasks: p.tasks.map((t) => ({ ...t, status: "idle" as const })),
+      }));
+      set({ projects: list });
+    } catch {
+      // Disk read failure — keep projects empty (default state)
+    }
   },
   createProject: async (name) => {
     const id = crypto.randomUUID();
@@ -727,18 +731,20 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   renameProject: async (id, name) => {
     const now = new Date().toISOString();
-    let target: Project | undefined;
-    set((s) => {
-      const projects = s.projects.map((p) => {
-        if (p.id === id) { target = { ...p, name, updatedAt: now }; return target; }
-        return p;
-      });
-      return { projects };
-    });
-    if (target) await saveProject(target);
+    const existing = get().projects.find((p) => p.id === id);
+    if (!existing) return;
+    const updated = { ...existing, name, updatedAt: now };
+    await saveProject(updated);
+    set((s) => ({
+      projects: s.projects.map((p) => (p.id === id ? updated : p)),
+    }));
   },
   deleteProject: async (id) => {
-    await deleteProjectFromDisk(id);
+    try {
+      await deleteProjectFromDisk(id);
+    } catch {
+      // Ignore disk errors — proceed with in-memory removal
+    }
     set((s) => {
       const taskBelongsToProject =
         s.projects.find((p) => p.id === id)?.tasks.some((t) => t.id === s.activeProjectTaskId) ?? false;
@@ -880,13 +886,17 @@ export const useAppStore = create<AppState>((set, get) => ({
       };
       return target;
     });
-    set({ projects, activeProjectTaskDirty: false });
     if (target) await saveProject(target);
+    set({ projects, activeProjectTaskDirty: false });
   },
   closeProjectTask: async () => {
     const s = get();
     if (s.activeProjectTaskDirty) {
-      await get().saveActiveProjectTask();
+      try {
+        await get().saveActiveProjectTask();
+      } catch {
+        // Save failed — close anyway to avoid blocking navigation; data may be lost
+      }
     }
     set({
       activeProjectTaskId: null,

@@ -34,8 +34,8 @@ function operandToString(op: Operand): string {
 }
 
 const CMP: Record<string, string> = {
-  GreaterThan: ">", LessThan: "<", GreaterThanOrEqual: "≥",
-  LessThanOrEqual: "≤", EqualTo: "=", CrossAbove: "↑ crosses", CrossBelow: "↓ crosses",
+  GreaterThan: ">", LessThan: "<", GreaterOrEqual: "≥",
+  LessOrEqual: "≤", Equal: "=", CrossAbove: "↑ crosses", CrossBelow: "↓ crosses",
 };
 
 // ── Rule row ──────────────────────────────────────────────────────────────────
