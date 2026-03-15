@@ -63,9 +63,11 @@ const fmtMoney = (n: number) =>
   (n >= 0 ? "+" : "") + "$" + Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 0 });
 
 function isOverfit(s: BuilderSavedStrategy): boolean {
+  // Check profit signal first — doesn't require Sharpe
+  if (s.oosNetProfit !== undefined && s.oosNetProfit < 0 && s.netProfit > 0) return true;
+  // Then Sharpe signal
   if (s.oosSharpeRatio === undefined || s.sharpeRatio <= 0) return false;
   if (s.oosSharpeRatio < s.sharpeRatio * 0.5) return true;
-  if (s.oosNetProfit !== undefined && s.oosNetProfit < 0 && s.netProfit > 0) return true;
   return false;
 }
 
@@ -260,6 +262,12 @@ export function DatabanksPanel({ onStrategyOpen }: DatabanksProps) {
 
   // Reset selection when active databank changes
   useEffect(() => { setSelected(new Set()); }, [activeDatabankId]);
+
+  // Reset sort state when IS/OOS toggle changes to avoid ghost sort on hidden columns
+  useEffect(() => {
+    setSortKey("fitness");
+    setSortDir("desc");
+  }, [showOos]);
 
   const toggleSelect = (id: string) =>
     setSelected((prev) => {

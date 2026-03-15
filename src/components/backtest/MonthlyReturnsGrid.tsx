@@ -34,29 +34,32 @@ export function MonthlyReturnsGrid({ trades, initialCapital }: MonthlyReturnsGri
     if (keys.length === 0) return [];
 
     // Compute running capital & return pct per month
-    interface MonthEntry { year: number; month: number; pct: number; }
-    const entries: MonthEntry[] = [];
+    const byYear: Record<number, (number | null)[]> = {};
+    const byYearPnl: Record<number, number> = {};
+    const yearStartCapital: Record<number, number> = {};
+
     let capital = initialCapital;
     for (const key of keys) {
       const pnl = monthly[key];
       const pct = capital > 0 ? (pnl / capital) * 100 : 0;
       const [yr, mo] = key.split("-").map(Number);
-      entries.push({ year: yr, month: mo, pct });
+      if (!byYear[yr]) {
+        byYear[yr] = Array(12).fill(null);
+        yearStartCapital[yr] = capital;
+        byYearPnl[yr] = 0;
+      }
+      byYear[yr][mo - 1] = pct;
+      byYearPnl[yr] += pnl;
       capital += pnl;
-    }
-
-    // Group by year
-    const byYear: Record<number, (number | null)[]> = {};
-    for (const { year, month, pct } of entries) {
-      if (!byYear[year]) byYear[year] = Array(12).fill(null);
-      byYear[year][month - 1] = pct;
     }
 
     return Object.entries(byYear)
       .sort(([a], [b]) => Number(a) - Number(b))
       .map(([year, months]) => {
-        const ytd = months.reduce<number>((acc, v) => acc + (v ?? 0), 0);
-        return { year: Number(year), months, ytd };
+        const yr = Number(year);
+        const startCap = yearStartCapital[yr] ?? initialCapital;
+        const ytd = startCap > 0 ? (byYearPnl[yr] / startCap) * 100 : 0;
+        return { year: yr, months, ytd };
       });
   }, [trades, initialCapital]);
 

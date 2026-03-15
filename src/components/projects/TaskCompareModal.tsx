@@ -1,7 +1,7 @@
 import { useState, useMemo } from "react";
 import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { Project, BuilderSavedStrategy } from "@/lib/types";
+import type { Project } from "@/lib/types";
 
 interface TaskCompareModalProps {
   project: Project;
@@ -55,16 +55,21 @@ export function TaskCompareModal({ project, onClose }: TaskCompareModalProps) {
   const [slotA, setSlotA] = useState(project.tasks[0]?.id ?? "");
   const [slotB, setSlotB] = useState(project.tasks[1]?.id ?? "");
 
-  const getBest = (taskId: string): BuilderSavedStrategy | null => {
-    const task = project.tasks.find((t) => t.id === taskId);
+  const bestA = useMemo(() => {
+    const task = project.tasks.find((t) => t.id === slotA);
     if (!task) return null;
     const all = task.databanks.flatMap((d) => d.strategies);
     if (all.length === 0) return null;
     return all.reduce((best, s) => s.fitness > best.fitness ? s : best);
-  };
+  }, [slotA, project.tasks]);
 
-  const bestA = useMemo(() => getBest(slotA), [slotA, project.tasks]);
-  const bestB = useMemo(() => getBest(slotB), [slotB, project.tasks]);
+  const bestB = useMemo(() => {
+    const task = project.tasks.find((t) => t.id === slotB);
+    if (!task) return null;
+    const all = task.databanks.flatMap((d) => d.strategies);
+    if (all.length === 0) return null;
+    return all.reduce((best, s) => s.fitness > best.fitness ? s : best);
+  }, [slotB, project.tasks]);
 
   const taskA = project.tasks.find((t) => t.id === slotA);
   const taskB = project.tasks.find((t) => t.id === slotB);
