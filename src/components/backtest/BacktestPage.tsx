@@ -13,6 +13,7 @@ import { MetricsGrid } from "./MetricsGrid";
 import { EquityCurve } from "./EquityCurve";
 import { DrawdownChart } from "./DrawdownChart";
 import { MonthlyReturns } from "./MonthlyReturns";
+import { MonthlyReturnsGrid } from "./MonthlyReturnsGrid";
 import { TradesList } from "./TradesList";
 
 export function BacktestPage() {
@@ -139,6 +140,11 @@ export function BacktestPage() {
 
                 <TabsContent value="monthly" className="pt-4">
                   <MonthlyReturns equityCurve={backtestResults.equity_curve} />
+                  {backtestResults.trades.length > 0 && (
+                    <div className="mt-4">
+                      <MonthlyReturnsGrid trades={backtestResults.trades} initialCapital={initialCapital} />
+                    </div>
+                  )}
                 </TabsContent>
 
                 <TabsContent value="trades" className="pt-4">
