@@ -2519,14 +2519,20 @@ fn ring_migration(islands: &mut [Island], migration_rate_pct: f64, rng: &mut imp
     // Collect migrants from each island — population already sorted descending by fitness.
     let mut migrants: Vec<Vec<BuilderIndividual>> = Vec::with_capacity(n);
 
+    // Track the intended migration count per island for injection limiting.
+    let mut migration_counts: Vec<usize> = Vec::with_capacity(n);
+
     for island in islands.iter() {
         let count = ((island.population.len() as f64 * migration_rate_pct / 100.0).ceil() as usize)
             .max(1)
             .min(island.population.len());
 
-        // Take the first `count` individuals (best fitness) — no sort needed.
+        migration_counts.push(count);
+
+        // Take up to 2× as many candidates so that duplicate skips don't starve migration.
+        let candidate_count = (count * 2).min(island.population.len());
         let island_migrants: Vec<BuilderIndividual> = island.population.iter()
-            .take(count)
+            .take(candidate_count)
             .map(|ind| BuilderIndividual {
                 strategy: ind.strategy.clone(),
                 fingerprint: ind.fingerprint,
@@ -2546,8 +2552,13 @@ fn ring_migration(islands: &mut [Island], migration_rate_pct: f64, rng: &mut imp
     for i in 0..n {
         let target = (i + 1) % n;
         let incoming = &migrants[i];
+        let max_accepted = migration_counts[i];
+        let mut accepted = 0;
 
         for migrant in incoming {
+            if accepted >= max_accepted {
+                break;
+            }
             if islands[target].population.is_empty() {
                 continue;
             }
@@ -2572,6 +2583,7 @@ fn ring_migration(islands: &mut [Island], migration_rate_pct: f64, rng: &mut imp
             // Incremental fingerprint_set update — avoids full O(N) rebuild.
             islands[target].fingerprint_set.remove(&old_fp);
             islands[target].fingerprint_set.insert(migrant.fingerprint);
+            accepted += 1;
         }
     }
 }
@@ -2964,7 +2976,17 @@ fn update_island_grammar(
             let observed = ind_counts.get(ind_type).copied().unwrap_or(0);
             // Scale: normalized so that a "flat" distribution would give each indicator weight 100
             let target = (observed as f64 / total_obs as f64) * n * 100.0;
-            *weight = ((1.0 - lr) * *weight as f64 + lr * target).round().max(1.0) as usize;
+            let new_w = (1.0 - lr) * *weight as f64 + lr * target;
+            // Clamp to [0.5×baseline, 2.0×baseline] to prevent drift
+            let baseline = grammar.enabled_indicators.iter()
+                .find(|(t, _)| *t == *ind_type)
+                .map(|(_, w)| *w as f64)
+                .unwrap_or(100.0);
+            *weight = new_w
+                .max(baseline * 0.5)
+                .min(baseline * 2.0)
+                .round()
+                .max(1.0) as usize;
         }
     }
 
@@ -3017,63 +3039,13 @@ fn evaluate_individual(
     instrument: &InstrumentConfig,
     backtest_config: &BacktestConfig,
     cancel_flag: &AtomicBool,
-    prefilter_window_pct: f64,
-    prefilter_min_trades: usize,
     shared_cache: &Arc<Mutex<IndicatorCache>>,
-    skip_prefilter: bool,
 ) {
     // Fast pre-check: if lookback exceeds data, bar loop runs 0 iterations (guaranteed 0 trades)
     if max_lookback(&ind.strategy) >= candles.len().saturating_sub(1) {
         ind.fitness = f64::NEG_INFINITY;
         ind.metrics = None;
         return;
-    }
-
-    // Pre-filter: run a quick complete backtest on a small window of data.
-    // If the strategy fails to reach the minimum trade count, discard immediately
-    // without running the expensive full backtest.
-    // Skipped for the initial population (decimation already filters; pre-filter doubles cost).
-    if !skip_prefilter && prefilter_window_pct > 0.0 && prefilter_min_trades > 0 {
-        // Pre-populate the shared cache with N-bar indicators BEFORE the pre-filter runs.
-        // Without this, the pre-filter would compute indicators on W bars and store them
-        // in the shared cache, corrupting it for the full N-bar backtest (bars W..N-1
-        // would return NaN, causing strategies to produce zero trades on the full data).
-        if pre_compute_indicators_with_shared_cache(&ind.strategy, candles, shared_cache).is_err() {
-            ind.fitness = f64::NEG_INFINITY;
-            ind.metrics = None;
-            return;
-        }
-
-        let window_end = (candles.len() as f64 * prefilter_window_pct.clamp(0.05, 0.5)) as usize;
-        let window_end = window_end.max(1).min(candles.len());
-        let window_candles = &candles[..window_end];
-        let mut quick_cfg = backtest_config.clone();
-        quick_cfg.early_stop_no_trades_pct = None; // run fully on the small window
-        // Use the shared cache — indicators were just pre-populated from the full dataset,
-        // so the bar loop on window_candles (indices 0..window_end) is always valid.
-        let quick_result = executor::run_backtest_with_cache(
-            window_candles,
-            &SubBarData::None,
-            &ind.strategy,
-            &quick_cfg,
-            instrument,
-            cancel_flag,
-            |_, _, _| {},
-            Arc::clone(shared_cache),
-        );
-        match quick_result {
-            Ok(ref r) if r.trades.len() < prefilter_min_trades => {
-                ind.fitness = f64::NEG_INFINITY;
-                ind.metrics = None;
-                return;
-            }
-            Err(_) => {
-                ind.fitness = f64::NEG_INFINITY;
-                ind.metrics = None;
-                return;
-            }
-            Ok(_) => {} // passed pre-filter, proceed to full backtest
-        }
     }
 
     let result = executor::run_backtest_with_cache(
@@ -3349,10 +3321,7 @@ pub fn run_builder(
                     instrument,
                     backtest_config,
                     cancel_flag,
-                    config.genetic_options.prefilter_window_pct,
-                    config.genetic_options.prefilter_min_trades,
                     &shared_cache,
-                    true, // skip_prefilter: decimation already filters the initial population
                 );
                 if let Some(ref m) = ind.metrics {
                     ind.fitness = compute_fitness(m, &config.ranking);
@@ -3676,10 +3645,7 @@ pub fn run_builder(
                         instrument,
                         backtest_config,
                         cancel_flag,
-                        config.genetic_options.prefilter_window_pct,
-                        config.genetic_options.prefilter_min_trades,
                         &shared_cache,
-                        false,
                     );
                     if let Some(ref m) = ind.metrics {
                         ind.fitness = compute_fitness(m, &config.ranking);
@@ -3823,8 +3789,9 @@ pub fn run_builder(
                     island.fingerprint_set.len() as f64 / island.population.len() as f64
                 };
                 if diversity < 0.5 {
+                    let cap = (mutation_prob * 3.0_f64).min(0.95_f64);
                     island.effective_mutation_prob =
-                        (island.effective_mutation_prob + 0.05_f64).min(0.95_f64);
+                        (island.effective_mutation_prob + 0.05_f64).min(cap);
                 } else if diversity > 0.8 {
                     // Decay back toward the configured base value
                     island.effective_mutation_prob = island.effective_mutation_prob
@@ -3881,10 +3848,7 @@ pub fn run_builder(
                                 instrument,
                                 backtest_config,
                                 cancel_flag,
-                                config.genetic_options.prefilter_window_pct,
-                                config.genetic_options.prefilter_min_trades,
                                 &shared_cache,
-                                false,
                             );
                             if let Some(ref m) = ind.metrics {
                                 ind.fitness = compute_fitness(m, &config.ranking);
@@ -3943,10 +3907,7 @@ pub fn run_builder(
                                 instrument,
                                 backtest_config,
                                 cancel_flag,
-                                config.genetic_options.prefilter_window_pct,
-                                config.genetic_options.prefilter_min_trades,
                                 &shared_cache,
-                                false,
                             );
                             if let Some(ref m) = ind.metrics {
                                 ind.fitness = compute_fitness(m, &config.ranking);
