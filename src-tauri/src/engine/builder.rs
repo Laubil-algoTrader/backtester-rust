@@ -1592,6 +1592,34 @@ fn fix_last_group_join(groups: &mut Vec<RuleGroup>) {
     }
 }
 
+/// Trim rules from the last groups (starting from the last group, then backwards)
+/// until the total rule count across all groups is at most `max_rules`.
+/// Preserves at least 1 rule per group and never leaves empty groups.
+fn trim_groups_to_max_rules(groups: &mut Vec<RuleGroup>, max_rules: usize) {
+    if max_rules == 0 {
+        return;
+    }
+    let total: usize = groups.iter().map(|g| g.rules.len()).sum();
+    if total <= max_rules {
+        return;
+    }
+    let excess = total - max_rules;
+    let mut to_remove = excess;
+    // Trim from the last group backwards, preserving at least 1 rule per group
+    let mut g_idx = groups.len();
+    while to_remove > 0 && g_idx > 0 {
+        g_idx -= 1;
+        let available = groups[g_idx].rules.len().saturating_sub(1);
+        let remove_here = available.min(to_remove);
+        if remove_here > 0 {
+            let new_len = groups[g_idx].rules.len() - remove_here;
+            groups[g_idx].rules.truncate(new_len);
+            to_remove -= remove_here;
+        }
+    }
+    fix_last_group_join(groups);
+}
+
 // ══════════════════════════════════════════════════════════════
 // Crossover
 // ══════════════════════════════════════════════════════════════
@@ -1641,6 +1669,7 @@ fn crossover_groups_uniform(
     rng: &mut impl Rng,
     grammar: &GrammarContext,
     min_groups: usize,
+    max_rules: usize,
 ) -> (Vec<RuleGroup>, Vec<RuleGroup>) {
     let max_len = p1.len().max(p2.len());
     let mut c1: Vec<RuleGroup> = Vec::with_capacity(max_len);
@@ -1667,6 +1696,8 @@ fn crossover_groups_uniform(
         c2.push(RuleGroup { id: gen_id(), rules: vec![random_rule(grammar, rng, true, 0.5)], internal: LogicalOperator::And, join: None });
     }
 
+    trim_groups_to_max_rules(&mut c1, max_rules);
+    trim_groups_to_max_rules(&mut c2, max_rules);
     fix_last_group_join(&mut c1);
     fix_last_group_join(&mut c2);
     (c1, c2)
@@ -1692,7 +1723,7 @@ fn crossover_strategies(
 
     // Crossover groups (groups take precedence when non-empty)
     if !parent1.long_entry_groups.is_empty() && !parent2.long_entry_groups.is_empty() {
-        let (c1g, c2g) = crossover_groups_uniform(&parent1.long_entry_groups, &parent2.long_entry_groups, rng, grammar, 1);
+        let (c1g, c2g) = crossover_groups_uniform(&parent1.long_entry_groups, &parent2.long_entry_groups, rng, grammar, 1, grammar.max_entry_rules);
         child1.long_entry_groups = c1g; child2.long_entry_groups = c2g;
     } else if !parent1.long_entry_rules.is_empty() && !parent2.long_entry_rules.is_empty() {
         let (c1r, c2r) = crossover_rules_uniform(&parent1.long_entry_rules, &parent2.long_entry_rules, rng, grammar, grammar.min_entry_rules, grammar.max_entry_rules);
@@ -1700,7 +1731,7 @@ fn crossover_strategies(
     }
 
     if !parent1.long_exit_groups.is_empty() && !parent2.long_exit_groups.is_empty() {
-        let (c1g, c2g) = crossover_groups_uniform(&parent1.long_exit_groups, &parent2.long_exit_groups, rng, grammar, 0);
+        let (c1g, c2g) = crossover_groups_uniform(&parent1.long_exit_groups, &parent2.long_exit_groups, rng, grammar, 0, grammar.max_exit_rules);
         child1.long_exit_groups = c1g; child2.long_exit_groups = c2g;
     } else if grammar.max_exit_rules > 0 && !parent1.long_exit_rules.is_empty() && !parent2.long_exit_rules.is_empty() {
         let (c1r, c2r) = crossover_rules_uniform(&parent1.long_exit_rules, &parent2.long_exit_rules, rng, grammar, grammar.min_exit_rules, grammar.max_exit_rules);
@@ -1709,14 +1740,14 @@ fn crossover_strategies(
 
     if grammar.direction == BuilderDirection::BothAsymmetric {
         if !parent1.short_entry_groups.is_empty() && !parent2.short_entry_groups.is_empty() {
-            let (c1g, c2g) = crossover_groups_uniform(&parent1.short_entry_groups, &parent2.short_entry_groups, rng, grammar, 1);
+            let (c1g, c2g) = crossover_groups_uniform(&parent1.short_entry_groups, &parent2.short_entry_groups, rng, grammar, 1, grammar.max_entry_rules);
             child1.short_entry_groups = c1g; child2.short_entry_groups = c2g;
         } else if !parent1.short_entry_rules.is_empty() && !parent2.short_entry_rules.is_empty() {
             let (c1r, c2r) = crossover_rules_uniform(&parent1.short_entry_rules, &parent2.short_entry_rules, rng, grammar, grammar.min_entry_rules, grammar.max_entry_rules);
             child1.short_entry_rules = c1r; child2.short_entry_rules = c2r;
         }
         if !parent1.short_exit_groups.is_empty() && !parent2.short_exit_groups.is_empty() {
-            let (c1g, c2g) = crossover_groups_uniform(&parent1.short_exit_groups, &parent2.short_exit_groups, rng, grammar, 0);
+            let (c1g, c2g) = crossover_groups_uniform(&parent1.short_exit_groups, &parent2.short_exit_groups, rng, grammar, 0, grammar.max_exit_rules);
             child1.short_exit_groups = c1g; child2.short_exit_groups = c2g;
         } else if grammar.max_exit_rules > 0 && !parent1.short_exit_rules.is_empty() && !parent2.short_exit_rules.is_empty() {
             let (c1r, c2r) = crossover_rules_uniform(&parent1.short_exit_rules, &parent2.short_exit_rules, rng, grammar, grammar.min_exit_rules, grammar.max_exit_rules);
@@ -2030,13 +2061,22 @@ fn mutate_add_rule(strategy: &mut Strategy, grammar: &GrammarContext, rng: &mut 
     };
 
     if !groups.is_empty() {
-        // Pick a random group to add a rule to
-        let g_idx = rng.gen_range(0..groups.len());
-        let g = &mut groups[g_idx];
-        let current_rules = g.rules.len();
-        let min_rules = if is_entry { grammar.min_entry_rules } else { grammar.min_exit_rules };
-        if current_rules < max_rules.max(min_rules + 1) {
-            g.rules.push(random_rule(grammar, rng, true, 0.5));
+        // Check total rules across ALL groups in this section before adding
+        let total_rules: usize = groups.iter().map(|g| g.rules.len()).sum();
+        if total_rules < max_rules {
+            let g_idx = rng.gen_range(0..groups.len());
+            let g = &mut groups[g_idx];
+            // Set logical_operator on current last rule before it becomes second-to-last
+            if let Some(last) = g.rules.last_mut() {
+                if last.logical_operator.is_none() {
+                    last.logical_operator = Some(LogicalOperator::And);
+                }
+            }
+            g.rules.push(random_rule(grammar, rng, is_entry, 0.5));
+            // Ensure new last rule has no logical_operator
+            if let Some(last) = g.rules.last_mut() {
+                last.logical_operator = None;
+            }
         }
     } else {
         // Fall back: add to flat rules
@@ -2159,7 +2199,10 @@ fn mutate_add_group(strategy: &mut Strategy, grammar: &GrammarContext, rng: &mut
             _ => (grammar.min_exit_rules, grammar.max_exit_rules),
         };
         if max_rules == 0 { return; }
-        let n = min_rules.max(1);
+        // Check total rule count before adding new group
+        let total_rules: usize = groups.iter().map(|g| g.rules.len()).sum();
+        if total_rules >= max_rules { return; }
+        let n = min_rules.max(1).min(max_rules - total_rules);
         let is_entry = choice < 2;
         let mut new_rules: Vec<Rule> = (0..n).map(|_| random_rule(grammar, rng, is_entry, 0.5)).collect();
         if let Some(last) = new_rules.last_mut() { last.logical_operator = None; }
