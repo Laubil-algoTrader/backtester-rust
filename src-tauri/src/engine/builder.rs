@@ -2092,7 +2092,10 @@ fn mutate_add_rule(strategy: &mut Strategy, grammar: &GrammarContext, rng: &mut 
                 last.logical_operator = Some(LogicalOperator::And);
             }
         }
-        rules.push(random_rule(grammar, rng, true, 0.5));
+        rules.push(random_rule(grammar, rng, is_entry, 0.5));
+        if let Some(last) = rules.last_mut() {
+            last.logical_operator = None;
+        }
     }
 }
 
