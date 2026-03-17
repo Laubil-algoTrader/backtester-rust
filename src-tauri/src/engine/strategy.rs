@@ -345,8 +345,9 @@ pub fn pre_compute_indicators(
 /// this function checks the shared cache first before computing. This can give a 5-20×
 /// speedup in Grid Search where most combinations change only one parameter at a time.
 ///
-/// The `shared` cache is locked per indicator key, not for the entire computation,
-/// so parallel rayon workers mostly proceed without contention.
+/// The `shared` cache is lock-free (DashMap) per indicator key so parallel rayon workers
+/// mostly proceed without contention. Recurses into `OperandType::Compound` so indicators
+/// nested inside arithmetic expressions are also pre-computed and cached.
 pub fn pre_compute_indicators_with_shared_cache(
     strategy: &Strategy,
     candles: &[Candle],
@@ -375,32 +376,58 @@ pub fn pre_compute_indicators_with_shared_cache(
 
     for rule in all_rules_vec {
         for operand in [&rule.left_operand, &rule.right_operand] {
-            if operand.operand_type == OperandType::Indicator {
-                if let Some(ref config) = operand.indicator {
-                    let key = config.cache_key_hash();
-                    if seen.insert(key) {
-                        // Check shared DashMap cache first (lock-free read)
-                        let from_shared = shared.get(&key).map(|v| Arc::clone(&*v));
-
-                        let output: Arc<IndicatorOutput> = if let Some(cached) = from_shared {
-                            // Arc clone: ~5 ns, no data copy
-                            cached
-                        } else {
-                            // Cache miss: allocate CandleSlices lazily (only on first miss)
-                            let s = slices.get_or_insert_with(|| CandleSlices::from_candles(candles));
-                            let computed = Arc::new(compute_indicator_with_slices(config, s, candles)?);
-                            // Store Arc in shared DashMap cache (no data copy, just pointer)
-                            shared.insert(key, Arc::clone(&computed));
-                            computed
-                        };
-                        local_cache.insert(key, output);
-                    }
-                }
-            }
+            pre_compute_operand_shared(operand, &mut seen, shared, &local_cache, &mut slices, candles)?;
         }
     }
 
     Ok(local_cache)
+}
+
+/// Recursive helper for [`pre_compute_indicators_with_shared_cache`].
+/// Handles both top-level `Indicator` operands and indicators nested inside
+/// `Compound` arithmetic expressions (e.g. `EMA(20) + ATR(14)`).
+fn pre_compute_operand_shared(
+    operand: &Operand,
+    seen: &mut std::collections::HashSet<u64>,
+    shared: &Arc<IndicatorCache>,
+    local_cache: &IndicatorCache,
+    slices: &mut Option<CandleSlices>,
+    candles: &[Candle],
+) -> Result<(), AppError> {
+    match operand.operand_type {
+        OperandType::Indicator => {
+            if let Some(ref config) = operand.indicator {
+                let key = config.cache_key_hash();
+                if seen.insert(key) {
+                    // Check shared DashMap cache first (lock-free read)
+                    let from_shared = shared.get(&key).map(|v| Arc::clone(&*v));
+                    let output: Arc<IndicatorOutput> = if let Some(cached) = from_shared {
+                        // Arc clone: ~5 ns, no data copy
+                        cached
+                    } else {
+                        // Cache miss: allocate CandleSlices lazily (only on first miss)
+                        let s = slices.get_or_insert_with(|| CandleSlices::from_candles(candles));
+                        let computed = Arc::new(compute_indicator_with_slices(config, s, candles)?);
+                        // Store Arc in shared DashMap cache (no data copy, just pointer)
+                        shared.insert(key, Arc::clone(&computed));
+                        computed
+                    };
+                    local_cache.insert(key, output);
+                }
+            }
+        }
+        // Recurse into compound sub-operands so their indicators are also pre-computed.
+        OperandType::Compound => {
+            if let Some(ref left) = operand.compound_left {
+                pre_compute_operand_shared(left, seen, shared, local_cache, slices, candles)?;
+            }
+            if let Some(ref right) = operand.compound_right {
+                pre_compute_operand_shared(right, seen, shared, local_cache, slices, candles)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn collect_indicator_from_operand(

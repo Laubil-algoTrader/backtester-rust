@@ -1715,11 +1715,13 @@ fn crossover_strategies(
 
     child1.id = gen_id();
     child2.id = gen_id();
-    let now = now_iso();
-    child1.created_at = now.clone();
-    child1.updated_at = now.clone();
-    child2.created_at = now.clone();
-    child2.updated_at = now;
+    // Do NOT call now_iso() here — created_at/updated_at are set in individual_to_saved()
+    // once the strategy reaches the databank. Skipping now_iso() here eliminates
+    // ~2× chrono::Utc::now() + String allocs per crossover (~tens of thousands per gen).
+    child1.created_at = String::new();
+    child1.updated_at = String::new();
+    child2.created_at = String::new();
+    child2.updated_at = String::new();
 
     // Crossover groups (groups take precedence when non-empty)
     if !parent1.long_entry_groups.is_empty() && !parent2.long_entry_groups.is_empty() {
@@ -2830,41 +2832,50 @@ fn individual_to_saved(
 
 /// Evaluate a single individual by running a backtest.
 /// Each rayon thread builds its own local indicator cache — no shared mutex contention.
+/// Build a u64 bitmask where bit N is set if the strategy uses `IndicatorType` with
+/// discriminant N.  Because there are ≤ 64 indicator variants (u8 cast) this fits in
+/// a single word — no heap allocation, no HashSet.
+fn compute_indicator_bitmask(s: &Strategy) -> u64 {
+    fn add_op(op: &Operand, mask: &mut u64) {
+        if op.operand_type == OperandType::Indicator {
+            if let Some(ref ind) = op.indicator {
+                *mask |= 1u64 << (ind.indicator_type as u8);
+            }
+        }
+        // Recurse into compound sub-operands.
+        if let Some(ref left)  = op.compound_left  { add_op(left,  mask); }
+        if let Some(ref right) = op.compound_right { add_op(right, mask); }
+    }
+    let mut mask = 0u64;
+    let flat = s.long_entry_rules.iter()
+        .chain(s.short_entry_rules.iter())
+        .chain(s.long_exit_rules.iter())
+        .chain(s.short_exit_rules.iter());
+    let groups = s.long_entry_groups.iter()
+        .chain(s.short_entry_groups.iter())
+        .chain(s.long_exit_groups.iter())
+        .chain(s.short_exit_groups.iter())
+        .flat_map(|g| g.rules.iter());
+    for rule in flat.chain(groups) {
+        add_op(&rule.left_operand,  &mut mask);
+        add_op(&rule.right_operand, &mut mask);
+    }
+    mask
+}
+
+/// Jaccard distance from two indicator bitmasks — pure integer arithmetic, no allocs.
+#[inline]
+fn jaccard_from_masks(a: u64, b: u64) -> f64 {
+    let inter = (a & b).count_ones();
+    let union = (a | b).count_ones();
+    if union == 0 { return 0.0; }
+    1.0 - inter as f64 / union as f64
+}
+
 /// Compute Jaccard distance (0=identical, 1=completely different) between two strategies
 /// based on the set of indicator types used across all rule sets.
 fn structural_distance(a: &Strategy, b: &Strategy) -> f64 {
-    fn extract_indicator_types(op: &Operand, result: &mut std::collections::HashSet<u8>) {
-        if op.operand_type == OperandType::Indicator {
-            if let Some(ref ind) = op.indicator {
-                result.insert(ind.indicator_type as u8);
-            }
-        }
-        if let Some(ref left) = op.compound_left  { extract_indicator_types(left,  result); }
-        if let Some(ref right) = op.compound_right { extract_indicator_types(right, result); }
-    }
-    fn indicator_types(s: &Strategy) -> std::collections::HashSet<u8> {
-        let flat_iter = s.long_entry_rules.iter()
-            .chain(s.short_entry_rules.iter())
-            .chain(s.long_exit_rules.iter())
-            .chain(s.short_exit_rules.iter());
-        let group_iter = s.long_entry_groups.iter()
-            .chain(s.short_entry_groups.iter())
-            .chain(s.long_exit_groups.iter())
-            .chain(s.short_exit_groups.iter())
-            .flat_map(|g| g.rules.iter());
-        let mut result = std::collections::HashSet::new();
-        for rule in flat_iter.chain(group_iter) {
-            extract_indicator_types(&rule.left_operand,  &mut result);
-            extract_indicator_types(&rule.right_operand, &mut result);
-        }
-        result
-    }
-    let a_set = indicator_types(a);
-    let b_set = indicator_types(b);
-    let inter = a_set.intersection(&b_set).count();
-    let union = a_set.union(&b_set).count();
-    if union == 0 { return 0.0; }
-    1.0 - inter as f64 / union as f64
+    jaccard_from_masks(compute_indicator_bitmask(a), compute_indicator_bitmask(b))
 }
 
 // ── Behavioral distance metrics for niching ──────────────────────────────────
@@ -2921,9 +2932,13 @@ fn behavioral_distance(a: &BuilderIndividual, b: &BuilderIndividual, mode: Behav
 /// Individuals closer than `sigma` in behavioral distance have their fitness reduced,
 /// maintaining population diversity.
 ///
-/// Precomputes the upper triangle of the symmetric distance matrix so each
-/// pair (i, j) is evaluated exactly once — 50% fewer distance calls vs the
-/// naive O(N²) double loop.
+/// For `Structural` mode uses precomputed u64 indicator bitmasks — pure integer
+/// arithmetic, no HashSet allocations — and short-circuits when no pair lies within
+/// `sigma` (population already fully diverse, sharing would be a no-op).
+///
+/// For other modes precomputes the upper triangle of the symmetric distance matrix so
+/// each pair (i, j) is evaluated exactly once — 50% fewer distance calls vs the naive
+/// O(N²) double loop.
 fn apply_fitness_sharing(
     pop: &mut Vec<BuilderIndividual>,
     sigma: f64,
@@ -2931,6 +2946,7 @@ fn apply_fitness_sharing(
     mode: BehavioralNichingMode,
 ) {
     let n = pop.len();
+    if n < 2 { return; }
     let raw: Vec<f64> = pop.iter().map(|i| i.fitness).collect();
 
     // Shift all fitnesses to be ≥ 1.0 before dividing so that dividing by denom > 1
@@ -2941,6 +2957,52 @@ fn apply_fitness_sharing(
         .fold(f64::INFINITY, f64::min);
     let shift = if min_raw < 1.0 { 1.0 - min_raw } else { 0.0 };
 
+    // ── Fast path: Structural mode with bitmask arithmetic ────────────────────
+    // Pre-compute one u64 per individual (O(N) tree traversal, no alloc per pair).
+    // Then check if ANY pair is within sigma before building the full distance matrix.
+    // For a highly diverse population this early-exit avoids the entire O(N²) scan.
+    if mode == BehavioralNichingMode::Structural {
+        let masks: Vec<u64> = pop.iter().map(|ind| compute_indicator_bitmask(&ind.strategy)).collect();
+
+        // O(N²/2) early-exit using pure integer ops (~3 ns per pair).
+        let any_close = (0..n).any(|i| {
+            if raw[i] == f64::NEG_INFINITY { return false; }
+            ((i + 1)..n).any(|j| {
+                if raw[j] == f64::NEG_INFINITY { return false; }
+                jaccard_from_masks(masks[i], masks[j]) < sigma
+            })
+        });
+        if !any_close { return; }
+
+        // Full O(N²) distance matrix — bit ops only, no heap allocation per pair.
+        let mut dist = vec![0.0f64; n * n];
+        for i in 0..n {
+            if raw[i] == f64::NEG_INFINITY { continue; }
+            for j in (i + 1)..n {
+                if raw[j] == f64::NEG_INFINITY { continue; }
+                let d = jaccard_from_masks(masks[i], masks[j]);
+                dist[i * n + j] = d;
+                dist[j * n + i] = d;
+            }
+        }
+        for i in 0..n {
+            if raw[i] == f64::NEG_INFINITY { continue; }
+            let mut denom = 0.0f64;
+            for j in 0..n {
+                if raw[j] == f64::NEG_INFINITY { continue; }
+                let d = dist[i * n + j];
+                if d < sigma {
+                    denom += 1.0 - (d / sigma).powf(alpha);
+                }
+            }
+            if denom > 0.0 {
+                pop[i].fitness = (raw[i] + shift) / denom - shift;
+            }
+        }
+        return;
+    }
+
+    // ── Generic path: EquityCurve / TradeOverlap / Combined ──────────────────
     // Precompute upper triangle; fill both (i,j) and (j,i) — distance is symmetric.
     let mut dist = vec![0.0f64; n * n];
     for i in 0..n {
@@ -3732,21 +3794,41 @@ pub fn run_builder(
                 }
 
                 // Check for strategies passing ranking filters -> add to databank.
-                // Phase 1: collect all candidates (no lock — individual_to_saved does
-                // JSON serialization which should not happen inside the critical section).
-                let mut db_candidates: Vec<BuilderSavedStrategy> = vec![];
-                for ind in &next_gen {
+                // Phase 1: collect passing individuals (sequential — fast, no backtest I/O).
+                // Counting rejections here avoids an atomic in the parallel section below.
+                let passing: Vec<&BuilderIndividual> = next_gen.iter().filter(|ind| {
                     if let Some(ref m) = ind.metrics {
                         if passes_filters(m, ranking_filters) {
-                            if let Some(saved) = individual_to_saved(ind, config, data_split.oos_candles, instrument, backtest_config, &persistent_cache, cancel_flag) {
-                                db_candidates.push(saved);
-                            }
+                            true
                         } else {
                             total_rejected.fetch_add(1, Ordering::Relaxed);
+                            false
                         }
+                    } else {
+                        false
                     }
-                }
-                // Phase 2: single lock acquisition for the entire island's batch.
+                }).collect();
+
+                // Phase 2: run OOS backtests in parallel — the expensive per-strategy step.
+                // All inputs are read-only shared refs; DashMap cache is Send+Sync.
+                // This turns a serial O(passing × oos_bars) loop into parallel work.
+                let pc = Arc::clone(&persistent_cache);
+                let db_candidates: Vec<BuilderSavedStrategy> = passing
+                    .par_iter()
+                    .filter_map(|ind| {
+                        individual_to_saved(
+                            ind,
+                            config,
+                            data_split.oos_candles,
+                            instrument,
+                            backtest_config,
+                            &pc,
+                            cancel_flag,
+                        )
+                    })
+                    .collect();
+
+                // Phase 3: single lock acquisition for the entire island's batch.
                 // Reduces (2 × passing_count) mutex acquisitions to 1 per island per generation.
                 if !db_candidates.is_empty() {
                     let mut db = databank.lock().unwrap_or_else(|e| e.into_inner());
@@ -3769,9 +3851,11 @@ pub fn run_builder(
                 }
 
                 // Update island population
+                // Use next_gen_fp_set directly — it was maintained incrementally during
+                // offspring generation, so no O(N) rebuild is needed here.
                 let prev_best_raw = island.best_raw_fitness;
                 island.population = next_gen;
-                island.fingerprint_set = island.population.iter().map(|i| i.fingerprint).collect();
+                island.fingerprint_set = next_gen_fp_set;
 
                 // Capture raw best BEFORE fitness sharing modifies individual fitnesses.
                 // Stagnation detection must compare raw values; sharing-adjusted values fluctuate

@@ -103,9 +103,11 @@ fn run_backtest_inner(
     init_strategy_hashes(&mut strategy_owned);
     let strategy = &strategy_owned;
 
-    // Pre-compute all indicators (use shared cache in optimizer context)
-    let cache = if let Some(shared) = shared_indicator_cache {
-        pre_compute_indicators_with_shared_cache(strategy, candles, &shared)?
+    // Pre-compute all indicators (use shared cache in optimizer context).
+    // Use `ref` so we borrow the Arc rather than moving it — the same Arc is
+    // reused below for ATR caching without an extra clone.
+    let cache = if let Some(ref shared) = shared_indicator_cache {
+        pre_compute_indicators_with_shared_cache(strategy, candles, shared)?
     } else {
         pre_compute_indicators(strategy, candles)?
     };
@@ -127,8 +129,28 @@ fn run_backtest_inner(
         None
     };
 
-    // Get ATR values if needed for SL/TP/trailing stop
-    let atr_values = compute_atr_if_needed(strategy, candles);
+    // Get ATR values if needed for SL/TP/trailing stop.
+    // When a shared cache is available (optimizer / builder context), route each
+    // ATR series through it — reuses the already-computed Vec instead of running
+    // the EMA formula again, saving O(N) work per strategy per ATR component.
+    let atr_values = if let Some(ref sc) = shared_indicator_cache {
+        let sl_period = strategy.stop_loss.as_ref()
+            .filter(|sl| matches!(sl.sl_type, crate::models::strategy::StopLossType::ATR))
+            .and_then(|sl| sl.atr_period);
+        let tp_period = strategy.take_profit.as_ref()
+            .filter(|tp| matches!(tp.tp_type, crate::models::strategy::TakeProfitType::ATR))
+            .and_then(|tp| tp.atr_period);
+        let ts_period = strategy.trailing_stop.as_ref()
+            .filter(|ts| matches!(ts.ts_type, crate::models::strategy::TrailingStopType::ATR))
+            .and_then(|ts| ts.atr_period);
+        AtrValues {
+            for_sl: compute_atr_for_period_cached(sl_period, candles, sc),
+            for_tp: compute_atr_for_period_cached(tp_period, candles, sc),
+            for_ts: compute_atr_for_period_cached(ts_period, candles, sc),
+        }
+    } else {
+        compute_atr_if_needed(strategy, candles)
+    };
 
     // Pre-compute order-price indicator values (for Stop/Limit target price)
     let order_price_values = compute_order_price_indicator(strategy, candles);
@@ -144,9 +166,18 @@ fn run_backtest_inner(
     let mut peak_equity = equity;
     let mut position: Option<OpenPosition> = Option::None;
     let mut pending_order: Option<PendingOrder> = None;
+    // In builder/optimizer mode (shared cache present) the drawdown curve is never
+    // read by the caller — it's display-only.  Skip allocating and filling it to
+    // avoid N × DrawdownPoint heap allocations + N × String::clone() per evaluation.
+    let skip_drawdown_curve = shared_indicator_cache.is_some();
+
     let mut trades: Vec<TradeResult> = Vec::new();
     let mut equity_curve: Vec<EquityPoint> = Vec::with_capacity(total_bars);
-    let mut drawdown_curve: Vec<DrawdownPoint> = Vec::with_capacity(total_bars);
+    let mut drawdown_curve: Vec<DrawdownPoint> = if skip_drawdown_curve {
+        Vec::new()
+    } else {
+        Vec::with_capacity(total_bars)
+    };
     // Track consecutive losses for AntiMartingale position sizing
     let mut consecutive_losses: u32 = 0;
 
@@ -738,10 +769,12 @@ fn run_backtest_inner(
             timestamp: candle.datetime.clone(),
             equity: current_equity,
         });
-        drawdown_curve.push(DrawdownPoint {
-            timestamp: candle.datetime.clone(),
-            drawdown_pct,
-        });
+        if !skip_drawdown_curve {
+            drawdown_curve.push(DrawdownPoint {
+                timestamp: candle.datetime.clone(),
+                drawdown_pct,
+            });
+        }
     }
 
     // ── 4. Close any remaining position at end of data ──
@@ -774,8 +807,10 @@ fn run_backtest_inner(
         if let Some(last) = equity_curve.last_mut() {
             last.equity = equity;
         }
-        if let Some(last) = drawdown_curve.last_mut() {
-            last.drawdown_pct = final_dd_pct;
+        if !skip_drawdown_curve {
+            if let Some(last) = drawdown_curve.last_mut() {
+                last.drawdown_pct = final_dd_pct;
+            }
         }
     }
 
@@ -1145,6 +1180,42 @@ fn compute_atr_for_period(period: Option<usize>, candles: &[Candle]) -> Option<V
     };
     match super::indicators::compute_indicator(&config, candles) {
         Ok(output) => Some(output.primary),
+        Err(_) => None,
+    }
+}
+
+/// Cache-aware ATR computation.  Checks the shared `IndicatorCache` first;
+/// on a miss, computes the ATR, stores it in the cache, then returns a clone of
+/// the primary Vec.  The clone is a fast memcpy; the computation (EMA-based ATR
+/// formula over all bars) is skipped on every subsequent call with the same period.
+fn compute_atr_for_period_cached(
+    period: Option<usize>,
+    candles: &[Candle],
+    shared: &Arc<IndicatorCache>,
+) -> Option<Vec<f64>> {
+    let period = period?;
+    let config = IndicatorConfig {
+        indicator_type: IndicatorType::ATR,
+        params: crate::models::strategy::IndicatorParams {
+            period: Some(period),
+            ..Default::default()
+        },
+        output_field: None,
+        cached_hash: 0,
+    };
+    let key = config.cache_key_hash();
+
+    // Cache hit: clone the primary Vec (O(N) memcpy, but no re-computation).
+    if let Some(cached) = shared.get(&key).map(|v| Arc::clone(&*v)) {
+        return Some(cached.primary.clone());
+    }
+    // Cache miss: compute, store in shared cache, and return.
+    match super::indicators::compute_indicator(&config, candles) {
+        Ok(output) => {
+            let arc = Arc::new(output);
+            shared.insert(key, Arc::clone(&arc));
+            Some(arc.primary.clone())
+        }
         Err(_) => None,
     }
 }
