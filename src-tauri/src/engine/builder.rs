@@ -3794,39 +3794,24 @@ pub fn run_builder(
                 }
 
                 // Check for strategies passing ranking filters -> add to databank.
-                // Phase 1: collect passing individuals (sequential — fast, no backtest I/O).
-                // Counting rejections here avoids an atomic in the parallel section below.
-                let passing: Vec<&BuilderIndividual> = next_gen.iter().filter(|ind| {
+                // Phase 1: collect passing individuals and count rejections (sequential — fast).
+                // Phase 2: run OOS backtests sequentially per island.
+                //   NOTE: the island loop itself runs in parallel (islands.par_iter_mut), so
+                //   spawning another par_iter here would nest parallel inside parallel, saturating
+                //   the rayon thread pool when many strategies pass in early generations.
+                //   Sequential per island keeps each island's work bounded and predictable.
+                let mut db_candidates: Vec<BuilderSavedStrategy> = vec![];
+                for ind in &next_gen {
                     if let Some(ref m) = ind.metrics {
                         if passes_filters(m, ranking_filters) {
-                            true
+                            if let Some(saved) = individual_to_saved(ind, config, data_split.oos_candles, instrument, backtest_config, &persistent_cache, cancel_flag) {
+                                db_candidates.push(saved);
+                            }
                         } else {
                             total_rejected.fetch_add(1, Ordering::Relaxed);
-                            false
                         }
-                    } else {
-                        false
                     }
-                }).collect();
-
-                // Phase 2: run OOS backtests in parallel — the expensive per-strategy step.
-                // All inputs are read-only shared refs; DashMap cache is Send+Sync.
-                // This turns a serial O(passing × oos_bars) loop into parallel work.
-                let pc = Arc::clone(&persistent_cache);
-                let db_candidates: Vec<BuilderSavedStrategy> = passing
-                    .par_iter()
-                    .filter_map(|ind| {
-                        individual_to_saved(
-                            ind,
-                            config,
-                            data_split.oos_candles,
-                            instrument,
-                            backtest_config,
-                            &pc,
-                            cancel_flag,
-                        )
-                    })
-                    .collect();
+                }
 
                 // Phase 3: single lock acquisition for the entire island's batch.
                 // Reduces (2 × passing_count) mutex acquisitions to 1 per island per generation.
