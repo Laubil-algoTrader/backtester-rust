@@ -270,6 +270,43 @@ fn mql5_buffer_index(ind: &IndicatorConfig) -> usize {
             "-DI" | "minus_di" => 2,
             _ => 0, // "adx" or default
         },
+        IndicatorType::Aroon => match field {
+            "aroon_down" => 1,
+            _ => 0, // "aroon_up" or default
+        },
+        IndicatorType::Fractal => match field {
+            "fractal_down" => 1,
+            _ => 0, // "fractal_up" or default
+        },
+        IndicatorType::HeikenAshi => match field {
+            "ha_open" => 1,
+            _ => 0, // "ha_close" or default
+        },
+        IndicatorType::Vortex => match field {
+            "vi_minus" | "vortex_minus" => 1,
+            _ => 0, // "vi_plus" or default
+        },
+        IndicatorType::Ichimoku => match field {
+            "kijun" => 1,
+            "senkou_a" => 2,
+            "senkou_b" => 3,
+            "chikou" => 4,
+            _ => 0, // "tenkan" or default
+        },
+        IndicatorType::Fibonacci => match field {
+            "level_382" => 1,
+            "level_500" => 2,
+            "level_618" => 3,
+            "level_786" => 4,
+            _ => 0, // "level_236" or default
+        },
+        IndicatorType::Pivots => match field {
+            "r1" => 1,
+            "s1" => 2,
+            "r2" => 3,
+            "s2" => 4,
+            _ => 0, // "pp" or default
+        },
         _ => 0,
     }
 }
@@ -562,8 +599,43 @@ fn mql5_on_init(out: &mut String, indicators: &[UniqueIndicator]) {
                 "iCustom(_Symbol, PERIOD_CURRENT, \"BT_LaguerreRSI\", Inp_{}_gamma)",
                 ind.var_name
             ),
+            // --- Native MT5 indicator handles (no custom .ex5 file needed) ---
+            IndicatorType::BearsPower => format!(
+                "iBearsPower(_Symbol, PERIOD_CURRENT, Inp_{}_period)",
+                ind.var_name
+            ),
+            IndicatorType::BullsPower => format!(
+                "iBullsPower(_Symbol, PERIOD_CURRENT, Inp_{}_period)",
+                ind.var_name
+            ),
+            IndicatorType::DeMarker => format!(
+                "iDeMarker(_Symbol, PERIOD_CURRENT, Inp_{}_period)",
+                ind.var_name
+            ),
+            IndicatorType::AwesomeOscillator => format!(
+                "iAO(_Symbol, PERIOD_CURRENT)"
+            ),
+            IndicatorType::Momentum => format!(
+                "iMomentum(_Symbol, PERIOD_CURRENT, Inp_{}_period, PRICE_CLOSE)",
+                ind.var_name
+            ),
+            IndicatorType::LinearRegression => format!(
+                "iLinearReg(_Symbol, PERIOD_CURRENT, Inp_{}_period, PRICE_CLOSE)",
+                ind.var_name
+            ),
+            IndicatorType::Fractal => format!(
+                "iFractals(_Symbol, PERIOD_CURRENT)"
+            ),
+            IndicatorType::StdDev => format!(
+                "iStdDev(_Symbol, PERIOD_CURRENT, Inp_{}_period, 0, MODE_SMA, PRICE_CLOSE)",
+                ind.var_name
+            ),
+            // HeikenAshi comes bundled with MT5 as Examples\Heiken_Ashi
+            IndicatorType::HeikenAshi => format!(
+                "iCustom(_Symbol, PERIOD_CURRENT, \"Examples\\\\Heiken_Ashi\")"
+            ),
+            // --- Extended indicators that need generated custom .mq5 files ---
             _ => {
-                // Period-only or no-param indicators
                 let type_name = format!("{:?}", ind.config.indicator_type);
                 if ind.config.params.period.is_some() {
                     format!(
@@ -1921,7 +1993,23 @@ fn generate_custom_indicator(ind_type: IndicatorType) -> Option<(String, String)
         IndicatorType::WilliamsR => ("BT_WilliamsR.mq5".into(), gen_mql5_williams_r()),
         IndicatorType::ParabolicSAR => ("BT_ParabolicSAR.mq5".into(), gen_mql5_parabolic_sar()),
         IndicatorType::VWAP => ("BT_VWAP.mq5".into(), gen_mql5_vwap()),
-        // New indicators — custom MQL5 indicator files not yet generated
+        // Extended indicators — custom MQL5 indicator files
+        IndicatorType::Aroon => ("BT_Aroon.mq5".into(), gen_mql5_aroon()),
+        IndicatorType::BarRange => ("BT_BarRange.mq5".into(), gen_mql5_bar_range()),
+        IndicatorType::BiggestRange => ("BT_BiggestRange.mq5".into(), gen_mql5_biggest_range()),
+        IndicatorType::SmallestRange => ("BT_SmallestRange.mq5".into(), gen_mql5_smallest_range()),
+        IndicatorType::HighestInRange => ("BT_HighestInRange.mq5".into(), gen_mql5_highest_in_range()),
+        IndicatorType::LowestInRange => ("BT_LowestInRange.mq5".into(), gen_mql5_lowest_in_range()),
+        IndicatorType::GannHiLo => ("BT_GannHiLo.mq5".into(), gen_mql5_gann_hilo()),
+        IndicatorType::HullMA => ("BT_HullMA.mq5".into(), gen_mql5_hull_ma()),
+        IndicatorType::Vortex => ("BT_Vortex.mq5".into(), gen_mql5_vortex()),
+        IndicatorType::TrueRange => ("BT_TrueRange.mq5".into(), gen_mql5_true_range()),
+        IndicatorType::Fibonacci => ("BT_Fibonacci.mq5".into(), gen_mql5_fibonacci()),
+        IndicatorType::KeltnerChannel => ("BT_KeltnerChannel.mq5".into(), gen_mql5_keltner_channel()),
+        IndicatorType::SuperTrend => ("BT_SuperTrend.mq5".into(), gen_mql5_super_trend()),
+        IndicatorType::LaguerreRSI => ("BT_LaguerreRSI.mq5".into(), gen_mql5_laguerre_rsi()),
+        IndicatorType::Pivots => ("BT_Pivots.mq5".into(), gen_mql5_pivots()),
+        // Native handles or already handled above — no file needed
         _ => return None,
     };
     Some((filename, code))
@@ -3222,6 +3310,812 @@ int OnCalculate(const int rates_total,
       VwapBuffer[i] = (gCumVol == 0) ? tp : gCumTPVol / gCumVol;
    }
 
+   return rates_total;
+}
+"#);
+    out
+}
+
+// ── BT_Aroon ──
+
+fn gen_mql5_aroon() -> String {
+    let mut out = mql5_indicator_header("BT_Aroon");
+    out.push_str(r#"#property indicator_separate_window
+#property indicator_buffers 2
+#property indicator_plots   2
+#property indicator_label1  "Aroon Up"
+#property indicator_type1   DRAW_LINE
+#property indicator_color1  clrDodgerBlue
+#property indicator_label2  "Aroon Down"
+#property indicator_type2   DRAW_LINE
+#property indicator_color2  clrCrimson
+
+input int InpPeriod = 14;
+
+double AroonUpBuffer[];
+double AroonDownBuffer[];
+
+int OnInit()
+{
+   SetIndexBuffer(0, AroonUpBuffer, INDICATOR_DATA);
+   SetIndexBuffer(1, AroonDownBuffer, INDICATOR_DATA);
+   PlotIndexSetInteger(0, PLOT_DRAW_BEGIN, InpPeriod);
+   PlotIndexSetInteger(1, PLOT_DRAW_BEGIN, InpPeriod);
+   IndicatorSetString(INDICATOR_SHORTNAME, "BT_Aroon(" + IntegerToString(InpPeriod) + ")");
+   return INIT_SUCCEEDED;
+}
+
+int OnCalculate(const int rates_total, const int prev_calculated,
+                const datetime &time[], const double &open[],
+                const double &high[], const double &low[], const double &close[],
+                const long &tick_volume[], const long &volume[], const int &spread[])
+{
+   int start = (prev_calculated > InpPeriod) ? prev_calculated - 1 : InpPeriod;
+   for(int i = start; i < rates_total; i++)
+   {
+      int hi_pos = i - InpPeriod, lo_pos = i - InpPeriod;
+      double hi_max = high[hi_pos], lo_min = low[lo_pos];
+      for(int k = i - InpPeriod + 1; k <= i; k++)
+      {
+         if(high[k] >= hi_max) { hi_max = high[k]; hi_pos = k; }
+         if(low[k]  <= lo_min) { lo_min = low[k];  lo_pos = k; }
+      }
+      AroonUpBuffer[i]   = 100.0 * (hi_pos - (i - InpPeriod)) / InpPeriod;
+      AroonDownBuffer[i] = 100.0 * (lo_pos - (i - InpPeriod)) / InpPeriod;
+   }
+   return rates_total;
+}
+"#);
+    out
+}
+
+// ── BT_BarRange ──
+
+fn gen_mql5_bar_range() -> String {
+    let mut out = mql5_indicator_header("BT_BarRange");
+    out.push_str(r#"#property indicator_separate_window
+#property indicator_buffers 1
+#property indicator_plots   1
+#property indicator_label1  "Bar Range"
+#property indicator_type1   DRAW_LINE
+#property indicator_color1  clrDodgerBlue
+
+double BarRangeBuffer[];
+
+int OnInit()
+{
+   SetIndexBuffer(0, BarRangeBuffer, INDICATOR_DATA);
+   IndicatorSetString(INDICATOR_SHORTNAME, "BT_BarRange");
+   return INIT_SUCCEEDED;
+}
+
+int OnCalculate(const int rates_total, const int prev_calculated,
+                const datetime &time[], const double &open[],
+                const double &high[], const double &low[], const double &close[],
+                const long &tick_volume[], const long &volume[], const int &spread[])
+{
+   int start = (prev_calculated > 0) ? prev_calculated - 1 : 0;
+   for(int i = start; i < rates_total; i++)
+      BarRangeBuffer[i] = high[i] - low[i];
+   return rates_total;
+}
+"#);
+    out
+}
+
+// ── BT_BiggestRange ──
+
+fn gen_mql5_biggest_range() -> String {
+    let mut out = mql5_indicator_header("BT_BiggestRange");
+    out.push_str(r#"#property indicator_separate_window
+#property indicator_buffers 1
+#property indicator_plots   1
+#property indicator_label1  "Biggest Range"
+#property indicator_type1   DRAW_LINE
+#property indicator_color1  clrOrange
+
+input int InpPeriod = 14;
+
+double BiggestRangeBuffer[];
+
+int OnInit()
+{
+   SetIndexBuffer(0, BiggestRangeBuffer, INDICATOR_DATA);
+   PlotIndexSetInteger(0, PLOT_DRAW_BEGIN, InpPeriod - 1);
+   IndicatorSetString(INDICATOR_SHORTNAME, "BT_BiggestRange(" + IntegerToString(InpPeriod) + ")");
+   return INIT_SUCCEEDED;
+}
+
+int OnCalculate(const int rates_total, const int prev_calculated,
+                const datetime &time[], const double &open[],
+                const double &high[], const double &low[], const double &close[],
+                const long &tick_volume[], const long &volume[], const int &spread[])
+{
+   int start = (prev_calculated > InpPeriod) ? prev_calculated - 1 : InpPeriod - 1;
+   for(int i = start; i < rates_total; i++)
+   {
+      double biggest = 0;
+      for(int k = 0; k < InpPeriod && (i - k) >= 0; k++)
+      {
+         double r = high[i - k] - low[i - k];
+         if(r > biggest) biggest = r;
+      }
+      BiggestRangeBuffer[i] = biggest;
+   }
+   return rates_total;
+}
+"#);
+    out
+}
+
+// ── BT_SmallestRange ──
+
+fn gen_mql5_smallest_range() -> String {
+    let mut out = mql5_indicator_header("BT_SmallestRange");
+    out.push_str(r#"#property indicator_separate_window
+#property indicator_buffers 1
+#property indicator_plots   1
+#property indicator_label1  "Smallest Range"
+#property indicator_type1   DRAW_LINE
+#property indicator_color1  clrMediumVioletRed
+
+input int InpPeriod = 14;
+
+double SmallestRangeBuffer[];
+
+int OnInit()
+{
+   SetIndexBuffer(0, SmallestRangeBuffer, INDICATOR_DATA);
+   PlotIndexSetInteger(0, PLOT_DRAW_BEGIN, InpPeriod - 1);
+   IndicatorSetString(INDICATOR_SHORTNAME, "BT_SmallestRange(" + IntegerToString(InpPeriod) + ")");
+   return INIT_SUCCEEDED;
+}
+
+int OnCalculate(const int rates_total, const int prev_calculated,
+                const datetime &time[], const double &open[],
+                const double &high[], const double &low[], const double &close[],
+                const long &tick_volume[], const long &volume[], const int &spread[])
+{
+   int start = (prev_calculated > InpPeriod) ? prev_calculated - 1 : InpPeriod - 1;
+   for(int i = start; i < rates_total; i++)
+   {
+      double smallest = DBL_MAX;
+      for(int k = 0; k < InpPeriod && (i - k) >= 0; k++)
+      {
+         double r = high[i - k] - low[i - k];
+         if(r < smallest) smallest = r;
+      }
+      SmallestRangeBuffer[i] = (smallest == DBL_MAX) ? 0 : smallest;
+   }
+   return rates_total;
+}
+"#);
+    out
+}
+
+// ── BT_HighestInRange ──
+
+fn gen_mql5_highest_in_range() -> String {
+    let mut out = mql5_indicator_header("BT_HighestInRange");
+    out.push_str(r#"#property indicator_chart_window
+#property indicator_buffers 1
+#property indicator_plots   1
+#property indicator_label1  "Highest In Range"
+#property indicator_type1   DRAW_LINE
+#property indicator_color1  clrLimeGreen
+
+input int InpPeriod = 14;
+
+double HighestBuffer[];
+
+int OnInit()
+{
+   SetIndexBuffer(0, HighestBuffer, INDICATOR_DATA);
+   PlotIndexSetInteger(0, PLOT_DRAW_BEGIN, InpPeriod - 1);
+   IndicatorSetString(INDICATOR_SHORTNAME, "BT_HighestInRange(" + IntegerToString(InpPeriod) + ")");
+   return INIT_SUCCEEDED;
+}
+
+int OnCalculate(const int rates_total, const int prev_calculated,
+                const datetime &time[], const double &open[],
+                const double &high[], const double &low[], const double &close[],
+                const long &tick_volume[], const long &volume[], const int &spread[])
+{
+   int start = (prev_calculated > InpPeriod) ? prev_calculated - 1 : InpPeriod - 1;
+   for(int i = start; i < rates_total; i++)
+   {
+      double highest = -DBL_MAX;
+      for(int k = 0; k < InpPeriod && (i - k) >= 0; k++)
+         if(high[i - k] > highest) highest = high[i - k];
+      HighestBuffer[i] = (highest == -DBL_MAX) ? 0 : highest;
+   }
+   return rates_total;
+}
+"#);
+    out
+}
+
+// ── BT_LowestInRange ──
+
+fn gen_mql5_lowest_in_range() -> String {
+    let mut out = mql5_indicator_header("BT_LowestInRange");
+    out.push_str(r#"#property indicator_chart_window
+#property indicator_buffers 1
+#property indicator_plots   1
+#property indicator_label1  "Lowest In Range"
+#property indicator_type1   DRAW_LINE
+#property indicator_color1  clrCrimson
+
+input int InpPeriod = 14;
+
+double LowestBuffer[];
+
+int OnInit()
+{
+   SetIndexBuffer(0, LowestBuffer, INDICATOR_DATA);
+   PlotIndexSetInteger(0, PLOT_DRAW_BEGIN, InpPeriod - 1);
+   IndicatorSetString(INDICATOR_SHORTNAME, "BT_LowestInRange(" + IntegerToString(InpPeriod) + ")");
+   return INIT_SUCCEEDED;
+}
+
+int OnCalculate(const int rates_total, const int prev_calculated,
+                const datetime &time[], const double &open[],
+                const double &high[], const double &low[], const double &close[],
+                const long &tick_volume[], const long &volume[], const int &spread[])
+{
+   int start = (prev_calculated > InpPeriod) ? prev_calculated - 1 : InpPeriod - 1;
+   for(int i = start; i < rates_total; i++)
+   {
+      double lowest = DBL_MAX;
+      for(int k = 0; k < InpPeriod && (i - k) >= 0; k++)
+         if(low[i - k] < lowest) lowest = low[i - k];
+      LowestBuffer[i] = (lowest == DBL_MAX) ? 0 : lowest;
+   }
+   return rates_total;
+}
+"#);
+    out
+}
+
+// ── BT_GannHiLo ──
+
+fn gen_mql5_gann_hilo() -> String {
+    let mut out = mql5_indicator_header("BT_GannHiLo");
+    out.push_str(r#"#property indicator_chart_window
+#property indicator_buffers 1
+#property indicator_plots   1
+#property indicator_label1  "Gann HiLo"
+#property indicator_type1   DRAW_LINE
+#property indicator_color1  clrGold
+#property indicator_width1  2
+
+input int InpPeriod = 3;
+
+double GannBuffer[];
+
+int OnInit()
+{
+   SetIndexBuffer(0, GannBuffer, INDICATOR_DATA);
+   PlotIndexSetInteger(0, PLOT_DRAW_BEGIN, InpPeriod);
+   IndicatorSetString(INDICATOR_SHORTNAME, "BT_GannHiLo(" + IntegerToString(InpPeriod) + ")");
+   return INIT_SUCCEEDED;
+}
+
+int OnCalculate(const int rates_total, const int prev_calculated,
+                const datetime &time[], const double &open[],
+                const double &high[], const double &low[], const double &close[],
+                const long &tick_volume[], const long &volume[], const int &spread[])
+{
+   int start = (prev_calculated > InpPeriod) ? prev_calculated - 1 : InpPeriod;
+   for(int i = start; i < rates_total; i++)
+   {
+      double sma_h = 0, sma_l = 0;
+      for(int k = 0; k < InpPeriod; k++) { sma_h += high[i - k]; sma_l += low[i - k]; }
+      sma_h /= InpPeriod;
+      sma_l /= InpPeriod;
+      // prev bar sma_h
+      double prev_sma_h = 0;
+      for(int k = 0; k < InpPeriod; k++) prev_sma_h += high[i - 1 - k];
+      prev_sma_h /= InpPeriod;
+      GannBuffer[i] = (close[i - 1] > prev_sma_h) ? sma_l : sma_h;
+   }
+   return rates_total;
+}
+"#);
+    out
+}
+
+// ── BT_HullMA ──
+
+fn gen_mql5_hull_ma() -> String {
+    let mut out = mql5_indicator_header("BT_HullMA");
+    out.push_str(r#"#property indicator_chart_window
+#property indicator_buffers 1
+#property indicator_plots   1
+#property indicator_label1  "Hull MA"
+#property indicator_type1   DRAW_LINE
+#property indicator_color1  clrMediumPurple
+#property indicator_width1  2
+
+input int InpPeriod = 16;
+
+double HullBuffer[];
+
+// Weighted Moving Average helper
+double WMA(const double &arr[], int idx, int period)
+{
+   if(idx < period - 1) return EMPTY_VALUE;
+   double sum = 0, wsum = 0;
+   for(int k = 0; k < period; k++)
+   {
+      double w = period - k;
+      sum  += arr[idx - k] * w;
+      wsum += w;
+   }
+   return (wsum > 0) ? sum / wsum : 0;
+}
+
+int OnInit()
+{
+   SetIndexBuffer(0, HullBuffer, INDICATOR_DATA);
+   PlotIndexSetDouble(0, PLOT_EMPTY_VALUE, EMPTY_VALUE);
+   int sqrtPeriod = (int)MathSqrt(InpPeriod);
+   PlotIndexSetInteger(0, PLOT_DRAW_BEGIN, InpPeriod + sqrtPeriod - 1);
+   IndicatorSetString(INDICATOR_SHORTNAME, "BT_HullMA(" + IntegerToString(InpPeriod) + ")");
+   return INIT_SUCCEEDED;
+}
+
+int OnCalculate(const int rates_total, const int prev_calculated,
+                const datetime &time[], const double &open[],
+                const double &high[], const double &low[], const double &close[],
+                const long &tick_volume[], const long &volume[], const int &spread[])
+{
+   int half = InpPeriod / 2;
+   int sqrtn = (int)MathSqrt(InpPeriod);
+   // Need a temp buffer for the intermediate WMA series
+   double tmp[];
+   ArrayResize(tmp, rates_total);
+
+   int start = (prev_calculated > 0) ? prev_calculated - 1 : 0;
+   for(int i = start; i < rates_total; i++)
+   {
+      double wma_half = WMA(close, i, half);
+      double wma_full = WMA(close, i, InpPeriod);
+      if(wma_half == EMPTY_VALUE || wma_full == EMPTY_VALUE)
+         tmp[i] = EMPTY_VALUE;
+      else
+         tmp[i] = 2.0 * wma_half - wma_full;
+   }
+   for(int i = start; i < rates_total; i++)
+   {
+      double h = WMA(tmp, i, sqrtn);
+      HullBuffer[i] = (h == EMPTY_VALUE) ? EMPTY_VALUE : h;
+   }
+   return rates_total;
+}
+"#);
+    out
+}
+
+// ── BT_Vortex ──
+
+fn gen_mql5_vortex() -> String {
+    let mut out = mql5_indicator_header("BT_Vortex");
+    out.push_str(r#"#property indicator_separate_window
+#property indicator_buffers 2
+#property indicator_plots   2
+#property indicator_label1  "VI+"
+#property indicator_type1   DRAW_LINE
+#property indicator_color1  clrDodgerBlue
+#property indicator_label2  "VI-"
+#property indicator_type2   DRAW_LINE
+#property indicator_color2  clrCrimson
+
+input int InpPeriod = 14;
+
+double VIplusBuffer[];
+double VIminusBuffer[];
+
+int OnInit()
+{
+   SetIndexBuffer(0, VIplusBuffer,  INDICATOR_DATA);
+   SetIndexBuffer(1, VIminusBuffer, INDICATOR_DATA);
+   PlotIndexSetInteger(0, PLOT_DRAW_BEGIN, InpPeriod);
+   PlotIndexSetInteger(1, PLOT_DRAW_BEGIN, InpPeriod);
+   IndicatorSetString(INDICATOR_SHORTNAME, "BT_Vortex(" + IntegerToString(InpPeriod) + ")");
+   return INIT_SUCCEEDED;
+}
+
+int OnCalculate(const int rates_total, const int prev_calculated,
+                const datetime &time[], const double &open[],
+                const double &high[], const double &low[], const double &close[],
+                const long &tick_volume[], const long &volume[], const int &spread[])
+{
+   int start = (prev_calculated > InpPeriod) ? prev_calculated - 1 : InpPeriod;
+   for(int i = start; i < rates_total; i++)
+   {
+      double vm_plus = 0, vm_minus = 0, tr_sum = 0;
+      for(int k = 0; k < InpPeriod; k++)
+      {
+         int cur = i - k, prv = i - k - 1;
+         vm_plus  += MathAbs(high[cur] - low[prv]);
+         vm_minus += MathAbs(low[cur]  - high[prv]);
+         double tr = MathMax(high[cur] - low[cur],
+                    MathMax(MathAbs(high[cur] - close[prv]),
+                            MathAbs(low[cur]  - close[prv])));
+         tr_sum += tr;
+      }
+      VIplusBuffer[i]  = (tr_sum > 0) ? vm_plus  / tr_sum : 0;
+      VIminusBuffer[i] = (tr_sum > 0) ? vm_minus / tr_sum : 0;
+   }
+   return rates_total;
+}
+"#);
+    out
+}
+
+// ── BT_TrueRange ──
+
+fn gen_mql5_true_range() -> String {
+    let mut out = mql5_indicator_header("BT_TrueRange");
+    out.push_str(r#"#property indicator_separate_window
+#property indicator_buffers 1
+#property indicator_plots   1
+#property indicator_label1  "True Range"
+#property indicator_type1   DRAW_LINE
+#property indicator_color1  clrOrange
+
+double TRBuffer[];
+
+int OnInit()
+{
+   SetIndexBuffer(0, TRBuffer, INDICATOR_DATA);
+   PlotIndexSetInteger(0, PLOT_DRAW_BEGIN, 1);
+   IndicatorSetString(INDICATOR_SHORTNAME, "BT_TrueRange");
+   return INIT_SUCCEEDED;
+}
+
+int OnCalculate(const int rates_total, const int prev_calculated,
+                const datetime &time[], const double &open[],
+                const double &high[], const double &low[], const double &close[],
+                const long &tick_volume[], const long &volume[], const int &spread[])
+{
+   int start = (prev_calculated > 1) ? prev_calculated - 1 : 1;
+   for(int i = start; i < rates_total; i++)
+   {
+      double hl = high[i] - low[i];
+      double hc = MathAbs(high[i] - close[i - 1]);
+      double lc = MathAbs(low[i]  - close[i - 1]);
+      TRBuffer[i] = MathMax(hl, MathMax(hc, lc));
+   }
+   return rates_total;
+}
+"#);
+    out
+}
+
+// ── BT_Fibonacci ──
+
+fn gen_mql5_fibonacci() -> String {
+    let mut out = mql5_indicator_header("BT_Fibonacci");
+    out.push_str(r#"#property indicator_chart_window
+#property indicator_buffers 5
+#property indicator_plots   5
+#property indicator_label1  "Fib 23.6%"
+#property indicator_type1   DRAW_LINE
+#property indicator_color1  clrGold
+#property indicator_label2  "Fib 38.2%"
+#property indicator_type2   DRAW_LINE
+#property indicator_color2  clrYellow
+#property indicator_label3  "Fib 50%"
+#property indicator_type3   DRAW_LINE
+#property indicator_color3  clrOrange
+#property indicator_label4  "Fib 61.8%"
+#property indicator_type4   DRAW_LINE
+#property indicator_color4  clrDarkOrange
+#property indicator_label5  "Fib 78.6%"
+#property indicator_type5   DRAW_LINE
+#property indicator_color5  clrOrangeRed
+
+input int InpPeriod = 20;
+
+double Fib236[], Fib382[], Fib500[], Fib618[], Fib786[];
+
+int OnInit()
+{
+   SetIndexBuffer(0, Fib236, INDICATOR_DATA);
+   SetIndexBuffer(1, Fib382, INDICATOR_DATA);
+   SetIndexBuffer(2, Fib500, INDICATOR_DATA);
+   SetIndexBuffer(3, Fib618, INDICATOR_DATA);
+   SetIndexBuffer(4, Fib786, INDICATOR_DATA);
+   PlotIndexSetInteger(0, PLOT_DRAW_BEGIN, InpPeriod - 1);
+   PlotIndexSetInteger(1, PLOT_DRAW_BEGIN, InpPeriod - 1);
+   PlotIndexSetInteger(2, PLOT_DRAW_BEGIN, InpPeriod - 1);
+   PlotIndexSetInteger(3, PLOT_DRAW_BEGIN, InpPeriod - 1);
+   PlotIndexSetInteger(4, PLOT_DRAW_BEGIN, InpPeriod - 1);
+   IndicatorSetString(INDICATOR_SHORTNAME, "BT_Fibonacci(" + IntegerToString(InpPeriod) + ")");
+   return INIT_SUCCEEDED;
+}
+
+int OnCalculate(const int rates_total, const int prev_calculated,
+                const datetime &time[], const double &open[],
+                const double &high[], const double &low[], const double &close[],
+                const long &tick_volume[], const long &volume[], const int &spread[])
+{
+   int start = (prev_calculated > InpPeriod) ? prev_calculated - 1 : InpPeriod - 1;
+   for(int i = start; i < rates_total; i++)
+   {
+      double hh = -DBL_MAX, ll = DBL_MAX;
+      for(int k = 0; k < InpPeriod && (i - k) >= 0; k++)
+      {
+         if(high[i - k] > hh) hh = high[i - k];
+         if(low[i - k]  < ll) ll = low[i - k];
+      }
+      double rng = hh - ll;
+      Fib236[i] = hh - rng * 0.236;
+      Fib382[i] = hh - rng * 0.382;
+      Fib500[i] = hh - rng * 0.500;
+      Fib618[i] = hh - rng * 0.618;
+      Fib786[i] = hh - rng * 0.786;
+   }
+   return rates_total;
+}
+"#);
+    out
+}
+
+// ── BT_KeltnerChannel ──
+
+fn gen_mql5_keltner_channel() -> String {
+    let mut out = mql5_indicator_header("BT_KeltnerChannel");
+    out.push_str(r#"#property indicator_chart_window
+#property indicator_buffers 3
+#property indicator_plots   3
+#property indicator_label1  "KC Middle"
+#property indicator_type1   DRAW_LINE
+#property indicator_color1  clrDodgerBlue
+#property indicator_width1  2
+#property indicator_label2  "KC Upper"
+#property indicator_type2   DRAW_LINE
+#property indicator_color2  clrSteelBlue
+#property indicator_label3  "KC Lower"
+#property indicator_type3   DRAW_LINE
+#property indicator_color3  clrSteelBlue
+
+input int    InpPeriod = 20;
+input double InpMult   = 1.5;
+
+double MiddleBuffer[], UpperBuffer[], LowerBuffer[];
+
+int OnInit()
+{
+   SetIndexBuffer(0, MiddleBuffer, INDICATOR_DATA);
+   SetIndexBuffer(1, UpperBuffer,  INDICATOR_DATA);
+   SetIndexBuffer(2, LowerBuffer,  INDICATOR_DATA);
+   PlotIndexSetInteger(0, PLOT_DRAW_BEGIN, InpPeriod - 1);
+   PlotIndexSetInteger(1, PLOT_DRAW_BEGIN, InpPeriod - 1);
+   PlotIndexSetInteger(2, PLOT_DRAW_BEGIN, InpPeriod - 1);
+   IndicatorSetString(INDICATOR_SHORTNAME, "BT_KeltnerChannel(" + IntegerToString(InpPeriod) + ")");
+   return INIT_SUCCEEDED;
+}
+
+int OnCalculate(const int rates_total, const int prev_calculated,
+                const datetime &time[], const double &open[],
+                const double &high[], const double &low[], const double &close[],
+                const long &tick_volume[], const long &volume[], const int &spread[])
+{
+   if(rates_total < InpPeriod + 1) return 0;
+   int start = (prev_calculated > InpPeriod) ? prev_calculated - 1 : InpPeriod;
+   for(int i = start; i < rates_total; i++)
+   {
+      // EMA-style middle (SMA for simplicity to match Rust impl)
+      double ema_sum = 0;
+      for(int k = 0; k < InpPeriod; k++) ema_sum += close[i - k];
+      double mid = ema_sum / InpPeriod;
+      // ATR
+      double atr_sum = 0;
+      for(int k = 0; k < InpPeriod; k++)
+      {
+         int cur = i - k, prv = i - k - 1;
+         if(prv < 0) { atr_sum += high[cur] - low[cur]; continue; }
+         double tr = MathMax(high[cur] - low[cur],
+                    MathMax(MathAbs(high[cur] - close[prv]),
+                            MathAbs(low[cur]  - close[prv])));
+         atr_sum += tr;
+      }
+      double atr = atr_sum / InpPeriod;
+      MiddleBuffer[i] = mid;
+      UpperBuffer[i]  = mid + InpMult * atr;
+      LowerBuffer[i]  = mid - InpMult * atr;
+   }
+   return rates_total;
+}
+"#);
+    out
+}
+
+// ── BT_SuperTrend ──
+
+fn gen_mql5_super_trend() -> String {
+    let mut out = mql5_indicator_header("BT_SuperTrend");
+    out.push_str(r#"#property indicator_chart_window
+#property indicator_buffers 1
+#property indicator_plots   1
+#property indicator_label1  "SuperTrend"
+#property indicator_type1   DRAW_LINE
+#property indicator_color1  clrGold
+#property indicator_width1  2
+
+input int    InpPeriod = 10;
+input double InpMult   = 3.0;
+
+double STBuffer[];
+
+int OnInit()
+{
+   SetIndexBuffer(0, STBuffer, INDICATOR_DATA);
+   PlotIndexSetInteger(0, PLOT_DRAW_BEGIN, InpPeriod);
+   PlotIndexSetDouble(0, PLOT_EMPTY_VALUE, EMPTY_VALUE);
+   IndicatorSetString(INDICATOR_SHORTNAME, "BT_SuperTrend(" + IntegerToString(InpPeriod) + "," + DoubleToString(InpMult, 1) + ")");
+   return INIT_SUCCEEDED;
+}
+
+int OnCalculate(const int rates_total, const int prev_calculated,
+                const datetime &time[], const double &open[],
+                const double &high[], const double &low[], const double &close[],
+                const long &tick_volume[], const long &volume[], const int &spread[])
+{
+   if(rates_total < InpPeriod + 1) return 0;
+   // Wilder ATR + SuperTrend
+   double atr[];
+   ArrayResize(atr, rates_total);
+   atr[0] = high[0] - low[0];
+   for(int i = 1; i < rates_total; i++)
+   {
+      double tr = MathMax(high[i] - low[i],
+                 MathMax(MathAbs(high[i] - close[i-1]),
+                         MathAbs(low[i]  - close[i-1])));
+      atr[i] = (atr[i-1] * (InpPeriod - 1) + tr) / InpPeriod;
+   }
+   double upper = 0, lower = 0;
+   bool trend_up = true;
+   int start = (prev_calculated > InpPeriod) ? prev_calculated - 1 : InpPeriod;
+   for(int i = InpPeriod; i < rates_total; i++)
+   {
+      double hl2 = (high[i] + low[i]) / 2.0;
+      double basic_upper = hl2 + InpMult * atr[i];
+      double basic_lower = hl2 - InpMult * atr[i];
+      if(i == InpPeriod) { upper = basic_upper; lower = basic_lower; trend_up = close[i] >= lower; }
+      else
+      {
+         upper = (basic_upper < upper || close[i-1] > upper) ? basic_upper : upper;
+         lower = (basic_lower > lower || close[i-1] < lower) ? basic_lower : lower;
+         if(trend_up  && close[i] < lower) trend_up = false;
+         if(!trend_up && close[i] > upper) trend_up = true;
+      }
+      STBuffer[i] = trend_up ? lower : upper;
+   }
+   return rates_total;
+}
+"#);
+    out
+}
+
+// ── BT_LaguerreRSI ──
+
+fn gen_mql5_laguerre_rsi() -> String {
+    let mut out = mql5_indicator_header("BT_LaguerreRSI");
+    out.push_str(r#"#property indicator_separate_window
+#property indicator_buffers 1
+#property indicator_plots   1
+#property indicator_label1  "Laguerre RSI"
+#property indicator_type1   DRAW_LINE
+#property indicator_color1  clrDodgerBlue
+#property indicator_levels 2
+#property indicator_levelvalue1 0.8
+#property indicator_levelvalue2 0.2
+
+input double InpGamma = 0.7;
+
+double LRSIBuffer[];
+double L0prev = 0, L1prev = 0, L2prev = 0, L3prev = 0;
+
+int OnInit()
+{
+   SetIndexBuffer(0, LRSIBuffer, INDICATOR_DATA);
+   PlotIndexSetInteger(0, PLOT_DRAW_BEGIN, 4);
+   IndicatorSetString(INDICATOR_SHORTNAME, "BT_LaguerreRSI(" + DoubleToString(InpGamma, 2) + ")");
+   return INIT_SUCCEEDED;
+}
+
+int OnCalculate(const int rates_total, const int prev_calculated,
+                const datetime &time[], const double &open[],
+                const double &high[], const double &low[], const double &close[],
+                const long &tick_volume[], const long &volume[], const int &spread[])
+{
+   int start = (prev_calculated > 1) ? prev_calculated - 1 : 0;
+   if(prev_calculated == 0) { L0prev = L1prev = L2prev = L3prev = 0; }
+   for(int i = start; i < rates_total; i++)
+   {
+      double L0 = (1 - InpGamma) * close[i] + InpGamma * L0prev;
+      double L1 = -InpGamma * L0 + L0prev + InpGamma * L1prev;
+      double L2 = -InpGamma * L1 + L1prev + InpGamma * L2prev;
+      double L3 = -InpGamma * L2 + L2prev + InpGamma * L3prev;
+      double cu = 0, cd = 0;
+      if(L0 >= L1) cu += L0 - L1; else cd += L1 - L0;
+      if(L1 >= L2) cu += L1 - L2; else cd += L2 - L1;
+      if(L2 >= L3) cu += L2 - L3; else cd += L3 - L2;
+      LRSIBuffer[i] = (cu + cd > 0) ? cu / (cu + cd) : 0;
+      L0prev = L0; L1prev = L1; L2prev = L2; L3prev = L3;
+   }
+   return rates_total;
+}
+"#);
+    out
+}
+
+// ── BT_Pivots ──
+
+fn gen_mql5_pivots() -> String {
+    let mut out = mql5_indicator_header("BT_Pivots");
+    out.push_str(r#"#property indicator_chart_window
+#property indicator_buffers 5
+#property indicator_plots   5
+#property indicator_label1  "PP"
+#property indicator_type1   DRAW_LINE
+#property indicator_color1  clrGold
+#property indicator_width1  2
+#property indicator_label2  "R1"
+#property indicator_type2   DRAW_LINE
+#property indicator_color2  clrLimeGreen
+#property indicator_label3  "S1"
+#property indicator_type3   DRAW_LINE
+#property indicator_color3  clrCrimson
+#property indicator_label4  "R2"
+#property indicator_type4   DRAW_LINE
+#property indicator_color4  clrGreen
+#property indicator_label5  "S2"
+#property indicator_type5   DRAW_LINE
+#property indicator_color5  clrRed
+
+double PPBuffer[], R1Buffer[], S1Buffer[], R2Buffer[], S2Buffer[];
+
+int OnInit()
+{
+   SetIndexBuffer(0, PPBuffer, INDICATOR_DATA);
+   SetIndexBuffer(1, R1Buffer, INDICATOR_DATA);
+   SetIndexBuffer(2, S1Buffer, INDICATOR_DATA);
+   SetIndexBuffer(3, R2Buffer, INDICATOR_DATA);
+   SetIndexBuffer(4, S2Buffer, INDICATOR_DATA);
+   PlotIndexSetInteger(0, PLOT_DRAW_BEGIN, 1);
+   PlotIndexSetInteger(1, PLOT_DRAW_BEGIN, 1);
+   PlotIndexSetInteger(2, PLOT_DRAW_BEGIN, 1);
+   PlotIndexSetInteger(3, PLOT_DRAW_BEGIN, 1);
+   PlotIndexSetInteger(4, PLOT_DRAW_BEGIN, 1);
+   IndicatorSetString(INDICATOR_SHORTNAME, "BT_Pivots");
+   return INIT_SUCCEEDED;
+}
+
+int OnCalculate(const int rates_total, const int prev_calculated,
+                const datetime &time[], const double &open[],
+                const double &high[], const double &low[], const double &close[],
+                const long &tick_volume[], const long &volume[], const int &spread[])
+{
+   // Use H1 data to compute daily pivots
+   // Simple approach: use previous bar's HLC for pivot calculation
+   // For intrabar pivots, use previous bar H, L, C
+   int start = (prev_calculated > 1) ? prev_calculated - 1 : 1;
+   for(int i = start; i < rates_total; i++)
+   {
+      double ph = high[i-1], pl = low[i-1], pc = close[i-1];
+      double pp = (ph + pl + pc) / 3.0;
+      double rng = ph - pl;
+      PPBuffer[i] = pp;
+      R1Buffer[i] = 2 * pp - pl;
+      S1Buffer[i] = 2 * pp - ph;
+      R2Buffer[i] = pp + rng;
+      S2Buffer[i] = pp - rng;
+   }
    return rates_total;
 }
 "#);
