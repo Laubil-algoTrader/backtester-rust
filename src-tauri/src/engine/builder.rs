@@ -3512,6 +3512,9 @@ pub fn run_builder(
         }
 
         // 4b. Check initial population for strategies that pass ranking filters -> databank
+        // Use a dedicated OOS cache separate from the IS persistent_cache to avoid
+        // contaminating IS indicator values with OOS-data computation (and vice versa).
+        let init_oos_cache: Arc<IndicatorCache> = Arc::new(IndicatorCache::default());
         for island in &islands {
             for ind in &island.population {
                 if let Some(ref m) = ind.metrics {
@@ -3524,7 +3527,7 @@ pub fn run_builder(
                         };
 
                         if !is_duplicate {
-                            if let Some(saved) = individual_to_saved(ind, config, data_split.oos_candles, instrument, backtest_config, &persistent_cache, cancel_flag) {
+                            if let Some(saved) = individual_to_saved(ind, config, data_split.oos_candles, instrument, backtest_config, &init_oos_cache, cancel_flag) {
                                 let mut db = databank.lock().unwrap_or_else(|e| e.into_inner());
                                 let insert_pos = db
                                     .iter()
@@ -3794,22 +3797,43 @@ pub fn run_builder(
                 }
 
                 // Check for strategies passing ranking filters -> add to databank.
-                // Phase 1: collect passing individuals and count rejections (sequential — fast).
-                // Phase 2: run OOS backtests sequentially per island.
-                //   NOTE: the island loop itself runs in parallel (islands.par_iter_mut), so
-                //   spawning another par_iter here would nest parallel inside parallel, saturating
-                //   the rayon thread pool when many strategies pass in early generations.
-                //   Sequential per island keeps each island's work bounded and predictable.
-                let mut db_candidates: Vec<BuilderSavedStrategy> = vec![];
+                // OOS backtests run sequentially per island (nested par_iter would saturate
+                // the rayon thread pool since islands already run in parallel).
+                //
+                // Two optimizations to prevent progressive slowdown as the population improves:
+                //   1. Dedicated OOS cache: separate from IS cache to avoid incorrect IS
+                //      indicator values being used for OOS bars (different data, same keys).
+                //      Shared across candidates in this island-generation so strategies with
+                //      the same indicator params pay the OOS computation cost only once.
+                //   2. Cap at top `max_oos_per_gen` by IS fitness — as populations evolve,
+                //      more strategies pass IS filters; without a cap each generation does
+                //      progressively more sequential OOS work causing visible stalls.
+                let oos_cache: Arc<IndicatorCache> = Arc::new(IndicatorCache::default());
+                let max_oos_per_gen = (pop_size / 4).max(5);
+
+                let mut passing: Vec<&BuilderIndividual> = Vec::new();
+                let mut reject_count = 0usize;
                 for ind in &next_gen {
                     if let Some(ref m) = ind.metrics {
                         if passes_filters(m, ranking_filters) {
-                            if let Some(saved) = individual_to_saved(ind, config, data_split.oos_candles, instrument, backtest_config, &persistent_cache, cancel_flag) {
-                                db_candidates.push(saved);
-                            }
+                            passing.push(ind);
                         } else {
-                            total_rejected.fetch_add(1, Ordering::Relaxed);
+                            reject_count += 1;
                         }
+                    }
+                }
+                if reject_count > 0 {
+                    total_rejected.fetch_add(reject_count, Ordering::Relaxed);
+                }
+                // Sort best-IS-fitness first so the cap keeps the most promising candidates.
+                passing.sort_unstable_by(|a, b| {
+                    b.fitness.partial_cmp(&a.fitness).unwrap_or(std::cmp::Ordering::Equal)
+                });
+
+                let mut db_candidates: Vec<BuilderSavedStrategy> = vec![];
+                for ind in passing.into_iter().take(max_oos_per_gen) {
+                    if let Some(saved) = individual_to_saved(ind, config, data_split.oos_candles, instrument, backtest_config, &oos_cache, cancel_flag) {
+                        db_candidates.push(saved);
                     }
                 }
 
@@ -3887,7 +3911,10 @@ pub fn run_builder(
                 }
 
                 // Stagnation detection uses raw (pre-sharing) fitness.
-                let threshold = prev_best_raw.abs() * 1e-4;
+                // Threshold of 1e-3 (0.1%) requires a meaningful improvement each generation
+                // before resetting the counter. 1e-4 was too sensitive and caused restarts
+                // after micro-improvements during normal convergence.
+                let threshold = prev_best_raw.abs() * 1e-3;
                 if (raw_new_best - prev_best_raw).abs() < threshold.max(f64::EPSILON) {
                     island.stagnation_count += 1;
                 } else {
