@@ -971,6 +971,7 @@ mod tests {
             sortino_ratio: 0.0,
             calmar_ratio: 0.0,
             max_drawdown_pct: 0.0,
+            max_drawdown_abs: 0.0,
             max_drawdown_duration_bars: 0,
             max_drawdown_duration_time: String::new(),
             avg_drawdown_pct: 0.0,

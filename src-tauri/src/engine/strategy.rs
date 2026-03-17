@@ -1535,6 +1535,11 @@ mod tests {
             trading_hours: None,
             max_daily_trades: None,
             close_trades_at: None,
+            entry_order: OrderType::Market,
+            entry_order_offset_pips: 0.0,
+            close_after_bars: None,
+            move_sl_to_be: false,
+            entry_order_indicator: None,
         };
 
         let cache = pre_compute_indicators(&strategy, &candles).unwrap();

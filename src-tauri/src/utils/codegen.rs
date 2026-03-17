@@ -169,6 +169,7 @@ fn add_atr_if_missing(seen: &mut HashSet<String>, result: &mut Vec<UniqueIndicat
         indicator_type: IndicatorType::ATR,
         params: IndicatorParams { period: Some(period), ..Default::default() },
         output_field: None,
+        cached_hash: 0,
     };
     let key = config.cache_key();
     if seen.insert(key) {
@@ -922,6 +923,22 @@ fn mql5_operand_expr(operand: &Operand, extra_shift: usize, indicators: &[Unique
                     format!("(iClose(_Symbol,PERIOD_CURRENT,{o}+1)<iOpen(_Symbol,PERIOD_CURRENT,{o}+1) && iClose(_Symbol,PERIOD_CURRENT,{o})>iOpen(_Symbol,PERIOD_CURRENT,{o}) && iOpen(_Symbol,PERIOD_CURRENT,{o})<iLow(_Symbol,PERIOD_CURRENT,{o}+1) && iClose(_Symbol,PERIOD_CURRENT,{o})>(iOpen(_Symbol,PERIOD_CURRENT,{o}+1)+iClose(_Symbol,PERIOD_CURRENT,{o}+1))/2.0 ? 1.0 : 0.0)"),
                 None => "0 /* no candle pattern */".into(),
             }
+        }
+        OperandType::Compound => {
+            let left = operand.compound_left.as_deref()
+                .map(|l| mql5_operand_expr(l, extra_shift, indicators))
+                .unwrap_or_else(|| "0.0".to_string());
+            let right = operand.compound_right.as_deref()
+                .map(|r| mql5_operand_expr(r, extra_shift, indicators))
+                .unwrap_or_else(|| "0.0".to_string());
+            let op_str = match &operand.compound_op {
+                Some(ArithmeticOp::Add) => "+",
+                Some(ArithmeticOp::Sub) => "-",
+                Some(ArithmeticOp::Mul) => "*",
+                Some(ArithmeticOp::Div) => "/",
+                None => "+",
+            };
+            format!("({} {} {})", left, op_str, right)
         }
     }
 }
@@ -1690,6 +1707,22 @@ fn pine_operand_expr(operand: &Operand, extra_offset: usize) -> String {
                 }
                 None => "na".into(),
             }
+        }
+        OperandType::Compound => {
+            let left = operand.compound_left.as_deref()
+                .map(|l| pine_operand_expr(l, extra_offset))
+                .unwrap_or_else(|| "0.0".to_string());
+            let right = operand.compound_right.as_deref()
+                .map(|r| pine_operand_expr(r, extra_offset))
+                .unwrap_or_else(|| "0.0".to_string());
+            let op_str = match &operand.compound_op {
+                Some(ArithmeticOp::Add) => "+",
+                Some(ArithmeticOp::Sub) => "-",
+                Some(ArithmeticOp::Mul) => "*",
+                Some(ArithmeticOp::Div) => "/",
+                None => "+",
+            };
+            format!("({} {} {})", left, op_str, right)
         }
     }
 }
@@ -3220,6 +3253,9 @@ mod tests {
                         time_field: None,
                         candle_pattern: None,
                         offset: None,
+                        compound_left: None,
+                        compound_op: None,
+                        compound_right: None,
                     },
                     comparator: Comparator::CrossAbove,
                     right_operand: Operand {
@@ -3228,12 +3264,16 @@ mod tests {
                             indicator_type: IndicatorType::SMA,
                             params: IndicatorParams { period: Some(20), ..Default::default() },
                             output_field: None,
+                            cached_hash: 0,
                         }),
                         price_field: None,
                         constant_value: None,
                         time_field: None,
                         candle_pattern: None,
                         offset: None,
+                        compound_left: None,
+                        compound_op: None,
+                        compound_right: None,
                     },
                     logical_operator: Some(LogicalOperator::And),
                 },
@@ -3245,12 +3285,16 @@ mod tests {
                             indicator_type: IndicatorType::RSI,
                             params: IndicatorParams { period: Some(14), ..Default::default() },
                             output_field: None,
+                            cached_hash: 0,
                         }),
                         price_field: None,
                         constant_value: None,
                         time_field: None,
                         candle_pattern: None,
                         offset: None,
+                        compound_left: None,
+                        compound_op: None,
+                        compound_right: None,
                     },
                     comparator: Comparator::GreaterThan,
                     right_operand: Operand {
@@ -3261,6 +3305,9 @@ mod tests {
                         time_field: None,
                         candle_pattern: None,
                         offset: None,
+                        compound_left: None,
+                        compound_op: None,
+                        compound_right: None,
                     },
                     logical_operator: None,
                 },
@@ -3268,9 +3315,14 @@ mod tests {
             short_entry_rules: vec![],
             long_exit_rules: vec![],
             short_exit_rules: vec![],
+            long_entry_groups: vec![],
+            short_entry_groups: vec![],
+            long_exit_groups: vec![],
+            short_exit_groups: vec![],
             position_sizing: PositionSizing {
                 sizing_type: PositionSizingType::FixedLots,
                 value: 0.1,
+                decrease_factor: 0.9,
             },
             stop_loss: Some(StopLoss {
                 sl_type: StopLossType::Pips,
@@ -3294,6 +3346,11 @@ mod tests {
             trading_hours: None,
             max_daily_trades: None,
             close_trades_at: None,
+            entry_order: OrderType::Market,
+            entry_order_offset_pips: 0.0,
+            close_after_bars: None,
+            move_sl_to_be: false,
+            entry_order_indicator: None,
         }
     }
 
@@ -3370,12 +3427,16 @@ mod tests {
                         ..Default::default()
                     },
                     output_field: Some("signal".into()),
+                    cached_hash: 0,
                 }),
                 price_field: None,
                 constant_value: None,
                 time_field: None,
                 candle_pattern: None,
                 offset: None,
+                compound_left: None,
+                compound_op: None,
+                compound_right: None,
             },
             comparator: Comparator::GreaterThan,
             right_operand: Operand {
@@ -3386,6 +3447,9 @@ mod tests {
                 time_field: None,
                 candle_pattern: None,
                 offset: None,
+                compound_left: None,
+                compound_op: None,
+                compound_right: None,
             },
             logical_operator: None,
         }];
