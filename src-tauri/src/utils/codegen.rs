@@ -307,6 +307,11 @@ fn mql5_buffer_index(ind: &IndicatorConfig) -> usize {
             "s2" => 4,
             _ => 0, // "pp" or default
         },
+        IndicatorType::KeltnerChannel => match field {
+            "upper" => 1,
+            "lower" => 2,
+            _ => 0, // "middle" or default
+        },
         _ => 0,
     }
 }
@@ -599,40 +604,39 @@ fn mql5_on_init(out: &mut String, indicators: &[UniqueIndicator]) {
                 "iCustom(_Symbol, PERIOD_CURRENT, \"BT_LaguerreRSI\", Inp_{}_gamma)",
                 ind.var_name
             ),
-            // --- Native MT5 indicator handles (no custom .ex5 file needed) ---
+            // --- Custom BT_* indicators (all use app's own implementation) ---
             IndicatorType::BearsPower => format!(
-                "iBearsPower(_Symbol, PERIOD_CURRENT, Inp_{}_period)",
+                "iCustom(_Symbol, PERIOD_CURRENT, \"BT_BearsPower\", Inp_{}_period)",
                 ind.var_name
             ),
             IndicatorType::BullsPower => format!(
-                "iBullsPower(_Symbol, PERIOD_CURRENT, Inp_{}_period)",
+                "iCustom(_Symbol, PERIOD_CURRENT, \"BT_BullsPower\", Inp_{}_period)",
                 ind.var_name
             ),
             IndicatorType::DeMarker => format!(
-                "iDeMarker(_Symbol, PERIOD_CURRENT, Inp_{}_period)",
+                "iCustom(_Symbol, PERIOD_CURRENT, \"BT_DeMarker\", Inp_{}_period)",
                 ind.var_name
             ),
             IndicatorType::AwesomeOscillator => format!(
-                "iAO(_Symbol, PERIOD_CURRENT)"
+                "iCustom(_Symbol, PERIOD_CURRENT, \"BT_AwesomeOscillator\")"
             ),
             IndicatorType::Momentum => format!(
-                "iMomentum(_Symbol, PERIOD_CURRENT, Inp_{}_period, PRICE_CLOSE)",
+                "iCustom(_Symbol, PERIOD_CURRENT, \"BT_Momentum\", Inp_{}_period)",
                 ind.var_name
             ),
             IndicatorType::LinearRegression => format!(
-                "iLinearReg(_Symbol, PERIOD_CURRENT, Inp_{}_period, PRICE_CLOSE)",
+                "iCustom(_Symbol, PERIOD_CURRENT, \"BT_LinearRegression\", Inp_{}_period)",
                 ind.var_name
             ),
             IndicatorType::Fractal => format!(
-                "iFractals(_Symbol, PERIOD_CURRENT)"
+                "iCustom(_Symbol, PERIOD_CURRENT, \"BT_Fractal\")"
             ),
             IndicatorType::StdDev => format!(
-                "iStdDev(_Symbol, PERIOD_CURRENT, Inp_{}_period, 0, MODE_SMA, PRICE_CLOSE)",
+                "iCustom(_Symbol, PERIOD_CURRENT, \"BT_StdDev\", Inp_{}_period)",
                 ind.var_name
             ),
-            // HeikenAshi comes bundled with MT5 as Examples\Heiken_Ashi
             IndicatorType::HeikenAshi => format!(
-                "iCustom(_Symbol, PERIOD_CURRENT, \"Examples\\\\Heiken_Ashi\")"
+                "iCustom(_Symbol, PERIOD_CURRENT, \"BT_HeikenAshi\")"
             ),
             // --- Extended indicators that need generated custom .mq5 files ---
             _ => {
