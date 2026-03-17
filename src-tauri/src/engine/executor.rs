@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use chrono::Datelike;
 use polars::prelude::*;
@@ -74,7 +74,7 @@ pub fn run_backtest_with_cache(
     instrument: &InstrumentConfig,
     cancel_flag: &AtomicBool,
     progress_callback: impl Fn(u8, usize, usize),
-    shared_cache: Arc<Mutex<IndicatorCache>>,
+    shared_cache: Arc<IndicatorCache>,
 ) -> Result<BacktestResults, AppError> {
     run_backtest_inner(candles, sub_bars, strategy, config, instrument, cancel_flag, progress_callback, Some(shared_cache))
 }
@@ -87,7 +87,7 @@ fn run_backtest_inner(
     instrument: &InstrumentConfig,
     cancel_flag: &AtomicBool,
     progress_callback: impl Fn(u8, usize, usize),
-    shared_indicator_cache: Option<Arc<Mutex<IndicatorCache>>>,
+    shared_indicator_cache: Option<Arc<IndicatorCache>>,
 ) -> Result<BacktestResults, AppError> {
     let total_bars = candles.len();
     info!("Starting backtest: {} bars, strategy={}, precision={:?}",

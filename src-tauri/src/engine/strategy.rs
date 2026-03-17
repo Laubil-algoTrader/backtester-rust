@@ -1,18 +1,21 @@
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use dashmap::DashMap;
 
 use crate::errors::AppError;
 use crate::models::candle::Candle;
 use crate::models::strategy::{
-    CandlePatternType, Comparator, IndicatorConfig, LogicalOperator, Operand, OperandType,
-    PriceField, Rule, Strategy, TimeField,
+    ArithmeticOp, CandlePatternType, Comparator, IndicatorConfig, LogicalOperator, Operand,
+    OperandType, PriceField, Rule, RuleGroup, Strategy, TimeField,
 };
 
 use super::indicators::{CandleSlices, compute_indicator_with_slices, IndicatorOutput};
 use super::streaming::{StreamingStateMap, StreamingVals};
 
-/// Cache of pre-computed indicator values, keyed by `IndicatorConfig::cache_key()`.
-pub type IndicatorCache = HashMap<String, IndicatorOutput>;
+/// Cache of pre-computed indicator values, keyed by `IndicatorConfig::cache_key_hash()`.
+/// Values are wrapped in `Arc` so every cache hit is a ~5 ns pointer clone instead of
+/// a 800 KB–2.4 MB deep copy of `Vec<f64>` data.
+pub type IndicatorCache = DashMap<u64, Arc<IndicatorOutput>>;
 
 /// Cache of daily OHLC boundaries aligned to each bar.
 #[derive(Debug)]
@@ -150,16 +153,34 @@ pub fn compute_time_cache(candles: &[Candle]) -> TimeCache {
     }
 }
 
+fn operand_uses_bar_time(op: &Operand) -> bool {
+    if op.operand_type == OperandType::BarTime { return true; }
+    if let Some(ref l) = op.compound_left  { if operand_uses_bar_time(l)  { return true; } }
+    if let Some(ref r) = op.compound_right { if operand_uses_bar_time(r)  { return true; } }
+    false
+}
+
+fn operand_uses_candle_pattern(op: &Operand) -> bool {
+    if op.operand_type == OperandType::CandlePattern { return true; }
+    if let Some(ref l) = op.compound_left  { if operand_uses_candle_pattern(l) { return true; } }
+    if let Some(ref r) = op.compound_right { if operand_uses_candle_pattern(r) { return true; } }
+    false
+}
+
 /// Check if a strategy uses any BarTime operands.
 pub fn strategy_uses_time_fields(strategy: &Strategy) -> bool {
+    let group_rules = strategy.long_entry_groups.iter()
+        .chain(strategy.short_entry_groups.iter())
+        .chain(strategy.long_exit_groups.iter())
+        .chain(strategy.short_exit_groups.iter())
+        .flat_map(|g| g.rules.iter());
     let all_rules = strategy.long_entry_rules.iter()
         .chain(strategy.short_entry_rules.iter())
         .chain(strategy.long_exit_rules.iter())
-        .chain(strategy.short_exit_rules.iter());
+        .chain(strategy.short_exit_rules.iter())
+        .chain(group_rules);
     for rule in all_rules {
-        if rule.left_operand.operand_type == OperandType::BarTime
-            || rule.right_operand.operand_type == OperandType::BarTime
-        {
+        if operand_uses_bar_time(&rule.left_operand) || operand_uses_bar_time(&rule.right_operand) {
             return true;
         }
     }
@@ -266,14 +287,18 @@ pub fn compute_candle_pattern_cache(candles: &[Candle]) -> CandlePatternCache {
 
 /// Check if a strategy uses any CandlePattern operands.
 pub fn strategy_uses_candle_patterns(strategy: &Strategy) -> bool {
+    let group_rules = strategy.long_entry_groups.iter()
+        .chain(strategy.short_entry_groups.iter())
+        .chain(strategy.long_exit_groups.iter())
+        .chain(strategy.short_exit_groups.iter())
+        .flat_map(|g| g.rules.iter());
     let all_rules = strategy.long_entry_rules.iter()
         .chain(strategy.short_entry_rules.iter())
         .chain(strategy.long_exit_rules.iter())
-        .chain(strategy.short_exit_rules.iter());
+        .chain(strategy.short_exit_rules.iter())
+        .chain(group_rules);
     for rule in all_rules {
-        if rule.left_operand.operand_type == OperandType::CandlePattern
-            || rule.right_operand.operand_type == OperandType::CandlePattern
-        {
+        if operand_uses_candle_pattern(&rule.left_operand) || operand_uses_candle_pattern(&rule.right_operand) {
             return true;
         }
     }
@@ -289,20 +314,26 @@ pub fn pre_compute_indicators(
     strategy: &Strategy,
     candles: &[Candle],
 ) -> Result<IndicatorCache, AppError> {
-    let mut cache = IndicatorCache::new();
+    let cache = IndicatorCache::new();
     let mut seen = std::collections::HashSet::new();
 
     // Extract OHLCV once for all indicator computations.
     let slices = CandleSlices::from_candles(candles);
 
-    // Collect all indicator configs from all 4 rule lists
+    // Collect all indicator configs from flat rules and group rules
+    let group_rules = strategy.long_entry_groups.iter()
+        .chain(strategy.short_entry_groups.iter())
+        .chain(strategy.long_exit_groups.iter())
+        .chain(strategy.short_exit_groups.iter())
+        .flat_map(|g| g.rules.iter());
     let all_rules = strategy.long_entry_rules.iter()
         .chain(strategy.short_entry_rules.iter())
         .chain(strategy.long_exit_rules.iter())
-        .chain(strategy.short_exit_rules.iter());
+        .chain(strategy.short_exit_rules.iter())
+        .chain(group_rules);
     for rule in all_rules {
-        collect_indicator_from_operand(&rule.left_operand, &mut seen, &mut cache, &slices, candles)?;
-        collect_indicator_from_operand(&rule.right_operand, &mut seen, &mut cache, &slices, candles)?;
+        collect_indicator_from_operand(&rule.left_operand, &mut seen, &cache, &slices, candles)?;
+        collect_indicator_from_operand(&rule.right_operand, &mut seen, &cache, &slices, candles)?;
     }
 
     Ok(cache)
@@ -319,36 +350,47 @@ pub fn pre_compute_indicators(
 pub fn pre_compute_indicators_with_shared_cache(
     strategy: &Strategy,
     candles: &[Candle],
-    shared: &Arc<Mutex<IndicatorCache>>,
+    shared: &Arc<IndicatorCache>,
 ) -> Result<IndicatorCache, AppError> {
-    let mut local_cache = IndicatorCache::new();
+    let local_cache = IndicatorCache::new();
     let mut seen = std::collections::HashSet::new();
 
-    let slices = CandleSlices::from_candles(candles);
+    // Lazy: only allocate CandleSlices on the first cache miss.
+    // In steady state (after the persistent cache warms up in generation 1) every indicator
+    // is already cached, so this allocation is skipped entirely — saving ~400 KB per call.
+    let mut slices: Option<CandleSlices> = None;
 
-    let all_rules = strategy.long_entry_rules.iter()
+    let group_rules_sc = strategy.long_entry_groups.iter()
+        .chain(strategy.short_entry_groups.iter())
+        .chain(strategy.long_exit_groups.iter())
+        .chain(strategy.short_exit_groups.iter())
+        .flat_map(|g| g.rules.iter());
+    // collect into a Vec to avoid lifetime issues with chained iterators and the loop body
+    let all_rules_vec: Vec<&Rule> = strategy.long_entry_rules.iter()
         .chain(strategy.short_entry_rules.iter())
         .chain(strategy.long_exit_rules.iter())
-        .chain(strategy.short_exit_rules.iter());
+        .chain(strategy.short_exit_rules.iter())
+        .chain(group_rules_sc)
+        .collect();
 
-    for rule in all_rules {
+    for rule in all_rules_vec {
         for operand in [&rule.left_operand, &rule.right_operand] {
             if operand.operand_type == OperandType::Indicator {
                 if let Some(ref config) = operand.indicator {
-                    let key = config.cache_key();
-                    if seen.insert(key.clone()) {
-                        // Check shared cache first (non-blocking try_lock avoids deadlock)
-                        let from_shared = shared.lock().ok()
-                            .and_then(|guard| guard.get(&key).cloned());
+                    let key = config.cache_key_hash();
+                    if seen.insert(key) {
+                        // Check shared DashMap cache first (lock-free read)
+                        let from_shared = shared.get(&key).map(|v| Arc::clone(&*v));
 
-                        let output = if let Some(cached) = from_shared {
+                        let output: Arc<IndicatorOutput> = if let Some(cached) = from_shared {
+                            // Arc clone: ~5 ns, no data copy
                             cached
                         } else {
-                            let computed = compute_indicator_with_slices(config, &slices, candles)?;
-                            // Store in shared cache for other threads
-                            if let Ok(mut guard) = shared.lock() {
-                                guard.insert(key.clone(), computed.clone());
-                            }
+                            // Cache miss: allocate CandleSlices lazily (only on first miss)
+                            let s = slices.get_or_insert_with(|| CandleSlices::from_candles(candles));
+                            let computed = Arc::new(compute_indicator_with_slices(config, s, candles)?);
+                            // Store Arc in shared DashMap cache (no data copy, just pointer)
+                            shared.insert(key, Arc::clone(&computed));
                             computed
                         };
                         local_cache.insert(key, output);
@@ -363,19 +405,31 @@ pub fn pre_compute_indicators_with_shared_cache(
 
 fn collect_indicator_from_operand(
     operand: &Operand,
-    seen: &mut std::collections::HashSet<String>,
-    cache: &mut IndicatorCache,
+    seen: &mut std::collections::HashSet<u64>,
+    cache: &IndicatorCache,
     slices: &CandleSlices,
     candles: &[Candle],
 ) -> Result<(), AppError> {
-    if operand.operand_type == OperandType::Indicator {
-        if let Some(ref config) = operand.indicator {
-            let key = config.cache_key();
-            if seen.insert(key.clone()) {
-                let output = compute_indicator_with_slices(config, slices, candles)?;
-                cache.insert(key, output);
+    match operand.operand_type {
+        OperandType::Indicator => {
+            if let Some(ref config) = operand.indicator {
+                let key = config.cache_key_hash();
+                if seen.insert(key) {
+                    let output = Arc::new(compute_indicator_with_slices(config, slices, candles)?);
+                    cache.insert(key, output);
+                }
             }
         }
+        // Recurse into compound sub-operands so their indicators are also pre-computed.
+        OperandType::Compound => {
+            if let Some(ref left) = operand.compound_left {
+                collect_indicator_from_operand(left, seen, cache, slices, candles)?;
+            }
+            if let Some(ref right) = operand.compound_right {
+                collect_indicator_from_operand(right, seen, cache, slices, candles)?;
+            }
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -418,6 +472,79 @@ pub fn evaluate_rules(
         let current = evaluate_single_rule(&rules[i], bar_index, cache, candles, daily_ohlc, time_cache, pattern_cache, time_offset);
 
         match prev_operator {
+            LogicalOperator::And => result = result && current,
+            LogicalOperator::Or => result = result || current,
+        }
+    }
+
+    result
+}
+
+/// Evaluate a single rule group: all rules combined via `g.internal` (AND = all pass, OR = any pass).
+fn evaluate_group(
+    g: &RuleGroup,
+    bar_index: usize,
+    cache: &IndicatorCache,
+    candles: &[Candle],
+    daily_ohlc: Option<&DailyOhlcCache>,
+    time_cache: Option<&TimeCache>,
+    pattern_cache: Option<&CandlePatternCache>,
+    time_offset: usize,
+) -> bool {
+    if g.rules.is_empty() {
+        return false;
+    }
+    match g.internal {
+        LogicalOperator::And => {
+            for rule in &g.rules {
+                if !evaluate_single_rule(rule, bar_index, cache, candles, daily_ohlc, time_cache, pattern_cache, time_offset) {
+                    return false;
+                }
+            }
+            true
+        }
+        LogicalOperator::Or => {
+            for rule in &g.rules {
+                if evaluate_single_rule(rule, bar_index, cache, candles, daily_ohlc, time_cache, pattern_cache, time_offset) {
+                    return true;
+                }
+            }
+            false
+        }
+    }
+}
+
+/// Evaluate a list of rule groups at a bar index.
+///
+/// Each group's rules are combined by the group's `internal` operator.
+/// Adjacent groups are combined by the previous group's `join` operator.
+/// An empty groups slice returns `false`.
+pub fn evaluate_rule_groups(
+    groups: &[RuleGroup],
+    bar_index: usize,
+    cache: &IndicatorCache,
+    candles: &[Candle],
+    daily_ohlc: Option<&DailyOhlcCache>,
+    time_cache: Option<&TimeCache>,
+    pattern_cache: Option<&CandlePatternCache>,
+    time_offset: usize,
+) -> bool {
+    if groups.is_empty() {
+        return false;
+    }
+
+    let mut result = evaluate_group(&groups[0], bar_index, cache, candles, daily_ohlc, time_cache, pattern_cache, time_offset);
+
+    for i in 1..groups.len() {
+        let join = groups[i - 1].join.unwrap_or(LogicalOperator::And);
+        // Short-circuit
+        match join {
+            LogicalOperator::And if !result => continue,
+            LogicalOperator::Or if result => continue,
+            _ => {}
+        }
+        let current = evaluate_group(&groups[i], bar_index, cache, candles, daily_ohlc, time_cache, pattern_cache, time_offset);
+        match join {
             LogicalOperator::And => result = result && current,
             LogicalOperator::Or => result = result || current,
         }
@@ -515,9 +642,11 @@ fn resolve_operand(
     match operand.operand_type {
         OperandType::Indicator => {
             if let Some(ref config) = operand.indicator {
-                let key = config.cache_key();
+                // Use pre-computed hash (set by init_strategy_hashes before bar loop).
+                // Fall back to live computation for any path that didn't call it.
+                let key = if config.cached_hash != 0 { config.cached_hash } else { config.cache_key_hash() };
                 if let Some(output) = cache.get(&key) {
-                    get_indicator_value(output, config, effective_index)
+                    get_indicator_value(&**output, config, effective_index)
                 } else {
                     f64::NAN
                 }
@@ -579,6 +708,30 @@ fn resolve_operand(
                 }
             } else {
                 f64::NAN
+            }
+        }
+        OperandType::Compound => {
+            let left_op = match operand.compound_left.as_deref() {
+                Some(l) => l,
+                None => return f64::NAN,
+            };
+            let right_op = match operand.compound_right.as_deref() {
+                Some(r) => r,
+                None => return f64::NAN,
+            };
+            let l = resolve_operand(left_op, effective_index, cache, candles, daily_ohlc, time_cache, pattern_cache, time_offset);
+            let r = resolve_operand(right_op, effective_index, cache, candles, daily_ohlc, time_cache, pattern_cache, time_offset);
+            if l.is_nan() || r.is_nan() {
+                return f64::NAN;
+            }
+            match operand.compound_op {
+                Some(ArithmeticOp::Add) => l + r,
+                Some(ArithmeticOp::Sub) => l - r,
+                Some(ArithmeticOp::Mul) => l * r,
+                Some(ArithmeticOp::Div) => {
+                    if r.abs() < f64::EPSILON { f64::NAN } else { l / r }
+                }
+                None => f64::NAN,
             }
         }
     }
@@ -805,9 +958,9 @@ fn resolve_operand_streaming(
     match operand.operand_type {
         OperandType::Indicator => {
             if let Some(ref config) = operand.indicator {
-                let key = config.cache_key();
+                let str_key = config.cache_key();
                 // Vec lookup via key_index — no String hashing in hot path
-                if let Some(&idx) = streaming_state.key_index.get(&key) {
+                if let Some(&idx) = streaming_state.key_index.get(&str_key) {
                     if let Some(sv) = streaming_vals.get(idx) {
                         // Pick the right output based on output_field (mirrors get_indicator_value)
                         return match config.output_field.as_deref() {
@@ -819,9 +972,10 @@ fn resolve_operand_streaming(
                         };
                     }
                 }
-                // No streaming override: fall back to cache (last completed bar)
-                if let Some(output) = cache.get(&key) {
-                    get_indicator_value(output, config, effective_index)
+                // No streaming override: fall back to cache (last completed bar).
+                let hash_key = if config.cached_hash != 0 { config.cached_hash } else { config.cache_key_hash() };
+                if let Some(output) = cache.get(&hash_key) {
+                    get_indicator_value(&**output, config, effective_index)
                 } else {
                     f64::NAN
                 }
@@ -849,6 +1003,32 @@ fn resolve_operand_streaming(
                 Some(PriceField::DailyClose) => daily_ohlc
                     .and_then(|d| d.daily_close.get(effective_index).copied())
                     .unwrap_or(f64::NAN),
+            }
+        }
+        OperandType::Compound => {
+            let left_op = match operand.compound_left.as_deref() {
+                Some(l) => l,
+                None => return f64::NAN,
+            };
+            let right_op = match operand.compound_right.as_deref() {
+                Some(r) => r,
+                None => return f64::NAN,
+            };
+            let l = resolve_operand_streaming(
+                left_op, bar_index, cache, streaming_state, streaming_vals,
+                candles, running_candle, daily_ohlc, time_cache, pattern_cache,
+            );
+            let r = resolve_operand_streaming(
+                right_op, bar_index, cache, streaming_state, streaming_vals,
+                candles, running_candle, daily_ohlc, time_cache, pattern_cache,
+            );
+            if l.is_nan() || r.is_nan() { return f64::NAN; }
+            match operand.compound_op {
+                Some(ArithmeticOp::Add) => l + r,
+                Some(ArithmeticOp::Sub) => l - r,
+                Some(ArithmeticOp::Mul) => l * r,
+                Some(ArithmeticOp::Div) if r.abs() >= f64::EPSILON => l / r,
+                _ => f64::NAN,
             }
         }
         // Constants, BarTime, and CandlePattern are not tick-sensitive — use regular resolver
@@ -904,8 +1084,14 @@ pub fn max_lookback(strategy: &Strategy) -> usize {
         .chain(strategy.short_entry_rules.iter())
         .chain(strategy.long_exit_rules.iter())
         .chain(strategy.short_exit_rules.iter());
+    // Also include rules from groups
+    let group_rules = strategy.long_entry_groups.iter()
+        .chain(strategy.short_entry_groups.iter())
+        .chain(strategy.long_exit_groups.iter())
+        .chain(strategy.short_exit_groups.iter())
+        .flat_map(|g| g.rules.iter());
     let mut has_cross = false;
-    for rule in all_rules {
+    for rule in all_rules.chain(group_rules) {
         max = max.max(operand_lookback(&rule.left_operand));
         max = max.max(operand_lookback(&rule.right_operand));
         if matches!(rule.comparator, Comparator::CrossAbove | Comparator::CrossBelow) {
@@ -916,15 +1102,52 @@ pub fn max_lookback(strategy: &Strategy) -> usize {
     if has_cross { max + 1 } else { max }
 }
 
+/// Pre-compute `cached_hash` for every `IndicatorConfig` in a strategy.
+/// Call once before `run_backtest_inner` starts the bar loop so that the hot
+/// path can use `config.cached_hash` instead of re-hashing ~15 fields per bar.
+pub fn init_strategy_hashes(strategy: &mut Strategy) {
+    let flat_rules = strategy.long_entry_rules.iter_mut()
+        .chain(strategy.short_entry_rules.iter_mut())
+        .chain(strategy.long_exit_rules.iter_mut())
+        .chain(strategy.short_exit_rules.iter_mut());
+    let group_rules = strategy.long_entry_groups.iter_mut()
+        .chain(strategy.short_entry_groups.iter_mut())
+        .chain(strategy.long_exit_groups.iter_mut())
+        .chain(strategy.short_exit_groups.iter_mut())
+        .flat_map(|g| g.rules.iter_mut());
+    for rule in flat_rules.chain(group_rules) {
+        init_operand_hash(&mut rule.left_operand);
+        init_operand_hash(&mut rule.right_operand);
+    }
+}
+
+fn init_operand_hash(op: &mut Operand) {
+    if let Some(ref mut config) = op.indicator {
+        config.cached_hash = config.cache_key_hash();
+    }
+    if let Some(ref mut left) = op.compound_left {
+        init_operand_hash(left);
+    }
+    if let Some(ref mut right) = op.compound_right {
+        init_operand_hash(right);
+    }
+}
+
 fn operand_lookback(operand: &Operand) -> usize {
-    let base = if operand.operand_type == OperandType::Indicator {
-        if let Some(ref config) = operand.indicator {
-            indicator_lookback(config)
-        } else {
-            0
+    let base = match operand.operand_type {
+        OperandType::Indicator => {
+            if let Some(ref config) = operand.indicator {
+                indicator_lookback(config)
+            } else {
+                0
+            }
         }
-    } else {
-        0
+        OperandType::Compound => {
+            let l = operand.compound_left.as_deref().map(operand_lookback).unwrap_or(0);
+            let r = operand.compound_right.as_deref().map(operand_lookback).unwrap_or(0);
+            l.max(r)
+        }
+        _ => 0,
     };
     base + operand.offset.unwrap_or(0)
 }
@@ -1211,12 +1434,16 @@ mod tests {
                     ..Default::default()
                 },
                 output_field: None,
+                cached_hash: 0,
             }),
             price_field: None,
             constant_value: None,
             time_field: None,
             candle_pattern: None,
             offset: None,
+            compound_left: None,
+            compound_op: None,
+            compound_right: None,
         }
     }
 
@@ -1229,6 +1456,9 @@ mod tests {
             time_field: None,
             candle_pattern: None,
             offset: None,
+            compound_left: None,
+            compound_op: None,
+            compound_right: None,
         }
     }
 
@@ -1241,6 +1471,9 @@ mod tests {
             time_field: None,
             candle_pattern: None,
             offset: None,
+            compound_left: None,
+            compound_op: None,
+            compound_right: None,
         }
     }
 
@@ -1279,9 +1512,14 @@ mod tests {
             short_entry_rules: vec![],
             long_exit_rules: vec![],
             short_exit_rules: vec![],
+            long_entry_groups: vec![],
+            short_entry_groups: vec![],
+            long_exit_groups: vec![],
+            short_exit_groups: vec![],
             position_sizing: PositionSizing {
                 sizing_type: PositionSizingType::FixedLots,
                 value: 1.0,
+                decrease_factor: 0.9,
             },
             stop_loss: None,
             take_profit: None,
@@ -1370,6 +1608,9 @@ mod tests {
                 time_field: None,
                 candle_pattern: None,
                 offset: Some(1),
+                compound_left: None,
+                compound_op: None,
+                compound_right: None,
             },
             logical_operator: None,
         }];
@@ -1416,6 +1657,7 @@ mod tests {
                 candle_pattern: Some(CandlePatternType::Doji),
                 indicator: None, price_field: None, constant_value: None,
                 time_field: None, offset: None,
+                compound_left: None, compound_op: None, compound_right: None,
             },
             comparator: Comparator::Equal,
             right_operand: constant_operand(1.0),
@@ -1457,6 +1699,7 @@ mod tests {
                 candle_pattern: Some(CandlePatternType::BullishEngulfing),
                 indicator: None, price_field: None, constant_value: None,
                 time_field: None, offset: None,
+                compound_left: None, compound_op: None, compound_right: None,
             },
             comparator: Comparator::Equal,
             right_operand: constant_operand(1.0),

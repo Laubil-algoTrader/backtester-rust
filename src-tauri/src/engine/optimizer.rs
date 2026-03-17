@@ -399,7 +399,7 @@ pub fn run_grid_search(
     let start = Instant::now();
 
     // Shared indicator cache: indicators unchanged across combinations are computed once.
-    let shared_cache = Arc::new(Mutex::new(IndicatorCache::new()));
+    let shared_cache = Arc::new(IndicatorCache::new());
 
     let results: Vec<Option<OptimizationResult>> = (0..total)
         .into_par_iter()
@@ -546,7 +546,7 @@ pub fn run_genetic_algorithm(
     let all_results: Arc<Mutex<Vec<OptimizationResult>>> = Arc::new(Mutex::new(Vec::new()));
 
     // Shared indicator cache for reuse across generations / individuals
-    let shared_cache = Arc::new(Mutex::new(IndicatorCache::new()));
+    let shared_cache = Arc::new(IndicatorCache::new());
 
     // Initialize random population
     let mut population: Vec<Individual> = (0..pop_size)
@@ -1006,6 +1006,11 @@ mod tests {
             stagnation_time: String::new(),
             ulcer_index_pct: 3.5,
             return_dd_ratio: 2.5,
+            total_swap_charged: 0.0,
+            total_commission_charged: 0.0,
+            k_ratio: 0.0,
+            omega_ratio: 0.0,
+            monthly_returns: vec![],
         };
 
         assert_eq!(extract_objective(&metrics, &ObjectiveFunction::TotalProfit), 1000.0);

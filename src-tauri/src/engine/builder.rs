@@ -2723,7 +2723,7 @@ fn individual_to_saved(
     oos_candles: &[Candle],
     instrument: &InstrumentConfig,
     backtest_config: &BacktestConfig,
-    shared_cache: &Arc<Mutex<IndicatorCache>>,
+    shared_cache: &Arc<IndicatorCache>,
     cancel_flag: &AtomicBool,
 ) -> Option<BuilderSavedStrategy> {
     let metrics = ind.metrics.as_ref()?;
@@ -3085,7 +3085,7 @@ fn evaluate_individual(
     instrument: &InstrumentConfig,
     backtest_config: &BacktestConfig,
     cancel_flag: &AtomicBool,
-    shared_cache: &Arc<Mutex<IndicatorCache>>,
+    shared_cache: &Arc<IndicatorCache>,
 ) {
     // Fast pre-check: if lookback exceeds data, bar loop runs 0 iterations (guaranteed 0 trades)
     if max_lookback(&ind.strategy) >= candles.len().saturating_sub(1) {
@@ -3277,8 +3277,8 @@ pub fn run_builder(
         // entry computed in generation 1 is valid in generation 500. After the first generation
         // the cache reaches steady state: all subsequent generations serve 100% cache hits,
         // eliminating O(gens × pop × n_indicators × n_bars) recomputation.
-        let persistent_cache: Arc<Mutex<IndicatorCache>> =
-            Arc::new(Mutex::new(IndicatorCache::new()));
+        let persistent_cache: Arc<IndicatorCache> =
+            Arc::new(IndicatorCache::new());
 
         // ── Pre-warm indicator cache before gen 0 ────────────────────────────────
         {
@@ -3320,10 +3320,7 @@ pub fn run_builder(
                 );
             });
 
-            let cache_size = persistent_cache
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .len();
+            let cache_size = persistent_cache.len();
             let _ = tx.send(BuilderProgressEvent::Log(format!(
                 "Cache warm-up complete: {} indicator series pre-computed",
                 cache_size

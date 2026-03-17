@@ -163,6 +163,7 @@ pub fn build_streaming_state(
                 if key_index.contains_key(&key) {
                     continue;
                 }
+                let cache_hash_key = if config.cached_hash != 0 { config.cached_hash } else { config.cache_key_hash() };
                 let state = match config.indicator_type {
                     IndicatorType::SMA => {
                         let period = config.params.period.unwrap_or(14);
@@ -176,7 +177,7 @@ pub fn build_streaming_state(
                     | IndicatorType::LaguerreRSI => {
                         let period = config.params.period.unwrap_or(14);
                         let prev_ema = cache
-                            .get(&key)
+                            .get(&cache_hash_key)
                             .and_then(|o| o.primary.get(bar_index).copied())
                             .unwrap_or(f64::NAN);
                         IndicatorStreamState::Ema { period, prev_ema }
@@ -205,9 +206,8 @@ pub fn build_streaming_state(
                         let prev_fast_ema = extract_ema_tail(candles, fast, bar_index);
                         let prev_slow_ema = extract_ema_tail(candles, slow, bar_index);
                         let prev_signal_ema = cache
-                            .get(&key)
-                            .and_then(|o| o.secondary.as_ref())
-                            .and_then(|s| s.get(bar_index).copied())
+                            .get(&cache_hash_key)
+                            .and_then(|o| o.secondary.as_ref().and_then(|s| s.get(bar_index).copied()))
                             .unwrap_or(f64::NAN);
                         IndicatorStreamState::Macd {
                             fast_period: fast,
@@ -234,7 +234,7 @@ pub fn build_streaming_state(
                     IndicatorType::ATR | IndicatorType::TrueRange => {
                         let period = config.params.period.unwrap_or(14);
                         let prev_atr = cache
-                            .get(&key)
+                            .get(&cache_hash_key)
                             .and_then(|o| o.primary.get(bar_index).copied())
                             .unwrap_or(f64::NAN);
                         let prev_close = candles
@@ -250,16 +250,15 @@ pub fn build_streaming_state(
 
                     // All other indicators: use last completed bar value as approximation.
                     _ => {
-                        let output = cache.get(&key);
-                        let primary = output
-                            .and_then(|o| o.primary.get(bar_index).copied())
-                            .unwrap_or(f64::NAN);
-                        let secondary = output
-                            .and_then(|o| o.secondary.as_ref())
-                            .and_then(|s| s.get(bar_index).copied());
-                        let tertiary = output
-                            .and_then(|o| o.tertiary.as_ref())
-                            .and_then(|t| t.get(bar_index).copied());
+                        let output = cache.get(&cache_hash_key);
+                        let (primary, secondary, tertiary) = if let Some(ref o) = output {
+                            let p = o.primary.get(bar_index).copied().unwrap_or(f64::NAN);
+                            let s = o.secondary.as_ref().and_then(|s| s.get(bar_index).copied());
+                            let t = o.tertiary.as_ref().and_then(|t| t.get(bar_index).copied());
+                            (p, s, t)
+                        } else {
+                            (f64::NAN, None, None)
+                        };
                         IndicatorStreamState::LastValue {
                             primary,
                             secondary,
