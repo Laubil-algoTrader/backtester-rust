@@ -272,6 +272,7 @@ fn combine_oos_metrics(windows: &[WalkForwardWindowResult]) -> BacktestMetrics {
         sortino_ratio: 0.0,
         calmar_ratio: 0.0,
         max_drawdown_pct: if max_dd == f64::NEG_INFINITY { 0.0 } else { max_dd },
+        max_drawdown_abs: 0.0,
         max_drawdown_duration_bars: 0,
         max_drawdown_duration_time: String::new(),
         avg_drawdown_pct: windows
@@ -352,6 +353,7 @@ fn combine_oos_metrics(windows: &[WalkForwardWindowResult]) -> BacktestMetrics {
         monthly_returns: vec![],
         total_swap_charged: windows.iter().map(|w| w.out_of_sample_metrics.total_swap_charged).sum(),
         total_commission_charged: windows.iter().map(|w| w.out_of_sample_metrics.total_commission_charged).sum(),
+        temporal_consistency: 0.0,
     }
 }
 
@@ -365,6 +367,7 @@ fn default_metrics() -> BacktestMetrics {
         sortino_ratio: 0.0,
         calmar_ratio: 0.0,
         max_drawdown_pct: 0.0,
+        max_drawdown_abs: 0.0,
         max_drawdown_duration_bars: 0,
         max_drawdown_duration_time: String::new(),
         avg_drawdown_pct: 0.0,
@@ -405,5 +408,6 @@ fn default_metrics() -> BacktestMetrics {
         monthly_returns: vec![],
         total_swap_charged: 0.0,
         total_commission_charged: 0.0,
+        temporal_consistency: 0.0,
     }
 }

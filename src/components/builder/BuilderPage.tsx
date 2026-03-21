@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/stores/useAppStore";
@@ -14,6 +13,8 @@ import { RankingTab } from "./tabs/RankingTab";
 import { DatabanksPanel } from "./DatabanksPanel";
 import { StrategyDetailOverlay } from "./StrategyDetailOverlay";
 import { ProjectBreadcrumb } from "./ProjectBreadcrumb";
+import { SrTab } from "./tabs/SrTab";
+import { SrResultsPanel } from "./SrResultsPanel";
 import type { BuilderSavedStrategy } from "@/lib/types";
 
 type TopTab = "progress" | "fullSettings" | "results";
@@ -40,14 +41,16 @@ const SETTINGS_TABS: SettingsTab[] = [
 
 export function BuilderPage() {
   const { t } = useTranslation("builder");
-  const { builderTopTab, builderSettingsTab, setBuilderTopTab, setBuilderSettingsTab } =
-    useAppStore();
+  const {
+    builderTopTab, builderSettingsTab,
+    setBuilderTopTab, setBuilderSettingsTab,
+    builderDetailStrategy, setBuilderDetailStrategy,
+    builderMethod, setBuilderMethod,
+  } = useAppStore();
   const activeProjectTaskId = useAppStore((s) => s.activeProjectTaskId);
 
-  const [detailStrategy, setDetailStrategy] = useState<BuilderSavedStrategy | null>(null);
-
   const handleStrategyOpen = (strategy: BuilderSavedStrategy) => {
-    setDetailStrategy(strategy);
+    setBuilderDetailStrategy(strategy);
     setBuilderTopTab("results" as TopTab);
   };
 
@@ -71,6 +74,33 @@ export function BuilderPage() {
         {/* Header + top tabs */}
         <div className="flex shrink-0 items-center border-b border-border/30 bg-background px-4 py-2 gap-4">
           <span className="text-sm font-semibold text-foreground">{t("title")}</span>
+
+          {/* Method toggle */}
+          <div className="flex rounded border border-border/40 overflow-hidden text-xs">
+            <button
+              onClick={() => setBuilderMethod("genetic")}
+              className={cn(
+                "px-3 py-1.5 font-medium transition-colors",
+                builderMethod === "genetic"
+                  ? "bg-primary/10 text-primary"
+                  : "text-muted-foreground hover:text-foreground hover:bg-muted/30"
+              )}
+            >
+              Alg. Genético
+            </button>
+            <button
+              onClick={() => setBuilderMethod("sr")}
+              className={cn(
+                "px-3 py-1.5 font-medium transition-colors border-l border-border/40",
+                builderMethod === "sr"
+                  ? "bg-primary/10 text-primary"
+                  : "text-muted-foreground hover:text-foreground hover:bg-muted/30"
+              )}
+            >
+              Reg. Simbólica
+            </button>
+          </div>
+
           <div className="flex gap-1">
             {(["progress", "fullSettings", "results"] as TopTab[]).map((tab) => (
               <button
@@ -98,10 +128,12 @@ export function BuilderPage() {
           )}
 
           {builderTopTab === "results" && (
-            detailStrategy ? (
+            builderMethod === "sr" ? (
+              <SrResultsPanel />
+            ) : builderDetailStrategy ? (
               <StrategyDetailOverlay
-                saved={detailStrategy}
-                onClose={() => setDetailStrategy(null)}
+                saved={builderDetailStrategy}
+                onClose={() => setBuilderDetailStrategy(null)}
               />
             ) : (
               <div className="flex h-full items-center justify-center text-sm text-muted-foreground/40">
@@ -110,7 +142,22 @@ export function BuilderPage() {
             )
           )}
 
-          {builderTopTab === "fullSettings" && (
+          {builderTopTab === "fullSettings" && builderMethod === "sr" && (
+            <div className="flex h-full flex-col">
+              <div className="shrink-0 border-b border-border/20 px-4 py-1.5">
+                <span className="text-[10px] uppercase tracking-widest text-muted-foreground/60">
+                  Regresión Simbólica — Configuración
+                </span>
+              </div>
+              <div className="flex-1 overflow-auto">
+                <div className="mx-auto max-w-4xl">
+                  <SrTab />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {builderTopTab === "fullSettings" && builderMethod === "genetic" && (
             <div className="flex h-full flex-col">
               <div className="shrink-0 border-b border-border/20 px-4 py-1.5">
                 <span className="text-[10px] uppercase tracking-widest text-muted-foreground/60">

@@ -32,7 +32,9 @@ function ExportPageContent() {
 
   const hasRules =
     currentStrategy.long_entry_rules.length > 0 ||
-    currentStrategy.short_entry_rules.length > 0;
+    currentStrategy.short_entry_rules.length > 0 ||
+    (currentStrategy.long_entry_groups?.some((g) => g.rules.length > 0) ?? false) ||
+    (currentStrategy.short_entry_groups?.some((g) => g.rules.length > 0) ?? false);
 
   const generate = useCallback(async () => {
     if (!hasRules) {

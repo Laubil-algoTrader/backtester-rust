@@ -103,7 +103,7 @@ pub struct MonteCarloResult {
 }
 
 /// All performance metrics from a backtest.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BacktestMetrics {
     // Returns
     pub final_capital: f64,
@@ -118,6 +118,7 @@ pub struct BacktestMetrics {
 
     // Drawdown
     pub max_drawdown_pct: f64,
+    pub max_drawdown_abs: f64,
     pub max_drawdown_duration_bars: usize,
     pub max_drawdown_duration_time: String,
     pub avg_drawdown_pct: f64,
@@ -176,6 +177,12 @@ pub struct BacktestMetrics {
     pub k_ratio: f64,
     pub omega_ratio: f64,
     pub monthly_returns: Vec<MonthlyReturn>,
+
+    /// Temporal consistency: mean / (std + 1) of per-period Sharpe proxies.
+    /// Computed by splitting trades into 3 chronological thirds.
+    /// High value → strategy is profitable and stable across different time windows.
+    #[serde(default)]
+    pub temporal_consistency: f64,
 }
 
 /// Complete results of a backtest run.

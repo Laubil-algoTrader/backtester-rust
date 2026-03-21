@@ -78,6 +78,8 @@
     "enableTakeProfit": "Enable Take Profit",
     "enableTrailingStop": "Enable Trailing Stop",
     "spreadPips": "Spread (pips)",
+    "maxSpreadPips": "Max Spread (pips)",
+    "maxSpreadPipsPlaceholder": "No limit",
     "commissionType": "Commission Type",
     "fixedPerLot": "Fixed/Lot",
     "commission": "Commission",

@@ -63,6 +63,35 @@
     --chart-4: 38 92% 50%;
     --chart-5: 280 65% 55%;
   }
+
+  .olympus {
+    --background: 195 22% 7%;
+    --foreground: 30 20% 88%;
+    --card: 195 18% 11%;
+    --card-foreground: 30 20% 88%;
+    --primary: 32 62% 50%;
+    --primary-foreground: 30 25% 93%;
+    --secondary: 195 16% 15%;
+    --secondary-foreground: 30 15% 78%;
+    --muted: 195 16% 15%;
+    --muted-foreground: 195 8% 48%;
+    --accent: 32 62% 50%;
+    --accent-foreground: 30 25% 93%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 98%;
+    --success: 152 50% 40%;
+    --success-foreground: 0 0% 98%;
+    --warning: 38 80% 50%;
+    --border: 195 15% 17%;
+    --input: 195 18% 11%;
+    --ring: 32 62% 50%;
+
+    --chart-1: 152 50% 40%;
+    --chart-2: 195 60% 45%;
+    --chart-3: 0 72% 51%;
+    --chart-4: 32 62% 50%;
+    --chart-5: 280 55% 55%;
+  }
 }
 
 @layer base {
@@ -91,12 +120,14 @@ textarea,
 }
 
 /* Scrollbar — ultra thin */
-.dark ::-webkit-scrollbar {
+.dark ::-webkit-scrollbar,
+.olympus ::-webkit-scrollbar {
   width: 4px;
   height: 4px;
 }
 
-.dark ::-webkit-scrollbar-track {
+.dark ::-webkit-scrollbar-track,
+.olympus ::-webkit-scrollbar-track {
   background: transparent;
 }
 
@@ -107,6 +138,15 @@ textarea,
 
 .dark ::-webkit-scrollbar-thumb:hover {
   background: hsl(0 0% 22%);
+}
+
+.olympus ::-webkit-scrollbar-thumb {
+  background: hsl(195 15% 18%);
+  border-radius: 2px;
+}
+
+.olympus ::-webkit-scrollbar-thumb:hover {
+  background: hsl(195 12% 25%);
 }
 
 /* Hide number input spin buttons */

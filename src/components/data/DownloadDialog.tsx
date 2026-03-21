@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { Download, Search, X } from "lucide-react";
 import { TIMEZONE_OPTIONS, formatTzOffset } from "@/lib/timezones";
@@ -30,11 +30,14 @@ import type {
   DukascopyInstrument,
   TickStorageFormat,
   TickPipeline,
+  Symbol,
 } from "@/lib/types";
 
 interface DownloadDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** If set, pre-fills the dialog to resume an interrupted download. */
+  resumeSymbol?: Symbol;
 }
 
 const CATEGORIES: (DukascopyCategory | "All")[] = [
@@ -45,10 +48,11 @@ const CATEGORIES: (DukascopyCategory | "All")[] = [
   "Crypto",
 ];
 
-export function DownloadDialog({ open: isOpen, onOpenChange }: DownloadDialogProps) {
+export function DownloadDialog({ open: isOpen, onOpenChange, resumeSymbol }: DownloadDialogProps) {
   const { t } = useTranslation("data");
   const { t: tc } = useTranslation("common");
   const addSymbol = useAppStore((s) => s.addSymbol);
+  const removeSymbol = useAppStore((s) => s.removeSymbol);
   const addActiveDownload = useAppStore((s) => s.addActiveDownload);
   const removeActiveDownload = useAppStore((s) => s.removeActiveDownload);
   const activeDownloads = useAppStore((s) => s.activeDownloads);
@@ -76,6 +80,11 @@ export function DownloadDialog({ open: isOpen, onOpenChange }: DownloadDialogPro
   const [pipeline, setPipeline] = useState<TickPipeline>("direct");
   const [keepCsv, setKeepCsv] = useState(false);
 
+  // Download quality options
+  const [ignoreFlats, setIgnoreFlats] = useState(true);
+  const [retryOnEmpty, setRetryOnEmpty] = useState(true);
+  const [useCache, setUseCache] = useState(true);
+
   // Date range
   const [startDate, setStartDate] = useState("2024-01-01");
   const [endDate, setEndDate] = useState("2024-12-31");
@@ -87,6 +96,26 @@ export function DownloadDialog({ open: isOpen, onOpenChange }: DownloadDialogPro
   );
 
   const [error, setError] = useState("");
+
+  // Pre-fill state when opening dialog to resume an interrupted download
+  useEffect(() => {
+    if (!resumeSymbol?.download_params || !isOpen) return;
+    const p = resumeSymbol.download_params;
+    setSelectedInstrument(null);
+    setCustomSymbol(p.duka_symbol ?? "");
+    setCustomPointValue(p.point_value ?? 100000);
+    setSymbolName(resumeSymbol.name);
+    setModeling((p.base_timeframe as DownloadModeling) ?? "m1");
+    setStartDate(p.start_date ?? "2024-01-01");
+    setEndDate(p.end_date ?? "2024-12-31");
+    if (p.tick_storage_format) setStorageFormat(p.tick_storage_format);
+    if (p.tick_pipeline) setPipeline(p.tick_pipeline);
+    setKeepCsv(p.keep_csv ?? false);
+    setIgnoreFlats(p.ignore_flats ?? true);
+    setRetryOnEmpty(p.retry_on_empty ?? true);
+    setUseCache(p.use_cache ?? true);
+    setConfig(resumeSymbol.instrument_config);
+  }, [resumeSymbol, isOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Filter instruments
   const filtered = useMemo(() => {
@@ -162,9 +191,14 @@ export function DownloadDialog({ open: isOpen, onOpenChange }: DownloadDialogPro
       config,
       modeling === "tick" ? storageFormat : undefined,
       modeling === "tick" ? pipeline : undefined,
-      modeling === "tick" && pipeline === "via_csv" ? keepCsv : undefined
+      modeling === "tick" && pipeline === "via_csv" ? keepCsv : undefined,
+      ignoreFlats,
+      retryOnEmpty,
+      useCache
     )
       .then((symbol) => {
+        // If resuming an interrupted symbol, remove the old pending entry first
+        if (resumeSymbol) removeSymbol(resumeSymbol.id);
         addSymbol(symbol);
         removeActiveDownload(symbolName);
       })
@@ -398,6 +432,40 @@ export function DownloadDialog({ open: isOpen, onOpenChange }: DownloadDialogPro
               )}
             </div>
           )}
+
+          {/* Download quality options */}
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium">{t("downloadDialog.dataQuality")}</label>
+            <div className="space-y-1.5">
+              <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={ignoreFlats}
+                  onChange={(e) => setIgnoreFlats(e.target.checked)}
+                  className="h-3.5 w-3.5 rounded border-border accent-primary"
+                />
+                {t("downloadDialog.ignoreFlats")}
+              </label>
+              <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={retryOnEmpty}
+                  onChange={(e) => setRetryOnEmpty(e.target.checked)}
+                  className="h-3.5 w-3.5 rounded border-border accent-primary"
+                />
+                {t("downloadDialog.retryOnEmpty")}
+              </label>
+              <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={useCache}
+                  onChange={(e) => setUseCache(e.target.checked)}
+                  className="h-3.5 w-3.5 rounded border-border accent-primary"
+                />
+                {t("downloadDialog.useCache")}
+              </label>
+            </div>
+          </div>
 
           {/* Date range */}
           <div className="grid grid-cols-2 gap-3">

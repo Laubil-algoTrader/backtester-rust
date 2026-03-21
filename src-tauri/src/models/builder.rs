@@ -509,6 +509,7 @@ pub struct BuilderSavedStrategy {
     pub ret_dd_ratio: f64,
     #[serde(rename = "cagrMaxDDPct")]
     pub cagr_max_dd_pct: f64,
+    pub win_rate_pct: f64,
     pub avg_win: f64,
     pub avg_loss: f64,
     pub avg_bars_win: f64,

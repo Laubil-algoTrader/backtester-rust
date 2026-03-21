@@ -394,6 +394,21 @@ export function ConfigPanel({
           }
         />
         <div className="space-y-1">
+          <label className="text-sm text-muted-foreground">{t("config.maxSpreadPips")}</label>
+          <Input
+            type="number"
+            className="h-9 text-sm"
+            min={0}
+            step="any"
+            placeholder={t("config.maxSpreadPipsPlaceholder")}
+            value={tradingCosts.max_spread_pips ?? ""}
+            onChange={(e) => {
+              const v = e.target.value === "" ? undefined : Math.max(0, Number(e.target.value));
+              onTradingCostsChange({ ...tradingCosts, max_spread_pips: v });
+            }}
+          />
+        </div>
+        <div className="space-y-1">
           <label className="text-sm text-muted-foreground">{t("config.commissionType")}</label>
           <Select
             value={tradingCosts.commission_type}

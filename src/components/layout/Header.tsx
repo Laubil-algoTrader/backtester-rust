@@ -1,4 +1,4 @@
-import { Moon, Sun } from "lucide-react";
+import { Moon, Sun, Landmark } from "lucide-react";
 import { useAppStore } from "@/stores/useAppStore";
 import { Button } from "@/components/ui/Button";
 
@@ -11,8 +11,8 @@ const sectionTitles: Record<string, string> = {
 
 export function Header() {
   const activeSection = useAppStore((s) => s.activeSection);
-  const darkMode = useAppStore((s) => s.darkMode);
-  const toggleDarkMode = useAppStore((s) => s.toggleDarkMode);
+  const themeMode = useAppStore((s) => s.themeMode);
+  const setThemeMode = useAppStore((s) => s.setThemeMode);
   const selectedSymbolId = useAppStore((s) => s.selectedSymbolId);
   const symbols = useAppStore((s) => s.symbols);
 
@@ -40,13 +40,19 @@ export function Header() {
       <Button
         variant="ghost"
         size="icon"
-        onClick={toggleDarkMode}
+        onClick={() => {
+          const cycle = { light: "dark", dark: "olympus", olympus: "light" } as const;
+          setThemeMode(cycle[themeMode]);
+        }}
+        title={themeMode}
         className="h-7 w-7"
       >
-        {darkMode ? (
+        {themeMode === "light" ? (
           <Sun className="h-3.5 w-3.5" />
-        ) : (
+        ) : themeMode === "dark" ? (
           <Moon className="h-3.5 w-3.5" />
+        ) : (
+          <Landmark className="h-3.5 w-3.5" />
         )}
       </Button>
     </header>

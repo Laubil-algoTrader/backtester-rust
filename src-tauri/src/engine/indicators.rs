@@ -168,10 +168,11 @@ pub fn compute_indicator_with_slices(
         IndicatorType::ADX => {
             let period = require_period(&config.params)?;
             check_data_len(len, period * 2 + 1)?;
+            let (adx_line, plus_di, minus_di) = adx_full(&high, &low, &close, period);
             Ok(IndicatorOutput {
-                primary: adx(&high, &low, &close, period),
-                secondary: None,
-                tertiary: None,
+                primary: adx_line,       // buffer 0: ADX  — matches BT_ADX.mq5 buffer 0
+                secondary: Some(plus_di),  // buffer 1: +DI  — matches BT_ADX.mq5 buffer 1
+                tertiary: Some(minus_di),  // buffer 2: -DI  — matches BT_ADX.mq5 buffer 2
                 extra: None,
             })
         }
@@ -277,8 +278,11 @@ pub fn compute_indicator_with_slices(
             let period = require_period(&config.params)?;
             check_data_len(len, period)?;
             let extra = fibonacci(&high, &low, period);
-            let primary = extra.get("level_500").cloned().unwrap_or_else(|| vec![f64::NAN; len]);
-            Ok(IndicatorOutput { primary, secondary: None, tertiary: None, extra: Some(extra) })
+            // Buffer order matches BT_Fibonacci.mq5: 0=236, 1=382, 2=500, 3=618, 4=786
+            let primary   = extra.get("level_236").cloned().unwrap_or_else(|| vec![f64::NAN; len]);
+            let secondary = extra.get("level_382").cloned();
+            let tertiary  = extra.get("level_500").cloned();
+            Ok(IndicatorOutput { primary, secondary, tertiary, extra: Some(extra) })
         }
         IndicatorType::Fractal => {
             check_data_len(len, 5)?;
@@ -459,6 +463,8 @@ fn ema_on_slice(data: &[f64], period: usize) -> Vec<f64> {
     result[start + period - 1] = seed;
     for i in (start + period)..len {
         if data[i].is_nan() {
+            // Propagate previous EMA rather than leaving NaN — prevents tail corruption
+            result[i] = result[i - 1];
             continue;
         }
         result[i] = (data[i] - result[i - 1]) * multiplier + result[i - 1];
@@ -556,13 +562,35 @@ pub fn bollinger_bands(
     let mut upper = vec![f64::NAN; len];
     let mut lower = vec![f64::NAN; len];
 
-    for i in (period - 1)..len {
-        let window = &close[i + 1 - period..=i];
-        let mean = middle[i];
-        let variance = window.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / period as f64;
-        let std_dev = variance.sqrt();
-        upper[i] = mean + std_dev_mult * std_dev;
-        lower[i] = mean - std_dev_mult * std_dev;
+    if len >= period {
+        // First window: compute sq_sum from scratch
+        let first_mean = middle[period - 1];
+        let mut sq_sum = close[..period]
+            .iter()
+            .map(|&v| { let d = v - first_mean; d * d })
+            .sum::<f64>();
+        let mut std_dev = (sq_sum / period as f64).sqrt();
+        upper[period - 1] = first_mean + std_dev_mult * std_dev;
+        lower[period - 1] = first_mean - std_dev_mult * std_dev;
+
+        // Subsequent windows: update sq_sum incrementally — O(N) total
+        for i in period..len {
+            let old_v = close[i - period];
+            let new_v = close[i];
+            let old_mean = middle[i - 1];
+            let new_mean = middle[i];
+            sq_sum += (new_v - old_v) * (new_v + old_v - new_mean - old_mean);
+            // Periodic full recompute every 256 bars to prevent numerical drift
+            if (i & 0xFF) == 0 {
+                sq_sum = close[i + 1 - period..=i]
+                    .iter()
+                    .map(|&v| { let d = v - new_mean; d * d })
+                    .sum::<f64>();
+            }
+            std_dev = (sq_sum.max(0.0) / period as f64).sqrt();
+            upper[i] = new_mean + std_dev_mult * std_dev;
+            lower[i] = new_mean - std_dev_mult * std_dev;
+        }
     }
 
     (upper, middle, lower)
@@ -614,8 +642,8 @@ pub fn stochastic(
     for i in (k_period - 1)..len {
         let window_high = &high[i + 1 - k_period..=i];
         let window_low = &low[i + 1 - k_period..=i];
-        let highest = window_high.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        let lowest = window_low.iter().cloned().fold(f64::INFINITY, f64::min);
+        let highest = window_high.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let lowest = window_low.iter().copied().fold(f64::INFINITY, f64::min);
         let range = highest - lowest;
         k[i] = if range == 0.0 {
             50.0
@@ -649,15 +677,15 @@ fn sma_on_slice(data: &[f64], period: usize) -> Vec<f64> {
 
 // ── ADX ──
 
-/// Average Directional Index.
-pub fn adx(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
+/// Average Directional Index — returns (ADX, +DI, -DI).
+/// All three series have the same length as the input. Valid values start at index `period*2-1`.
+pub fn adx_full(high: &[f64], low: &[f64], close: &[f64], period: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     let len = high.len();
-    let mut result = vec![f64::NAN; len];
+    let nan_vecs = || (vec![f64::NAN; len], vec![f64::NAN; len], vec![f64::NAN; len]);
     if len < period * 2 + 1 {
-        return result;
+        return nan_vecs();
     }
 
-    // True Range
     let mut tr = vec![0.0f64; len];
     let mut plus_dm = vec![0.0f64; len];
     let mut minus_dm = vec![0.0f64; len];
@@ -667,27 +695,19 @@ pub fn adx(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> 
         let hc = (high[i] - close[i - 1]).abs();
         let lc = (low[i] - close[i - 1]).abs();
         tr[i] = hl.max(hc).max(lc);
-
         let up_move = high[i] - high[i - 1];
         let down_move = low[i - 1] - low[i];
-
-        plus_dm[i] = if up_move > down_move && up_move > 0.0 {
-            up_move
-        } else {
-            0.0
-        };
-        minus_dm[i] = if down_move > up_move && down_move > 0.0 {
-            down_move
-        } else {
-            0.0
-        };
+        plus_dm[i] = if up_move > down_move && up_move > 0.0 { up_move } else { 0.0 };
+        minus_dm[i] = if down_move > up_move && down_move > 0.0 { down_move } else { 0.0 };
     }
 
-    // Smoothed sums (Wilder's smoothing)
     let mut smooth_tr: f64 = tr[1..=period].iter().sum();
     let mut smooth_plus_dm: f64 = plus_dm[1..=period].iter().sum();
     let mut smooth_minus_dm: f64 = minus_dm[1..=period].iter().sum();
 
+    let mut adx_result = vec![f64::NAN; len];
+    let mut plus_di_result = vec![f64::NAN; len];
+    let mut minus_di_result = vec![f64::NAN; len];
     let mut dx_values = vec![f64::NAN; len];
 
     for i in period..len {
@@ -696,43 +716,32 @@ pub fn adx(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> 
             smooth_plus_dm = smooth_plus_dm - smooth_plus_dm / period as f64 + plus_dm[i];
             smooth_minus_dm = smooth_minus_dm - smooth_minus_dm / period as f64 + minus_dm[i];
         }
-
-        let plus_di = if smooth_tr == 0.0 {
-            0.0
-        } else {
-            100.0 * smooth_plus_dm / smooth_tr
-        };
-        let minus_di = if smooth_tr == 0.0 {
-            0.0
-        } else {
-            100.0 * smooth_minus_dm / smooth_tr
-        };
-
-        let di_sum = plus_di + minus_di;
-        dx_values[i] = if di_sum == 0.0 {
-            0.0
-        } else {
-            100.0 * (plus_di - minus_di).abs() / di_sum
-        };
+        let pdi = if smooth_tr == 0.0 { 0.0 } else { 100.0 * smooth_plus_dm / smooth_tr };
+        let mdi = if smooth_tr == 0.0 { 0.0 } else { 100.0 * smooth_minus_dm / smooth_tr };
+        plus_di_result[i] = pdi;
+        minus_di_result[i] = mdi;
+        let di_sum = pdi + mdi;
+        dx_values[i] = if di_sum == 0.0 { 0.0 } else { 100.0 * (pdi - mdi).abs() / di_sum };
     }
 
-    // ADX = smoothed DX over `period`
     let adx_start = period * 2 - 1;
-    if adx_start >= len {
-        return result;
-    }
-    let mut adx_val: f64 =
-        dx_values[period..=adx_start].iter().filter(|v| !v.is_nan()).sum::<f64>() / period as f64;
-    result[adx_start] = adx_val;
-
-    for i in (adx_start + 1)..len {
-        if dx_values[i].is_nan() {
-            continue;
+    if adx_start < len {
+        let mut adx_val: f64 =
+            dx_values[period..=adx_start].iter().filter(|v| !v.is_nan()).sum::<f64>() / period as f64;
+        adx_result[adx_start] = adx_val;
+        for i in (adx_start + 1)..len {
+            if dx_values[i].is_nan() { continue; }
+            adx_val = (adx_val * (period as f64 - 1.0) + dx_values[i]) / period as f64;
+            adx_result[i] = adx_val;
         }
-        adx_val = (adx_val * (period as f64 - 1.0) + dx_values[i]) / period as f64;
-        result[i] = adx_val;
     }
-    result
+
+    (adx_result, plus_di_result, minus_di_result)
+}
+
+/// Average Directional Index — returns only the ADX line.
+pub fn adx(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
+    adx_full(high, low, close, period).0
 }
 
 // ── CCI ──
@@ -781,8 +790,8 @@ pub fn williams_r(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Ve
     for i in (period - 1)..len {
         let window_high = &high[i + 1 - period..=i];
         let window_low = &low[i + 1 - period..=i];
-        let highest = window_high.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        let lowest = window_low.iter().cloned().fold(f64::INFINITY, f64::min);
+        let highest = window_high.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let lowest = window_low.iter().copied().fold(f64::INFINITY, f64::min);
         let range = highest - lowest;
         result[i] = if range == 0.0 {
             -50.0
@@ -1910,6 +1919,7 @@ mod tests {
                 ..Default::default()
             },
             output_field: None,
+            cached_hash: 0,
         };
 
         let output = compute_indicator(&config, &candles).unwrap();

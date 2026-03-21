@@ -35,6 +35,8 @@ pub struct AppState {
     pub builder_cancel_flag: Arc<AtomicBool>,
     /// Pause flag for builder operations.
     pub builder_pause_flag: Arc<AtomicBool>,
+    /// Cancellation flag for SR (Symbolic Regression) builder operations.
+    pub sr_cancel_flag: Arc<AtomicBool>,
 }
 
 /// Resolve the application data directory and ensure it exists.
@@ -93,6 +95,7 @@ pub fn run() {
         license_tier: Arc::new(Mutex::new(license::LicenseTier::Free)),
         builder_cancel_flag: Arc::new(AtomicBool::new(false)),
         builder_pause_flag: Arc::new(AtomicBool::new(false)),
+        sr_cancel_flag: Arc::new(AtomicBool::new(false)),
     };
 
     tauri::Builder::default()
@@ -130,6 +133,10 @@ pub fn run() {
             commands::start_builder,
             commands::stop_builder,
             commands::pause_builder,
+            commands::run_sr_builder,
+            commands::cancel_sr_builder,
+            commands::run_sr_backtest,
+            commands::generate_sr_code,
             commands::save_project,
             commands::load_projects,
             commands::delete_project,

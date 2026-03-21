@@ -13,7 +13,7 @@ import {
   ReferenceLine,
 } from "recharts";
 import type { EquityPoint } from "@/lib/types";
-import { GRID_COLOR, GRID_DASH, AXIS_TICK, AXIS_STROKE, TOOLTIP_STYLE, CHART_COLORS } from "@/lib/chartTheme";
+import { getChartTheme, CHART_COLORS } from "@/lib/chartTheme";
 
 interface EquityMarker {
   date: string;
@@ -44,6 +44,7 @@ function HighDot(props: Record<string, unknown>) {
 
 export function EquityCurve({ data, initialCapital, markers = [] }: EquityCurveProps) {
   const { t } = useTranslation("backtest");
+  const { GRID_COLOR, GRID_DASH, AXIS_TICK, AXIS_STROKE, TOOLTIP_STYLE } = getChartTheme();
   const [showStagnation, setShowStagnation] = useState(false);
   const [showNewHighs, setShowNewHighs] = useState(false);
 

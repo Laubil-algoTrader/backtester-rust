@@ -345,21 +345,26 @@ fn check_stop_loss(pos: &OpenPosition, ba: &BidAskOhlc) -> Option<(f64, CloseRea
     }
 }
 
-/// Check if take profit was triggered. TP is a limit order — always fills at TP level.
+/// Check if take profit was triggered. TP is a limit order.
 /// Long: checks bid_high; Short: checks ask_low.
+/// Gap-through fills at the gap open price (price improvement for the trader).
 fn check_take_profit(pos: &OpenPosition, ba: &BidAskOhlc) -> Option<(f64, CloseReason)> {
     let tp = pos.take_profit?;
     match pos.direction {
         TradeDirection::Long | TradeDirection::Both => {
             if ba.bid_high >= tp {
-                Some((tp, CloseReason::TakeProfit))
+                // Gap-through: bid opened already above TP → fill at bid_open (better for trader)
+                let fill = if ba.bid_open >= tp { ba.bid_open } else { tp };
+                Some((fill, CloseReason::TakeProfit))
             } else {
                 None
             }
         }
         TradeDirection::Short => {
             if ba.ask_low <= tp {
-                Some((tp, CloseReason::TakeProfit))
+                // Gap-through: ask opened already below TP → fill at ask_open (better for trader)
+                let fill = if ba.ask_open <= tp { ba.ask_open } else { tp };
+                Some((fill, CloseReason::TakeProfit))
             } else {
                 None
             }

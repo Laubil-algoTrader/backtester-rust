@@ -343,6 +343,7 @@ impl GrammarContext {
             commission_value: 0.0,
             slippage_pips: config.data_config.slippage_pips,
             slippage_random: false,
+            max_spread_pips: None,
         };
 
         // Trading hours from trading options
@@ -2812,6 +2813,7 @@ fn individual_to_saved(
         win_loss_ratio,
         ret_dd_ratio: metrics.return_dd_ratio,
         cagr_max_dd_pct: cagr_max_dd,
+        win_rate_pct: metrics.win_rate_pct,
         avg_win: metrics.avg_win,
         avg_loss: metrics.avg_loss,
         avg_bars_win,
@@ -3886,6 +3888,15 @@ pub fn run_builder(
                     apply_fitness_sharing(&mut island.population, sigma, config.genetic_options.fitness_sharing_alpha, config.genetic_options.niching_mode);
                 }
 
+                // Guard: replace any NaN fitness with NEG_INFINITY before sorting.
+                // NaN from edge-case metric divisions corrupts sort order via unwrap_or(Equal),
+                // potentially placing a NaN individual at index 0 (elite) and poisoning all
+                // subsequent offspring.
+                for ind in island.population.iter_mut() {
+                    if ind.fitness.is_nan() {
+                        ind.fitness = f64::NEG_INFINITY;
+                    }
+                }
                 island.population.sort_by(|a, b| {
                     b.fitness
                         .partial_cmp(&a.fitness)
@@ -4002,6 +4013,16 @@ pub fn run_builder(
                     });
 
                     total_generated.fetch_add(replace_count, Ordering::Relaxed);
+                    // Update raw-best baseline so fresh blood improvements are credited
+                    // immediately (not delayed one generation) in stagnation detection.
+                    let fresh_best = island.population[start_idx..]
+                        .iter()
+                        .filter(|i| i.fitness != f64::NEG_INFINITY)
+                        .map(|i| i.fitness)
+                        .fold(f64::NEG_INFINITY, f64::max);
+                    if fresh_best > island.best_raw_fitness {
+                        island.best_raw_fitness = fresh_best;
+                    }
                     // fingerprint_set was updated incrementally inside the fresh-blood loop.
                 }
 
@@ -4063,6 +4084,15 @@ pub fn run_builder(
                     island.stagnation_count = 0;
                     island.effective_mutation_prob = mutation_prob;
                     total_generated.fetch_add(island.population.len() - 1, Ordering::Relaxed);
+                    // Reset the stagnation baseline to the restart population's best fitness.
+                    // Without this, the island compares against the old (pre-restart) peak and
+                    // stagnates again immediately (every stagnation_generations iterations),
+                    // causing an infinite restart cycle that never converges.
+                    island.best_raw_fitness = island.population[1..]
+                        .iter()
+                        .filter(|i| i.fitness != f64::NEG_INFINITY)
+                        .map(|i| i.fitness)
+                        .fold(f64::NEG_INFINITY, f64::max);
                     // fingerprint_set updated incrementally inside the stagnation loop.
                 }
 

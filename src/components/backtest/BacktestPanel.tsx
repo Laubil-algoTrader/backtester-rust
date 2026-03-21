@@ -67,6 +67,8 @@ export function BacktestPanel() {
     setProgress,
     setBacktestResults,
     setEquityMarkers,
+    pendingBacktestRun,
+    setPendingBacktestRun,
   } = useAppStore();
 
   const [error, setError] = useState<string | null>(null);
@@ -96,6 +98,17 @@ export function BacktestPanel() {
       if (unlistenRef.current) unlistenRef.current();
     };
   }, []);
+
+  // Auto-run when navigated from builder with a pending strategy
+  useEffect(() => {
+    if (pendingBacktestRun && !isLoading) {
+      setPendingBacktestRun(false);
+      // Small delay to allow the component to settle (symbol auto-fill, etc.)
+      const t = setTimeout(() => handleRun(), 100);
+      return () => clearTimeout(t);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingBacktestRun]);
 
   const canRun =
     selectedSymbolId &&

@@ -17,6 +17,8 @@ import type {
   SavedCredentials,
   BuilderConfig,
   Project,
+  SrConfig,
+  SrStrategy,
 } from "./types";
 
 /// Upload a CSV file and create a new symbol.
@@ -167,7 +169,10 @@ export async function downloadDukascopy(
   instrumentConfig: InstrumentConfig,
   tickStorageFormat?: TickStorageFormat,
   tickPipeline?: TickPipeline,
-  keepCsv?: boolean
+  keepCsv?: boolean,
+  ignoreFlats?: boolean,
+  retryOnEmpty?: boolean,
+  useCache?: boolean
 ): Promise<Symbol> {
   return invoke<Symbol>("download_dukascopy", {
     symbolName,
@@ -180,6 +185,9 @@ export async function downloadDukascopy(
     tickStorageFormat,
     tickPipeline,
     keepCsv,
+    ignoreFlats,
+    retryOnEmpty,
+    useCache,
   });
 }
 
@@ -287,4 +295,43 @@ export async function deleteProjectFromDisk(id: string): Promise<void> {
 /// Returns null if the user cancelled the dialog.
 export async function openProjectFromPath(): Promise<Project | null> {
   return invoke<Project | null>("open_project_from_path");
+}
+
+// ── SR Builder ──
+
+/// Start the Symbolic Regression builder. Emits "sr-progress" events.
+export async function runSrBuilder(config: SrConfig): Promise<void> {
+  return invoke<void>("run_sr_builder", { config });
+}
+
+/// Cancel a running SR builder.
+export async function cancelSrBuilder(): Promise<void> {
+  return invoke<void>("cancel_sr_builder");
+}
+
+/// Run a full backtest for a single SR strategy. Returns BacktestResults.
+export async function runSrBacktest(
+  strategy: SrStrategy,
+  symbolId: string,
+  timeframe: import("./types").Timeframe,
+  startDate: string,
+  endDate: string,
+  initialCapital: number
+): Promise<import("./types").BacktestResults> {
+  return invoke("run_sr_backtest", {
+    strategy,
+    symbolId,
+    timeframe,
+    startDate,
+    endDate,
+    initialCapital,
+  });
+}
+
+/// Generate MQL5 code for an SR strategy.
+export async function generateSrCode(
+  strategy: SrStrategy,
+  name: string
+): Promise<import("./types").CodeGenerationResult> {
+  return invoke("generate_sr_code", { strategy, name });
 }

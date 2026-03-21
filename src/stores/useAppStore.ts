@@ -28,7 +28,17 @@ import type {
   IndicatorType,
   Project,
   ProjectTask,
+  SrFrontItem,
 } from "@/lib/types";
+
+/** Minimal SR run metadata stored so the Results panel can launch backtests */
+export interface SrRunMeta {
+  symbolId: string;
+  timeframe: Timeframe;
+  startDate: string;
+  endDate: string;
+  initialCapital: number;
+}
 import {
   saveProject,
   loadProjectsFromDisk,
@@ -362,8 +372,12 @@ interface AppState {
   // Builder
   builderTopTab: "progress" | "fullSettings" | "results";
   builderSettingsTab: "whatToBuild" | "geneticOptions" | "data" | "tradingOptions" | "buildingBlocks" | "moneyManagement" | "crossChecks" | "ranking";
+  builderDetailStrategy: BuilderSavedStrategy | null;
   setBuilderTopTab: (tab: "progress" | "fullSettings" | "results") => void;
   setBuilderSettingsTab: (tab: "whatToBuild" | "geneticOptions" | "data" | "tradingOptions" | "buildingBlocks" | "moneyManagement" | "crossChecks" | "ranking") => void;
+  setBuilderDetailStrategy: (strategy: BuilderSavedStrategy | null) => void;
+  pendingBacktestRun: boolean;
+  setPendingBacktestRun: (v: boolean) => void;
   builderConfig: BuilderConfig;
   setBuilderConfig: (config: BuilderConfig) => void;
   updateBuilderConfig: (partial: Partial<BuilderConfig>) => void;
@@ -408,6 +422,22 @@ interface AppState {
   openProjectTask: (projectId: string, taskId: string) => Promise<void>;
   saveActiveProjectTask: () => Promise<void>;
   closeProjectTask: () => Promise<void>;
+
+  // SR Builder
+  builderMethod: "genetic" | "sr";
+  setBuilderMethod: (m: "genetic" | "sr") => void;
+  srResults: SrFrontItem[];
+  setSrResults: (r: SrFrontItem[]) => void;
+  srRunning: boolean;
+  setSrRunning: (v: boolean) => void;
+  srProgress:
+    | { phase: "generation"; gen: number; total: number; pareto_size: number; best_sharpe: number; databank_count: number; databank_limit: number }
+    | { phase: "cmaes"; current: number; total: number }
+    | null;
+  setSrProgress: (p: AppState["srProgress"]) => void;
+  /** Config used for the last SR run — needed by "View in Backtest" */
+  srLastConfig: SrRunMeta | null;
+  setSrLastConfig: (c: SrRunMeta | null) => void;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -590,8 +620,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   // Builder
   builderTopTab: "fullSettings",
   builderSettingsTab: "whatToBuild",
+  builderDetailStrategy: null,
+  pendingBacktestRun: false,
   setBuilderTopTab: (tab) => set({ builderTopTab: tab }),
   setBuilderSettingsTab: (tab) => set({ builderSettingsTab: tab }),
+  setBuilderDetailStrategy: (strategy) => set({ builderDetailStrategy: strategy }),
+  setPendingBacktestRun: (v) => set({ pendingBacktestRun: v }),
   builderConfig: defaultBuilderConfig,
   setBuilderConfig: (config) => set((s) => ({
     builderConfig: config,
@@ -906,4 +940,16 @@ export const useAppStore = create<AppState>((set, get) => ({
       activeSection: "projects",
     });
   },
+
+  // SR Builder
+  builderMethod: "genetic",
+  setBuilderMethod: (m) => set({ builderMethod: m }),
+  srResults: [],
+  setSrResults: (r) => set({ srResults: r }),
+  srRunning: false,
+  setSrRunning: (v) => set({ srRunning: v }),
+  srProgress: null,
+  setSrProgress: (p) => set({ srProgress: p }),
+  srLastConfig: null,
+  setSrLastConfig: (c) => set({ srLastConfig: c }),
 }));

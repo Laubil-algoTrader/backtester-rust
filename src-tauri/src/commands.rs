@@ -6,13 +6,14 @@ use tauri::{AppHandle, Emitter};
 use tracing::info;
 
 use crate::data::{converter, loader, storage, validator};
-use crate::engine::{builder, executor, monte_carlo, optimizer, walk_forward};
+use crate::engine::{builder, executor, monte_carlo, optimizer, sr, walk_forward};
 use crate::engine::executor::SubBarData;
 use crate::errors::AppError;
 use crate::models::builder::BuilderConfig;
 use crate::models::config::{DataFormat, InstrumentConfig, TickPipeline, TickStorageFormat, Timeframe};
 use crate::models::project::Project;
 use crate::models::result::{BacktestMetrics, BacktestResults, MonteCarloConfig, MonteCarloResult, OosResult, OptimizationConfig, OptimizationMethod, OptimizationResult, WalkForwardConfig, WalkForwardResult};
+use crate::models::sr_result::SrConfig;
 use crate::models::strategy::{BacktestConfig, BacktestPrecision, Strategy};
 use crate::models::symbol::Symbol;
 use crate::models::trade::TradeResult;
@@ -113,6 +114,8 @@ pub async fn upload_csv(
         end_date,
         timeframe_paths,
         instrument_config,
+        status: "complete".to_string(),
+        download_params: None,
     };
 
     let db = state.db.lock().await;
@@ -973,6 +976,9 @@ pub async fn download_dukascopy(
     tick_storage_format: Option<TickStorageFormat>,
     tick_pipeline: Option<TickPipeline>,
     keep_csv: Option<bool>,
+    ignore_flats: Option<bool>,
+    retry_on_empty: Option<bool>,
+    use_cache: Option<bool>,
 ) -> Result<Symbol, AppError> {
     use crate::data::dukascopy;
 
@@ -995,6 +1001,63 @@ pub async fn download_dukascopy(
         ));
     }
 
+    if !point_value.is_finite() || point_value <= 0.0 {
+        return Err(AppError::InvalidConfig(format!(
+            "Invalid point_value: {} (must be a positive finite number)",
+            point_value
+        )));
+    }
+
+    // Build download options
+    let effective_use_cache = use_cache.unwrap_or(true);
+    let dl_opts = std::sync::Arc::new(dukascopy::DownloadOptions {
+        ignore_flats: ignore_flats.unwrap_or(true),
+        retry_on_empty: retry_on_empty.unwrap_or(true),
+        use_cache: effective_use_cache,
+        cache_dir: if effective_use_cache {
+            Some(state.data_dir.join("bi5_cache"))
+        } else {
+            None
+        },
+        ..dukascopy::DownloadOptions::default()
+    });
+
+    // Generate symbol ID early so we can insert a pending entry before downloading
+    let symbol_id = uuid::Uuid::new_v4().to_string();
+    let upload_date = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
+    // Persist a "downloading" entry so the symbol survives an unexpected shutdown
+    let download_params_json = serde_json::json!({
+        "duka_symbol": duka_symbol,
+        "point_value": point_value,
+        "start_date": start_date,
+        "end_date": end_date,
+        "base_timeframe": base_timeframe,
+        "tick_storage_format": format!("{:?}", tick_storage_format),
+        "tick_pipeline": tick_pipeline,
+        "keep_csv": keep_csv,
+        "ignore_flats": ignore_flats,
+        "retry_on_empty": retry_on_empty,
+        "use_cache": use_cache,
+    });
+    let pending_symbol = Symbol {
+        id: symbol_id.clone(),
+        name: symbol_name.clone(),
+        base_timeframe: if is_tick_mode { Timeframe::Tick } else { Timeframe::M1 },
+        upload_date: upload_date.clone(),
+        total_rows: 0,
+        start_date: start_date.clone(),
+        end_date: end_date.clone(),
+        timeframe_paths: std::collections::HashMap::new(),
+        instrument_config: instrument_config.clone(),
+        status: "downloading".to_string(),
+        download_params: Some(download_params_json),
+    };
+    {
+        let db = state.db.lock().await;
+        storage::insert_pending_symbol(&db, &pending_symbol)?;
+    }
+
     // Create per-download cancel flag
     let cancel_flag = std::sync::Arc::new(AtomicBool::new(false));
     {
@@ -1004,6 +1067,7 @@ pub async fn download_dukascopy(
 
     let data_dir = state.data_dir.clone();
     let sym_name_for_cleanup = symbol_name.clone();
+    let symbol_id_cleanup = symbol_id.clone();
     let state_inner = state.inner().download_cancel_flags.clone();
 
     // Ensure we clean up the cancel flag when done (success or error)
@@ -1037,6 +1101,7 @@ pub async fn download_dukascopy(
                         &tick_raw_dir,
                         tick_storage_format,
                         instrument_config.tz_offset_hours,
+                        dl_opts.clone(),
                         &cancel_flag,
                         move |pct, msg| {
                             let mapped = (pct as f64 * 0.92) as u8;
@@ -1059,6 +1124,7 @@ pub async fn download_dukascopy(
                             start,
                             end,
                             &csv_path,
+                            dl_opts.clone(),
                             &cancel_flag,
                             move |pct, msg| {
                                 let mapped = (pct as f64 * 0.60) as u8;
@@ -1088,7 +1154,7 @@ pub async fn download_dukascopy(
                         tick_storage_format,
                         instrument_config.tz_offset_hours,
                         move |pct, msg| {
-                            let mapped = 62 + (pct as f64 * 0.30) as u8;
+                            let mapped = (62u8).saturating_add((pct as f64 * 0.30).min(30.0) as u8);
                             emit_download_progress(&app_clone, &sym_clone, mapped, msg);
                         },
                     )?;
@@ -1119,12 +1185,13 @@ pub async fn download_dukascopy(
             // ── M1 mode: aggregate ticks to M1 directly in memory (no CSV) ──
             let app_clone = app.clone();
             let sym_clone = symbol_name.clone();
-            let df = dukascopy::download_symbol_m1_direct(
+            let df = dukascopy::download_symbol_m1_candles(
                 &duka_symbol,
                 point_value,
                 start,
                 end,
                 instrument_config.tz_offset_hours,
+                dl_opts.clone(),
                 &cancel_flag,
                 |pct, msg| {
                     let mapped = (pct as f64 * 0.85) as u8;
@@ -1143,13 +1210,11 @@ pub async fn download_dukascopy(
             (total_rows, data_start, data_end, timeframe_paths, Timeframe::M1)
         };
 
-        // Phase 3: Save to database (98-100%)
+        // Phase 3: Mark complete in database (98-100%)
         emit_download_progress(&app, &symbol_name, 98, "Saving to database...");
-        let symbol_id = uuid::Uuid::new_v4().to_string();
-        let upload_date = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
         let symbol = Symbol {
-            id: symbol_id,
+            id: symbol_id.clone(),
             name: symbol_name.clone(),
             base_timeframe: final_base_tf,
             upload_date,
@@ -1158,10 +1223,12 @@ pub async fn download_dukascopy(
             end_date: data_end,
             timeframe_paths,
             instrument_config,
+            status: "complete".to_string(),
+            download_params: None,
         };
 
         let db = state.db.lock().await;
-        storage::insert_symbol(&db, &symbol)?;
+        storage::complete_symbol(&db, &symbol)?;
 
         emit_download_progress(&app, &symbol_name, 100, "Done!");
         info!(
@@ -1176,6 +1243,13 @@ pub async fn download_dukascopy(
     {
         let mut flags = state_inner.lock().await;
         flags.remove(&sym_name_for_cleanup);
+    }
+
+    // On failure or cancellation: remove the pending DB entry so the symbol
+    // doesn't linger as "interrupted" (it was a clean failure, not a crash).
+    if result.is_err() {
+        let db = state.db.lock().await;
+        let _ = storage::delete_pending_symbol(&db, &symbol_id_cleanup);
     }
 
     result
@@ -1722,4 +1796,181 @@ pub async fn open_project_from_path(
     let json = std::fs::read_to_string(&file_path)?;
     let project = serde_json::from_str::<Project>(&json)?;
     Ok(Some(project))
+}
+
+// ── SR Builder Commands ──
+
+/// Run the Symbolic Regression builder (NSGA-II + CMA-ES).
+/// Emits `sr-progress` events with `SrProgressEvent` payloads during execution.
+/// Returns immediately; the builder runs in a background thread.
+#[tauri::command]
+pub async fn run_sr_builder(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    config: SrConfig,
+) -> Result<(), AppError> {
+    use std::sync::atomic::Ordering;
+
+    // Reset cancellation flag
+    state.sr_cancel_flag.store(false, Ordering::SeqCst);
+
+    // Load symbol + candles
+    let db = state.db.lock().await;
+    let symbol = storage::get_symbol_by_id(&db, &config.symbol_id)?;
+    drop(db);
+
+    let tf_key = config.timeframe.as_str().to_string();
+    let tf_path = symbol.timeframe_paths.get(&tf_key)
+        .ok_or_else(|| AppError::Internal(format!("No data for timeframe {tf_key}")))?;
+
+    let date_filter = loader::build_date_filter(&config.start_date, &config.end_date);
+    let mut lf = loader::scan_parquet_lazy(std::path::Path::new(tf_path))?;
+    if let Some(f) = &date_filter {
+        lf = lf.filter(f.clone());
+    }
+    let df = lf.collect()
+        .map_err(|e| AppError::Internal(format!("parquet collect: {e}")))?;
+    let candles = executor::candles_from_dataframe(&df)?;
+
+    let instrument = symbol.instrument_config.clone();
+    let cancel_flag = state.sr_cancel_flag.clone();
+    let timeframe = config.timeframe;
+
+    let app_handle = app.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let result = sr::runner::run_sr_builder(
+            config,
+            candles,
+            instrument,
+            timeframe,
+            cancel_flag,
+            move |event| {
+                let _ = app_handle.emit("sr-progress", &event);
+            },
+        );
+        if let Err(e) = result {
+            let _ = app.emit("sr-progress", serde_json::json!({ "type": "Error", "data": e.to_string() }));
+        }
+    });
+
+    Ok(())
+}
+
+/// Run a full backtest for a single SR strategy and return the complete results
+/// (trades, equity curve, drawdown curve, metrics) for display in the Backtest page.
+#[tauri::command]
+pub async fn run_sr_backtest(
+    state: tauri::State<'_, AppState>,
+    strategy: crate::models::sr_result::SrStrategy,
+    symbol_id: String,
+    timeframe: crate::models::config::Timeframe,
+    start_date: String,
+    end_date: String,
+    initial_capital: f64,
+) -> Result<BacktestResults, AppError> {
+    use crate::engine::sr::runner::{build_sr_cache_pub, build_atr_series_pub, sr_backtest_full};
+    use crate::models::strategy::{BacktestConfig, BacktestPrecision};
+
+    let db = state.db.lock().await;
+    let symbol = storage::get_symbol_by_id(&db, &symbol_id)?;
+    drop(db);
+
+    let tf_key = timeframe.as_str().to_string();
+    let tf_path = symbol.timeframe_paths.get(&tf_key)
+        .ok_or_else(|| AppError::Internal(format!("No data for timeframe {tf_key}")))?;
+
+    let date_filter = loader::build_date_filter(&start_date, &end_date);
+    let mut lf = loader::scan_parquet_lazy(std::path::Path::new(tf_path))?;
+    if let Some(f) = &date_filter {
+        lf = lf.filter(f.clone());
+    }
+    let df = lf.collect()
+        .map_err(|e| AppError::Internal(format!("parquet collect: {e}")))?;
+    let candles = executor::candles_from_dataframe(&df)?;
+    if candles.is_empty() {
+        return Err(AppError::NoDataInRange);
+    }
+
+    let instrument = symbol.instrument_config.clone();
+
+    let bt_config = BacktestConfig {
+        symbol_id: symbol_id.clone(),
+        timeframe,
+        start_date: start_date.clone(),
+        end_date: end_date.clone(),
+        initial_capital,
+        leverage: 1.0,
+        precision: BacktestPrecision::SelectedTfOnly,
+        early_stop_no_trades_pct: None,
+    };
+
+    // Build a minimal pool from the leaves used in the strategy trees
+    let pool = collect_leaves_from_strategy(&strategy);
+    let cache = build_sr_cache_pub(&pool, &candles)?;
+    let atr = build_atr_series_pub(&candles);
+    let atr_arc = std::sync::Arc::new(atr);
+
+    let result = tokio::task::spawn_blocking(move || {
+        sr_backtest_full(
+            &strategy,
+            &candles,
+            &cache,
+            &atr_arc,
+            &instrument,
+            initial_capital,
+            timeframe,
+            bt_config,
+        )
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("task join: {e}")))?;
+
+    result.ok_or_else(|| AppError::Internal("SR strategy produced no trades".into()))
+}
+
+/// Collect unique PoolLeaves from a strategy's 3 formula trees.
+fn collect_leaves_from_strategy(strategy: &crate::models::sr_result::SrStrategy) -> Vec<crate::models::sr_result::PoolLeaf> {
+    use crate::models::sr_result::{PoolLeaf, SrNode};
+    let mut leaves: Vec<PoolLeaf> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    fn walk(node: &SrNode, leaves: &mut Vec<PoolLeaf>, seen: &mut std::collections::HashSet<u64>) {
+        match node {
+            SrNode::IndicatorLeaf { config, buffer_index } => {
+                let key = config.cache_key_hash();
+                if seen.insert(key) {
+                    leaves.push(PoolLeaf { config: config.clone(), buffer_index: *buffer_index, period_min: None, period_max: None, period_step: None });
+                }
+            }
+            SrNode::BinaryOp { left, right, .. } => { walk(left, leaves, seen); walk(right, leaves, seen); }
+            SrNode::UnaryOp { child, .. } => walk(child, leaves, seen),
+            SrNode::Constant(_) => {}
+        }
+    }
+
+    walk(&strategy.entry_long, &mut leaves, &mut seen);
+    walk(&strategy.entry_short, &mut leaves, &mut seen);
+    walk(&strategy.exit, &mut leaves, &mut seen);
+    leaves
+}
+
+/// Cancel a running SR builder.
+#[tauri::command]
+pub async fn cancel_sr_builder(
+    state: tauri::State<'_, AppState>,
+) -> Result<(), AppError> {
+    state.sr_cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    info!("SR builder cancel requested");
+    Ok(())
+}
+
+/// Generate MQL5 code for an SR strategy.
+#[tauri::command]
+pub async fn generate_sr_code(
+    strategy: crate::models::sr_result::SrStrategy,
+    name: String,
+) -> Result<codegen::CodeGenerationResult, AppError> {
+    info!("Generating MQL5 code for SR strategy: {}", name);
+    codegen::generate_sr_mql5(&strategy, &name)
 }

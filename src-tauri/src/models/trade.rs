@@ -11,6 +11,7 @@ pub enum CloseReason {
     TrailingStop,
     EndOfData,
     TimeClose,
+    ExitAfterBars,
 }
 
 /// A completed trade with all its details.

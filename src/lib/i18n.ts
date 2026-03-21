@@ -9,6 +9,7 @@ import enStrategy from "../../public/locales/en/strategy.json";
 import enBacktest from "../../public/locales/en/backtest.json";
 import enOptimization from "../../public/locales/en/optimization.json";
 import enExport from "../../public/locales/en/export.json";
+import enBuilder from "../../public/locales/en/builder.json";
 
 import esCommon from "../../public/locales/es/common.json";
 import esAuth from "../../public/locales/es/auth.json";
@@ -17,6 +18,7 @@ import esStrategy from "../../public/locales/es/strategy.json";
 import esBacktest from "../../public/locales/es/backtest.json";
 import esOptimization from "../../public/locales/es/optimization.json";
 import esExport from "../../public/locales/es/export.json";
+import esBuilder from "../../public/locales/es/builder.json";
 
 i18n
   .use(LanguageDetector)
@@ -31,6 +33,7 @@ i18n
         backtest: enBacktest,
         optimization: enOptimization,
         export: enExport,
+        builder: enBuilder,
       },
       es: {
         common: esCommon,
@@ -40,11 +43,12 @@ i18n
         backtest: esBacktest,
         optimization: esOptimization,
         export: esExport,
+        builder: esBuilder,
       },
     },
     fallbackLng: "en",
     defaultNS: "common",
-    ns: ["common", "auth", "data", "strategy", "backtest", "optimization", "export"],
+    ns: ["common", "auth", "data", "strategy", "backtest", "optimization", "export", "builder"],
     interpolation: {
       escapeValue: false,
     },

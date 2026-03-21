@@ -9,7 +9,7 @@ import {
   Tooltip,
   Cell,
 } from "recharts";
-import { GRID_COLOR, GRID_DASH, AXIS_TICK, AXIS_STROKE, TOOLTIP_STYLE, CHART_COLORS } from "@/lib/chartTheme";
+import { getChartTheme, CHART_COLORS } from "@/lib/chartTheme";
 
 interface HistogramBin {
   label: string;
@@ -59,6 +59,7 @@ interface ReturnsHistogramProps {
 
 export function ReturnsHistogram({ returns }: ReturnsHistogramProps) {
   const { t } = useTranslation("backtest");
+  const { GRID_COLOR, GRID_DASH, AXIS_TICK, AXIS_STROKE, TOOLTIP_STYLE } = getChartTheme();
 
   if (returns.length === 0) return null;
 

@@ -10,7 +10,6 @@ src-tauri/target/
 data/
 
 # IDE
-.vscode/
 .idea/
 
 # OS
@@ -30,4 +29,3 @@ Thumbs.db
 *_log.txt
 build_log.txt
 check_result.txt
-PLAN.md

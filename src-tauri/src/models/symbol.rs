@@ -16,4 +16,16 @@ pub struct Symbol {
     pub end_date: String,
     pub timeframe_paths: HashMap<String, String>,
     pub instrument_config: InstrumentConfig,
+    /// "complete" | "downloading" — "downloading" means the download was started but
+    /// not finished (e.g. the app was closed mid-download).
+    #[serde(default = "default_status")]
+    pub status: String,
+    /// Parameters needed to resume an interrupted download. Only set when
+    /// `status == "downloading"`.
+    #[serde(default)]
+    pub download_params: Option<serde_json::Value>,
+}
+
+fn default_status() -> String {
+    "complete".to_string()
 }

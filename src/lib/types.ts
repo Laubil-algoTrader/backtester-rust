@@ -122,30 +122,48 @@ export const DUKASCOPY_INSTRUMENTS: DukascopyInstrument[] = [
   { name: "CAD/JPY", symbol: "CADJPY", category: "Forex", point_value: 1000, preset: "Forex JPY" },
   { name: "CHF/JPY", symbol: "CHFJPY", category: "Forex", point_value: 1000, preset: "Forex JPY" },
   { name: "NZD/JPY", symbol: "NZDJPY", category: "Forex", point_value: 1000, preset: "Forex JPY" },
-  // ── Forex Exotic ──
+  // ── Forex Exotic / EM ──
   { name: "USD/ZAR", symbol: "USDZAR", category: "Forex", point_value: 100000, preset: "Forex Major" },
   { name: "USD/MXN", symbol: "USDMXN", category: "Forex", point_value: 100000, preset: "Forex Major" },
   { name: "USD/TRY", symbol: "USDTRY", category: "Forex", point_value: 100000, preset: "Forex Major" },
   { name: "USD/SEK", symbol: "USDSEK", category: "Forex", point_value: 100000, preset: "Forex Major" },
   { name: "USD/NOK", symbol: "USDNOK", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "USD/DKK", symbol: "USDDKK", category: "Forex", point_value: 100000, preset: "Forex Major" },
   { name: "USD/SGD", symbol: "USDSGD", category: "Forex", point_value: 100000, preset: "Forex Major" },
   { name: "USD/HKD", symbol: "USDHKD", category: "Forex", point_value: 100000, preset: "Forex Major" },
   { name: "USD/PLN", symbol: "USDPLN", category: "Forex", point_value: 100000, preset: "Forex Major" },
   { name: "USD/CZK", symbol: "USDCZK", category: "Forex", point_value: 100000, preset: "Forex Major" },
-  { name: "USD/HUF", symbol: "USDHUF", category: "Forex", point_value: 1000, preset: "Forex JPY" },
+  { name: "USD/HUF", symbol: "USDHUF", category: "Forex", point_value: 1000,   preset: "Forex JPY" },
+  { name: "EUR/TRY", symbol: "EURTRY", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "EUR/ZAR", symbol: "EURZAR", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "EUR/SEK", symbol: "EURSEK", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "EUR/NOK", symbol: "EURNOK", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "EUR/PLN", symbol: "EURPLN", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "EUR/HUF", symbol: "EURHUF", category: "Forex", point_value: 1000,   preset: "Forex JPY" },
+  { name: "EUR/CZK", symbol: "EURCZK", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "EUR/DKK", symbol: "EURDKK", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "GBP/SEK", symbol: "GBPSEK", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "GBP/NOK", symbol: "GBPNOK", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "GBP/PLN", symbol: "GBPPLN", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "GBP/ZAR", symbol: "GBPZAR", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "CAD/CHF", symbol: "CADCHF", category: "Forex", point_value: 100000, preset: "Forex Major" },
+  { name: "SGD/JPY", symbol: "SGDJPY", category: "Forex", point_value: 1000,   preset: "Forex JPY" },
   // ── Indices ──
   // decimalFactor=1000 for all indices (confirmed from dukascopy-node instrument-meta-data.json)
-  { name: "S&P 500",     symbol: "USA500IDXUSD",  category: "Indices", point_value: 1000, preset: "Indices" },
-  { name: "Dow Jones 30",symbol: "USA30IDXUSD",   category: "Indices", point_value: 1000, preset: "Indices" },
-  { name: "Nasdaq 100",  symbol: "USATECHIDXUSD", category: "Indices", point_value: 1000, preset: "Indices" },
-  { name: "DAX 40",      symbol: "DEUIDXEUR",     category: "Indices", point_value: 1000, preset: "Indices" },
-  { name: "FTSE 100",    symbol: "GBRIDXGBP",     category: "Indices", point_value: 1000, preset: "Indices" },
-  { name: "Nikkei 225",  symbol: "JPNIDXJPY",     category: "Indices", point_value: 1000, preset: "Indices" },
-  { name: "CAC 40",      symbol: "FRAIDXEUR",     category: "Indices", point_value: 1000, preset: "Indices" },
-  { name: "ASX 200",     symbol: "AUSIDXAUD",     category: "Indices", point_value: 1000, preset: "Indices" },
+  { name: "S&P 500",       symbol: "USA500IDXUSD",  category: "Indices", point_value: 1000, preset: "Indices" },
+  { name: "Dow Jones 30",  symbol: "USA30IDXUSD",   category: "Indices", point_value: 1000, preset: "Indices" },
+  { name: "Nasdaq 100",    symbol: "USATECHIDXUSD", category: "Indices", point_value: 1000, preset: "Indices" },
+  { name: "DAX 40",        symbol: "DEUIDXEUR",     category: "Indices", point_value: 1000, preset: "Indices" },
+  { name: "FTSE 100",      symbol: "GBRIDXGBP",     category: "Indices", point_value: 1000, preset: "Indices" },
+  { name: "Nikkei 225",    symbol: "JPNIDXJPY",     category: "Indices", point_value: 1000, preset: "Indices" },
+  { name: "CAC 40",        symbol: "FRAIDXEUR",     category: "Indices", point_value: 1000, preset: "Indices" },
+  { name: "ASX 200",       symbol: "AUSIDXAUD",     category: "Indices", point_value: 1000, preset: "Indices" },
   // Euro Stoxx 50: Dukascopy feed uses "EUSIDXEUR" (not EABORIDXEUR)
-  { name: "Euro Stoxx 50", symbol: "EUSIDXEUR",   category: "Indices", point_value: 1000, preset: "Indices" },
-  { name: "Hang Seng",   symbol: "HKGIDXHKD",    category: "Indices", point_value: 1000, preset: "Indices" },
+  { name: "Euro Stoxx 50", symbol: "EUSIDXEUR",     category: "Indices", point_value: 1000, preset: "Indices" },
+  { name: "Hang Seng",     symbol: "HKGIDXHKD",     category: "Indices", point_value: 1000, preset: "Indices" },
+  { name: "Swiss SMI",     symbol: "CHEIDXCHF",     category: "Indices", point_value: 1000, preset: "Indices" },
+  { name: "AEX (Netherlands)", symbol: "NLDIDXEUR", category: "Indices", point_value: 1000, preset: "Indices" },
+  { name: "IBEX 35",       symbol: "ESPIDXEUR",     category: "Indices", point_value: 1000, preset: "Indices" },
   // ── Commodities ──
   // Metals: decimalFactor=1000 (3 decimal places in bi5)
   // Oils/Gas/Copper: Dukascopy uses "CMDUSD" suffix in feed URL.
@@ -161,9 +179,12 @@ export const DUKASCOPY_INSTRUMENTS: DukascopyInstrument[] = [
   // ── Crypto ──
   // decimalFactor=10 for BTC/ETH/LTC (confirmed from dukascopy-node)
   // XRP is NOT available in Dukascopy's historical feed — removed.
-  { name: "BTC/USD", symbol: "BTCUSD", category: "Crypto", point_value: 10, preset: "Crypto" },
-  { name: "ETH/USD", symbol: "ETHUSD", category: "Crypto", point_value: 10, preset: "Crypto" },
-  { name: "LTC/USD", symbol: "LTCUSD", category: "Crypto", point_value: 10, preset: "Crypto" },
+  { name: "BTC/USD", symbol: "BTCUSD", category: "Crypto", point_value: 10,  preset: "Crypto" },
+  { name: "ETH/USD", symbol: "ETHUSD", category: "Crypto", point_value: 10,  preset: "Crypto" },
+  { name: "LTC/USD", symbol: "LTCUSD", category: "Crypto", point_value: 10,  preset: "Crypto" },
+  { name: "BCH/USD", symbol: "BCHUSD", category: "Crypto", point_value: 10,  preset: "Crypto" },
+  { name: "BTC/EUR", symbol: "BTCEUR", category: "Crypto", point_value: 10,  preset: "Crypto" },
+  { name: "ETH/BTC", symbol: "ETHBTC", category: "Crypto", point_value: 100000, preset: "Crypto" },
 ];
 
 // ── Symbol ──
@@ -187,6 +208,21 @@ export function sortTimeframes(timeframes: string[]): string[] {
   );
 }
 
+/** Params stored in DB for a "downloading" symbol, used to resume after a crash/shutdown. */
+export interface DownloadResumeParams {
+  duka_symbol: string;
+  point_value: number;
+  start_date: string;
+  end_date: string;
+  base_timeframe: string; // "tick" | "m1"
+  tick_storage_format?: TickStorageFormat;
+  tick_pipeline?: TickPipeline;
+  keep_csv?: boolean;
+  ignore_flats?: boolean;
+  retry_on_empty?: boolean;
+  use_cache?: boolean;
+}
+
 export interface Symbol {
   id: string;
   name: string;
@@ -197,6 +233,10 @@ export interface Symbol {
   end_date: string;
   timeframe_paths: Partial<Record<Timeframe, string>>;
   instrument_config: InstrumentConfig;
+  /** "complete" | "downloading" */
+  status?: string;
+  /** Only present when status === "downloading" */
+  download_params?: DownloadResumeParams;
 }
 
 // ── Indicators ──
@@ -383,6 +423,7 @@ export interface TradingCosts {
   commission_value: number;
   slippage_pips: number;
   slippage_random: boolean;
+  max_spread_pips?: number;
 }
 
 // ── Strategy ──
@@ -1073,6 +1114,7 @@ export interface BuilderSavedStrategy {
   rExpectancy: number;
   annualReturnPct: number;
   maxDrawdownAbs: number;
+  winRatePct: number;
   winLossRatio: number;
   retDDRatio: number;
   cagrMaxDDPct: number;
@@ -1113,3 +1155,93 @@ export interface Project {
   createdAt: string;
   updatedAt: string;
 }
+
+// ── Symbolic Regression (SR) Types ──────────────────────────────────────────
+
+export type BinaryOpType = "Add" | "Sub" | "Mul" | "ProtectedDiv";
+export type UnaryOpType = "Sqrt" | "Abs" | "Log" | "Neg";
+
+export type SrNode =
+  | { Constant: number }
+  | { IndicatorLeaf: { config: IndicatorConfig; buffer_index: number } }
+  | { BinaryOp: { op: BinaryOpType; left: SrNode; right: SrNode } }
+  | { UnaryOp: { op: UnaryOpType; child: SrNode } };
+
+export interface PoolLeaf {
+  config: IndicatorConfig;
+  buffer_index: number;
+  /** Optional period range — if set, backend expands into multiple entries. */
+  period_min?: number;
+  period_max?: number;
+  period_step?: number;
+}
+
+export interface SrStrategy {
+  entry_long: SrNode;
+  long_threshold: number;
+  entry_short: SrNode;
+  short_threshold: number;
+  exit: SrNode;
+  stop_loss?: StopLoss;
+  take_profit?: TakeProfit;
+  trailing_stop?: TrailingStop;
+  position_sizing: PositionSizing;
+  trading_costs: TradingCosts;
+  trade_direction: TradeDirection;
+}
+
+export interface SrConfig {
+  pool: PoolLeaf[];
+  population_size: number;
+  /** Max generations safety limit. 0 = unlimited (relies on databank_limit). */
+  generations: number;
+  max_depth: number;
+  min_trades: number;
+  cmaes_top_k: number;
+  cmaes_iterations: number;
+  crossover_rate: number;
+  mutation_rate: number;
+  /** Stop Phase 1 when this many unique strategies are collected. */
+  databank_limit: number;
+  /** Max trade entries per calendar day. Omit for no limit. */
+  max_trades_per_day?: number;
+  // Backtest config
+  symbol_id: string;
+  timeframe: Timeframe;
+  start_date: string;
+  end_date: string;
+  initial_capital: number;
+  leverage: number;
+  position_sizing: PositionSizing;
+  stop_loss?: StopLoss;
+  take_profit?: TakeProfit;
+  trailing_stop?: TrailingStop;
+  trading_costs: TradingCosts;
+  trade_direction: TradeDirection;
+}
+
+export interface SrObjectives {
+  sharpe: number;
+  profit_factor: number;
+  temporal_consistency: number;
+  neg_max_drawdown: number;
+  expectancy_ratio: number;
+}
+
+export interface SrFrontItem {
+  rank: number;
+  crowding_distance: number;
+  objectives: SrObjectives;
+  metrics: BacktestMetrics;
+  formula_long: string;
+  formula_short: string;
+  formula_exit: string;
+  strategy: SrStrategy;
+}
+
+export type SrProgressEvent =
+  | { type: "Generation"; data: { gen: number; total: number; pareto_size: number; best_sharpe: number; databank_count: number; databank_limit: number } }
+  | { type: "CmaesProgress"; data: { current: number; total: number } }
+  | { type: "CmaesComplete"; data: { improved_count: number } }
+  | { type: "Done"; data: { front: SrFrontItem[] } }
+  | { type: "Error"; data: string };

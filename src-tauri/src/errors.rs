@@ -82,6 +82,13 @@ pub enum AppError {
     #[error("Too many combinations: {count} exceeds limit of {limit}")]
     TooManyCombinations { count: usize, limit: usize },
 
+    // ── Builder ──
+    #[error("Builder error: {0}")]
+    BuilderError(String),
+
+    #[error("Builder cancelled")]
+    BuilderCancelled,
+
     // ── Configuration ──
     #[error("Invalid configuration: {0}")]
     InvalidConfig(String),
@@ -129,6 +136,8 @@ impl From<&AppError> for ErrorResponse {
             AppError::TooManyCombinations { .. } => "TOO_MANY_COMBINATIONS",
             AppError::DownloadError(_) => "DOWNLOAD_ERROR",
             AppError::DownloadCancelled => "DOWNLOAD_CANCELLED",
+            AppError::BuilderError(_) => "BUILDER_ERROR",
+            AppError::BuilderCancelled => "BUILDER_CANCELLED",
             AppError::InvalidConfig(_) => "INVALID_CONFIG",
             AppError::Serialization(_) => "SERIALIZATION",
             AppError::Internal(_) => "INTERNAL",

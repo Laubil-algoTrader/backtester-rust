@@ -4,6 +4,19 @@ use crate::models::config::Timeframe;
 use crate::models::result::{BacktestMetrics, EquityPoint, MonthlyReturn};
 use crate::models::trade::TradeResult;
 
+#[inline]
+fn parse_4digits(b: &[u8], offset: usize) -> u32 {
+    (b[offset] - b'0') as u32 * 1000
+        + (b[offset + 1] - b'0') as u32 * 100
+        + (b[offset + 2] - b'0') as u32 * 10
+        + (b[offset + 3] - b'0') as u32
+}
+
+#[inline]
+fn parse_2digits(b: &[u8], offset: usize) -> u32 {
+    (b[offset] - b'0') as u32 * 10 + (b[offset + 1] - b'0') as u32
+}
+
 /// Calculate the number of bars per trading day for a given timeframe.
 /// Used for annualizing returns and risk-adjusted ratios.
 fn bars_per_day(tf: Timeframe) -> f64 {
@@ -222,6 +235,7 @@ pub fn calculate_metrics(
         0.0
     };
     let monthly_returns = compute_monthly_returns(equity_curve);
+    let temporal_consistency = calculate_temporal_consistency(trades);
 
     BacktestMetrics {
         final_capital,
@@ -232,6 +246,7 @@ pub fn calculate_metrics(
         sortino_ratio,
         calmar_ratio,
         max_drawdown_pct,
+        max_drawdown_abs: max_dd_absolute,
         max_drawdown_duration_bars: max_dd_duration_bars,
         max_drawdown_duration_time: format_bars(max_dd_duration_bars, mpb),
         avg_drawdown_pct,
@@ -276,6 +291,7 @@ pub fn calculate_metrics(
         k_ratio,
         omega_ratio,
         monthly_returns,
+        temporal_consistency,
         total_swap_charged: total_swap,
         total_commission_charged: total_commission,
     }
@@ -292,6 +308,7 @@ fn empty_metrics(initial_capital: f64) -> BacktestMetrics {
         sortino_ratio: 0.0,
         calmar_ratio: 0.0,
         max_drawdown_pct: 0.0,
+        max_drawdown_abs: 0.0,
         max_drawdown_duration_bars: 0,
         max_drawdown_duration_time: "0m".to_string(),
         avg_drawdown_pct: 0.0,
@@ -330,6 +347,7 @@ fn empty_metrics(initial_capital: f64) -> BacktestMetrics {
         k_ratio: 0.0,
         omega_ratio: 0.0,
         monthly_returns: vec![],
+        temporal_consistency: 0.0,
         total_swap_charged: 0.0,
         total_commission_charged: 0.0,
     }
@@ -384,6 +402,11 @@ fn annualize_return(total_return_pct: f64, bars: usize, bpd: f64, equity_curve: 
 }
 
 /// Calculate drawdown statistics from the equity curve.
+/// Returns (max_dd_pct, max_dd_duration_bars, avg_dd_pct).
+/// `max_dd_duration_bars` is measured peak-to-recovery (industry standard):
+/// the number of bars from the peak of the largest drawdown until equity returns
+/// to that peak level. If equity never recovers, the duration extends to the end
+/// of the data.
 fn calculate_drawdown_stats(equity_curve: &[EquityPoint]) -> (f64, usize, f64) {
     if equity_curve.is_empty() {
         return (0.0, 0, 0.0);
@@ -391,15 +414,15 @@ fn calculate_drawdown_stats(equity_curve: &[EquityPoint]) -> (f64, usize, f64) {
 
     let mut peak = equity_curve[0].equity;
     let mut max_dd_pct = 0.0f64;
-    let mut current_dd_start = 0usize;
-    let mut max_dd_duration = 0usize;
+    let mut current_dd_peak_idx = 0usize;
+    let mut max_dd_peak_idx = 0usize; // index where the max-DD peak occurred
     let mut dd_sum = 0.0f64;
     let mut dd_count = 0usize;
 
     for (i, point) in equity_curve.iter().enumerate() {
         if point.equity > peak {
             peak = point.equity;
-            current_dd_start = i;
+            current_dd_peak_idx = i;
         }
 
         let dd_pct = if peak > 0.0 {
@@ -410,7 +433,7 @@ fn calculate_drawdown_stats(equity_curve: &[EquityPoint]) -> (f64, usize, f64) {
 
         if dd_pct > max_dd_pct {
             max_dd_pct = dd_pct;
-            max_dd_duration = i - current_dd_start;
+            max_dd_peak_idx = current_dd_peak_idx;
         }
 
         if dd_pct > 0.0 {
@@ -418,6 +441,15 @@ fn calculate_drawdown_stats(equity_curve: &[EquityPoint]) -> (f64, usize, f64) {
             dd_count += 1;
         }
     }
+
+    // Peak-to-recovery: find first bar after max_dd_peak_idx where equity >= peak equity
+    let max_dd_peak_equity = equity_curve[max_dd_peak_idx].equity;
+    let recovered_idx = equity_curve[(max_dd_peak_idx + 1)..]
+        .iter()
+        .position(|p| p.equity >= max_dd_peak_equity)
+        .map(|pos| max_dd_peak_idx + 1 + pos)
+        .unwrap_or(equity_curve.len()); // never recovered — use end of data
+    let max_dd_duration = recovered_idx - max_dd_peak_idx;
 
     let avg_dd = if dd_count > 0 {
         dd_sum / dd_count as f64
@@ -458,11 +490,19 @@ fn equity_to_daily_returns(equity_curve: &[EquityPoint]) -> Option<(Vec<f64>, us
         return None;
     }
 
-    // Last equity value per calendar day (BTreeMap keeps keys in lexicographic/date order)
-    let mut by_day: BTreeMap<String, f64> = BTreeMap::new();
+    // Last equity value per calendar day (BTreeMap keeps u32 YYYYMMDD keys in order)
+    let mut by_day: BTreeMap<u32, f64> = BTreeMap::new();
     for pt in equity_curve {
-        let date: String = pt.timestamp.chars().take(10).collect();
-        by_day.insert(date, pt.equity);
+        let ts = pt.timestamp.as_bytes();
+        let date_key: u32 = if ts.len() >= 10 {
+            let y = parse_4digits(ts, 0);
+            let m = parse_2digits(ts, 5);
+            let d = parse_2digits(ts, 8);
+            y * 10000 + m * 100 + d
+        } else {
+            0
+        };
+        by_day.insert(date_key, pt.equity);
     }
 
     let daily: Vec<f64> = by_day.values().copied().collect();
@@ -496,8 +536,14 @@ fn calculate_sortino(returns: &[f64], annualization_factor: f64) -> f64 {
         return 0.0;
     }
     let mean = returns.iter().sum::<f64>() / n as f64;
-    let negative_returns: Vec<f64> = returns.iter().filter(|&&r| r < 0.0).copied().collect();
-    let neg_count = negative_returns.len();
+    let mut downside_sum = 0.0f64;
+    let mut neg_count = 0usize;
+    for &r in returns.iter() {
+        if r < 0.0 {
+            downside_sum += r * r;
+            neg_count += 1;
+        }
+    }
     if neg_count == 0 {
         return 0.0; // No downside → can't compute meaningful Sortino
     }
@@ -505,7 +551,6 @@ fn calculate_sortino(returns: &[f64], annualization_factor: f64) -> f64 {
     // This is the standard Sortino formula — negative returns contribute their squared value,
     // positive returns contribute 0. Dividing by neg_count instead of n would overstate the
     // downside risk, making the ratio appear worse than it really is.
-    let downside_sum: f64 = negative_returns.iter().map(|r| r.powi(2)).sum();
     let downside_dev = (downside_sum / n as f64).sqrt();
     if downside_dev == 0.0 {
         return 0.0;
@@ -523,53 +568,65 @@ fn calculate_consecutive(trades: &[TradeResult]) -> (usize, usize, f64, f64) {
     let mut max_losses = 0usize;
     let mut current_wins = 0usize;
     let mut current_losses = 0usize;
-    let mut win_streaks: Vec<usize> = Vec::new();
-    let mut loss_streaks: Vec<usize> = Vec::new();
+    let mut sum_win_streaks = 0usize;
+    let mut sum_loss_streaks = 0usize;
+    let mut count_win_streaks = 0usize;
+    let mut count_loss_streaks = 0usize;
 
     for trade in trades {
         if trade.pnl > 1e-9 {
             current_wins += 1;
             if current_losses > 0 {
-                loss_streaks.push(current_losses);
+                max_losses = max_losses.max(current_losses);
+                sum_loss_streaks += current_losses;
+                count_loss_streaks += 1;
                 current_losses = 0;
             }
         } else if trade.pnl < -1e-9 {
             current_losses += 1;
             if current_wins > 0 {
-                win_streaks.push(current_wins);
+                max_wins = max_wins.max(current_wins);
+                sum_win_streaks += current_wins;
+                count_win_streaks += 1;
                 current_wins = 0;
             }
         } else {
             // Breakeven trade — flush both running streaks
             if current_wins > 0 {
-                win_streaks.push(current_wins);
+                max_wins = max_wins.max(current_wins);
+                sum_win_streaks += current_wins;
+                count_win_streaks += 1;
                 current_wins = 0;
             }
             if current_losses > 0 {
-                loss_streaks.push(current_losses);
+                max_losses = max_losses.max(current_losses);
+                sum_loss_streaks += current_losses;
+                count_loss_streaks += 1;
                 current_losses = 0;
             }
         }
-        max_wins = max_wins.max(current_wins);
-        max_losses = max_losses.max(current_losses);
     }
-    // Push final streaks
+    // Flush final running streaks
     if current_wins > 0 {
-        win_streaks.push(current_wins);
+        max_wins = max_wins.max(current_wins);
+        sum_win_streaks += current_wins;
+        count_win_streaks += 1;
     }
     if current_losses > 0 {
-        loss_streaks.push(current_losses);
+        max_losses = max_losses.max(current_losses);
+        sum_loss_streaks += current_losses;
+        count_loss_streaks += 1;
     }
 
-    let avg_wins = if win_streaks.is_empty() {
-        0.0
+    let avg_wins = if count_win_streaks > 0 {
+        sum_win_streaks as f64 / count_win_streaks as f64
     } else {
-        win_streaks.iter().sum::<usize>() as f64 / win_streaks.len() as f64
+        0.0
     };
-    let avg_losses = if loss_streaks.is_empty() {
-        0.0
+    let avg_losses = if count_loss_streaks > 0 {
+        sum_loss_streaks as f64 / count_loss_streaks as f64
     } else {
-        loss_streaks.iter().sum::<usize>() as f64 / loss_streaks.len() as f64
+        0.0
     };
 
     (max_wins, max_losses, avg_wins, avg_losses)
@@ -758,6 +815,46 @@ fn compute_monthly_returns(equity_curve: &[EquityPoint]) -> Vec<MonthlyReturn> {
         .collect()
 }
 
+/// Temporal consistency: splits trades into 3 chronological thirds, computes
+/// a Sharpe proxy (mean/std × √n) for each, then returns mean/(std+1) of those
+/// three values. High → strategy is profitable and stable over time.
+fn calculate_temporal_consistency(trades: &[crate::models::trade::TradeResult]) -> f64 {
+    const N_PERIODS: usize = 3;
+    const MIN_PERIOD_TRADES: usize = 5;
+
+    if trades.len() < N_PERIODS * MIN_PERIOD_TRADES {
+        return -2.0;
+    }
+
+    let period_size = trades.len() / N_PERIODS;
+    let sharpes: Vec<f64> = (0..N_PERIODS)
+        .filter_map(|p| {
+            let start = p * period_size;
+            let end = if p == N_PERIODS - 1 { trades.len() } else { start + period_size };
+            let pnls: Vec<f64> = trades[start..end].iter().map(|t| t.pnl).collect();
+            if pnls.len() < MIN_PERIOD_TRADES {
+                return None;
+            }
+            let mean = pnls.iter().sum::<f64>() / pnls.len() as f64;
+            let variance = pnls.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / pnls.len() as f64;
+            let std = variance.sqrt();
+            if std < 1e-10 {
+                return None;
+            }
+            Some(mean / std * (pnls.len() as f64).sqrt())
+        })
+        .collect();
+
+    if sharpes.len() < 2 {
+        return sharpes.first().copied().unwrap_or(-2.0).clamp(-5.0, 5.0);
+    }
+
+    let mean = sharpes.iter().sum::<f64>() / sharpes.len() as f64;
+    let var = sharpes.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / sharpes.len() as f64;
+    let std = var.sqrt();
+    (mean / (std + 1.0)).clamp(-5.0, 5.0)
+}
+
 /// Format a number of bars to a human-readable duration, given minutes per bar.
 fn format_bars(bars: usize, minutes_per_bar: u32) -> String {
     let total_minutes = bars as u64 * minutes_per_bar as u64;
@@ -794,6 +891,7 @@ mod tests {
             duration_time: format_bars(duration_bars, 1),
             mae: 5.0,
             mfe: 10.0,
+            swap: 0.0,
         }
     }
 

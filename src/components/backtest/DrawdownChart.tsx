@@ -9,7 +9,7 @@ import {
   Tooltip,
 } from "recharts";
 import type { DrawdownPoint } from "@/lib/types";
-import { GRID_COLOR, GRID_DASH, AXIS_TICK, AXIS_STROKE, TOOLTIP_STYLE, CHART_COLORS } from "@/lib/chartTheme";
+import { getChartTheme, CHART_COLORS } from "@/lib/chartTheme";
 
 interface DrawdownChartProps {
   data: DrawdownPoint[];
@@ -21,6 +21,7 @@ function formatTimestamp(ts: string): string {
 
 export function DrawdownChart({ data }: DrawdownChartProps) {
   const { t } = useTranslation("backtest");
+  const { GRID_COLOR, GRID_DASH, AXIS_TICK, AXIS_STROKE, TOOLTIP_STYLE } = getChartTheme();
 
   if (data.length === 0) return null;
 

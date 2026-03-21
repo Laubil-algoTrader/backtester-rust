@@ -11,7 +11,7 @@ import {
   Cell,
 } from "recharts";
 import type { OptimizationResult, ParameterRange } from "@/lib/types";
-import { GRID_COLOR, GRID_DASH, AXIS_TICK, AXIS_STROKE, TOOLTIP_STYLE } from "@/lib/chartTheme";
+import { getChartTheme } from "@/lib/chartTheme";
 
 interface HeatmapChartProps {
   results: OptimizationResult[];
@@ -36,6 +36,7 @@ function interpolateColor(value: number, min: number, max: number): string {
 
 export function HeatmapChart({ results, parameterRanges }: HeatmapChartProps) {
   const { t } = useTranslation("optimization");
+  const { GRID_COLOR, GRID_DASH, AXIS_TICK, AXIS_STROKE, TOOLTIP_STYLE } = getChartTheme();
   if (parameterRanges.length !== 2 || results.length === 0) return null;
 
   const xName = parameterRanges[0].display_name;

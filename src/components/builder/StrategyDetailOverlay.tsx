@@ -270,19 +270,27 @@ function EquityChart({ data, initialCapital }: { data: number[]; initialCapital:
   );
 }
 
+function SectionTitle({ children }: { children: React.ReactNode }) {
+  return (
+    <p className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/50">
+      {children}
+    </p>
+  );
+}
+
 function ResultsPanel({ saved }: { saved: BuilderSavedStrategy }) {
   const fmt = (n: number, d = 2) =>
     n.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
   const money = (n: number) =>
     (n >= 0 ? "+" : "") + "$" + Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 0 });
 
+  const hasOos = saved.oosNetProfit !== undefined;
+
   return (
-    <div className="h-full overflow-y-auto space-y-4 p-4">
+    <div className="h-full overflow-y-auto space-y-5 p-4">
       {/* Equity curve */}
       <div className="rounded border border-border/30 bg-muted/5 p-3">
-        <p className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/50">
-          Equity Curve
-        </p>
+        <SectionTitle>Equity Curve (In-Sample)</SectionTitle>
         <EquityChart
           data={saved.miniEquityCurve}
           initialCapital={saved.miniEquityCurve.length > 0 ? saved.miniEquityCurve[0] : 10000}
@@ -291,51 +299,68 @@ function ResultsPanel({ saved }: { saved: BuilderSavedStrategy }) {
 
       {/* Performance */}
       <div>
-        <p className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/50">
-          Performance
-        </p>
-        <div className="grid grid-cols-3 gap-2">
+        <SectionTitle>Performance</SectionTitle>
+        <div className="grid grid-cols-4 gap-2">
           <MetricCard label="Net Profit"    value={money(saved.netProfit)}
             color={saved.netProfit >= 0 ? "text-emerald-400" : "text-red-400"} />
           <MetricCard label="Annual Return" value={fmt(saved.annualReturnPct) + "%"}
             color={saved.annualReturnPct >= 0 ? "text-emerald-400" : "text-red-400"} />
-          <MetricCard label="Fitness"       value={saved.fitness.toFixed(4)} color="text-primary" />
           <MetricCard label="Profit Factor" value={fmt(saved.profitFactor)}
             color={saved.profitFactor >= 1.5 ? "text-emerald-400" : saved.profitFactor < 1 ? "text-red-400" : undefined} />
-          <MetricCard label="Sharpe Ratio"  value={fmt(saved.sharpeRatio)}
-            color={saved.sharpeRatio >= 1 ? "text-emerald-400" : undefined} />
-          <MetricCard label="# Trades"      value={saved.trades.toLocaleString()} />
+          <MetricCard label="Fitness"       value={saved.fitness.toFixed(4)} color="text-primary" />
         </div>
       </div>
 
       {/* Risk */}
       <div>
-        <p className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/50">
-          Risk
-        </p>
-        <div className="grid grid-cols-3 gap-2">
+        <SectionTitle>Risk</SectionTitle>
+        <div className="grid grid-cols-4 gap-2">
+          <MetricCard label="Sharpe Ratio"  value={fmt(saved.sharpeRatio)}
+            color={saved.sharpeRatio >= 1 ? "text-emerald-400" : undefined} />
           <MetricCard label="Max Drawdown"  value={"$" + saved.maxDrawdownAbs.toLocaleString(undefined, { maximumFractionDigits: 0 })} color="text-red-400" />
           <MetricCard label="Ret/DD Ratio"  value={fmt(saved.retDDRatio)}
             color={saved.retDDRatio >= 2 ? "text-emerald-400" : undefined} />
           <MetricCard label="CAGR/MaxDD"    value={fmt(saved.cagrMaxDDPct)}
             color={saved.cagrMaxDDPct >= 1 ? "text-emerald-400" : undefined} />
-          <MetricCard label="R Expectancy"  value={fmt(saved.rExpectancy)}
-            color={saved.rExpectancy >= 0 ? "text-emerald-400" : "text-red-400"} />
-          <MetricCard label="Win/Loss Ratio" value={fmt(saved.winLossRatio)} />
         </div>
       </div>
 
       {/* Trade stats */}
       <div>
-        <p className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/50">
-          Trade Stats
-        </p>
-        <div className="grid grid-cols-3 gap-2">
-          <MetricCard label="Avg Win"       value={"$" + fmt(saved.avgWin, 0)}       color="text-emerald-400" />
-          <MetricCard label="Avg Loss"      value={"-$" + fmt(Math.abs(saved.avgLoss), 0)} color="text-red-400" />
-          <MetricCard label="Avg Bars Win"  value={fmt(saved.avgBarsWin, 1)} />
+        <SectionTitle>Trade Stats</SectionTitle>
+        <div className="grid grid-cols-4 gap-2">
+          <MetricCard label="# Trades"       value={saved.trades.toLocaleString()} />
+          <MetricCard label="Win Rate"        value={fmt(saved.winRatePct ?? 0) + "%"}
+            color={(saved.winRatePct ?? 0) >= 50 ? "text-emerald-400" : undefined} />
+          <MetricCard label="Avg Win"         value={"$" + fmt(saved.avgWin, 0)}       color="text-emerald-400" />
+          <MetricCard label="Avg Loss"        value={"-$" + fmt(Math.abs(saved.avgLoss), 0)} color="text-red-400" />
+          <MetricCard label="Win/Loss Ratio"  value={fmt(saved.winLossRatio)} />
+          <MetricCard label="R Expectancy"    value={fmt(saved.rExpectancy)}
+            color={saved.rExpectancy >= 0 ? "text-emerald-400" : "text-red-400"} />
+          <MetricCard label="Avg Bars Win"    value={fmt(saved.avgBarsWin, 1)} />
         </div>
       </div>
+
+      {/* OOS section */}
+      {hasOos && (
+        <div>
+          <SectionTitle>Out-of-Sample Validation</SectionTitle>
+          <div className="rounded border border-primary/20 bg-primary/5 p-3 space-y-2">
+            <div className="grid grid-cols-4 gap-2">
+              <MetricCard label="OOS Net Profit"    value={money(saved.oosNetProfit!)}
+                color={saved.oosNetProfit! >= 0 ? "text-emerald-400" : "text-red-400"} />
+              <MetricCard label="OOS Trades"        value={(saved.oosTrades ?? 0).toLocaleString()} />
+              <MetricCard label="OOS Profit Factor" value={fmt(saved.oosProfitFactor ?? 0)}
+                color={(saved.oosProfitFactor ?? 0) >= 1.5 ? "text-emerald-400" : (saved.oosProfitFactor ?? 0) < 1 ? "text-red-400" : undefined} />
+              <MetricCard label="OOS Sharpe"        value={fmt(saved.oosSharpeRatio ?? 0)}
+                color={(saved.oosSharpeRatio ?? 0) >= 1 ? "text-emerald-400" : undefined} />
+              <MetricCard label="OOS Win Rate"      value={fmt(saved.oosWinRatePct ?? 0) + "%"}
+                color={(saved.oosWinRatePct ?? 0) >= 50 ? "text-emerald-400" : undefined} />
+              <MetricCard label="OOS Max DD"        value={"$" + (saved.oosMaxDrawdownAbs ?? 0).toLocaleString(undefined, { maximumFractionDigits: 0 })} color="text-red-400" />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -350,7 +375,7 @@ interface StrategyDetailOverlayProps {
 }
 
 export function StrategyDetailOverlay({ saved, onClose }: StrategyDetailOverlayProps) {
-  const { setCurrentStrategy, setActiveSection } = useAppStore();
+  const { setCurrentStrategy, setActiveSection, setPendingBacktestRun } = useAppStore();
   const [activeTab, setActiveTab] = useState<DetailTab>("results");
 
   const strategy = useMemo<Strategy | null>(() => {
@@ -367,7 +392,11 @@ export function StrategyDetailOverlay({ saved, onClose }: StrategyDetailOverlayP
   };
 
   const handleSendToBacktest = () => {
-    if (strategy) { setCurrentStrategy(strategy); setActiveSection("backtest"); }
+    if (strategy) {
+      setCurrentStrategy(strategy);
+      setPendingBacktestRun(true);
+      setActiveSection("backtest");
+    }
   };
 
   const TABS: { id: DetailTab; label: string; icon: React.ReactNode }[] = [

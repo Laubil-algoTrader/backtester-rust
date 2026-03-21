@@ -378,8 +378,11 @@ fn run_backtest_inner(
                 });
             let under_daily_limit = strategy.max_daily_trades
                 .map_or(true, |max| daily_trade_count < max as usize);
+            // Max spread filter (bar-mode: fixed spread configured by user)
+            let within_spread = strategy.trading_costs.max_spread_pips
+                .map_or(true, |max_sp| strategy.trading_costs.spread_pips <= max_sp);
 
-            if within_hours && under_daily_limit {
+            if within_hours && under_daily_limit && within_spread {
                 let mut entry_dir: Option<TradeDirection> = None;
 
                 let long_entry_signal = if !strategy.long_entry_groups.is_empty() {
@@ -572,7 +575,12 @@ fn run_backtest_inner(
                         let under_daily_limit = strategy
                             .max_daily_trades
                             .map_or(true, |max| daily_trade_count < max as usize);
-                        if !within_hours || !under_daily_limit {
+                        // Max spread filter — use real bid-ask spread from tick data
+                        let within_spread = strategy.trading_costs.max_spread_pips.map_or(
+                            true,
+                            |max_sp| (tick_ask - tick_bid) / instrument.pip_size <= max_sp,
+                        );
+                        if !within_hours || !under_daily_limit || !within_spread {
                             continue 'tick_entry;
                         }
 
@@ -1581,7 +1589,8 @@ pub fn filter_candles_by_date(
 
 /// Load TickColumns from flat binary tick files (`tick_raw_YYYY.bin`).
 ///
-/// Binary format: `i64_le timestamp_µs (8B) + f64_le bid (8B) + f64_le ask (8B)` = 24 bytes/tick.
+/// Binary format: `i64_le timestamp_µs (8B) + f64_le bid (8B) + f64_le ask (8B) + f64_le volume (8B)` = 32 bytes/tick.
+/// The volume field is present in the file but not loaded into TickColumns (not needed for SL/TP processing).
 /// Files are sorted chronologically and filtered by year from `start_date`/`end_date`.
 /// Date filtering is applied at the record level for precise range slicing.
 pub fn tick_columns_from_binary_dir(
@@ -1652,18 +1661,19 @@ pub fn tick_columns_from_binary_dir(
         parse_datetime_to_micros(&format!("{} 23:59:59.999999", &end_date[..10.min(end_date.len())]))
     };
 
-    // Estimate capacity: each file is ~24 bytes/tick
+    // Estimate capacity: each file is ~32 bytes/tick
     let total_bytes: u64 = bin_files.iter()
         .filter_map(|p| std::fs::metadata(p).ok())
         .map(|m| m.len())
         .sum();
-    let capacity = ((total_bytes / 24) as usize).min(500_000_000);
+    let capacity = ((total_bytes / 32) as usize).min(500_000_000);
 
     let mut timestamps = Vec::with_capacity(capacity);
     let mut bids = Vec::with_capacity(capacity);
     let mut asks = Vec::with_capacity(capacity);
 
-    let mut chunk = [0u8; 24];
+    // 32 bytes: i64(ts) + f64(bid) + f64(ask) + f64(volume)
+    let mut chunk = [0u8; 32];
 
     for path in &bin_files {
         let file = std::fs::File::open(path)
@@ -1686,6 +1696,7 @@ pub fn tick_columns_from_binary_dir(
 
             let bid = f64::from_le_bytes(chunk[8..16].try_into().unwrap());
             let ask = f64::from_le_bytes(chunk[16..24].try_into().unwrap());
+            // chunk[24..32] = volume — stored in file but not needed for SL/TP processing
 
             timestamps.push(ts);
             bids.push(bid);
@@ -1696,7 +1707,7 @@ pub fn tick_columns_from_binary_dir(
     info!(
         "Loaded {} ticks from binary (SoA, ~{}MB)",
         timestamps.len(),
-        (timestamps.len() * 24) / (1024 * 1024)
+        (timestamps.len() * 32) / (1024 * 1024)
     );
 
     Ok(TickColumns { timestamps, bids, asks })

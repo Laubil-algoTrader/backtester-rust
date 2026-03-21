@@ -40,10 +40,10 @@ pub fn generate_mql5(strategy: &Strategy) -> Result<CodeGenerationResult, AppErr
     mql5_on_init(&mut out, &indicators);
     mql5_on_deinit(&mut out, &indicators);
     mql5_on_tick(&mut out, strategy);
-    mql5_check_rules_fn(&mut out, &strategy.long_entry_rules, "CheckLongEntry", &indicators);
-    mql5_check_rules_fn(&mut out, &strategy.short_entry_rules, "CheckShortEntry", &indicators);
-    mql5_check_rules_fn(&mut out, &strategy.long_exit_rules, "CheckLongExit", &indicators);
-    mql5_check_rules_fn(&mut out, &strategy.short_exit_rules, "CheckShortExit", &indicators);
+    mql5_check_rules_fn(&mut out, &strategy.long_entry_rules, &strategy.long_entry_groups, "CheckLongEntry", &indicators);
+    mql5_check_rules_fn(&mut out, &strategy.short_entry_rules, &strategy.short_entry_groups, "CheckShortEntry", &indicators);
+    mql5_check_rules_fn(&mut out, &strategy.long_exit_rules, &strategy.long_exit_groups, "CheckLongExit", &indicators);
+    mql5_check_rules_fn(&mut out, &strategy.short_exit_rules, &strategy.short_exit_groups, "CheckShortExit", &indicators);
     mql5_open_position(&mut out, "Long", "ORDER_TYPE_BUY", "SYMBOL_ASK");
     mql5_open_position(&mut out, "Short", "ORDER_TYPE_SELL", "SYMBOL_BID");
     mql5_close_position(&mut out);
@@ -117,12 +117,19 @@ fn collect_unique_indicators(strategy: &Strategy) -> Vec<UniqueIndicator> {
     let mut seen = HashSet::new();
     let mut result = Vec::new();
 
-    let all_rules = strategy.long_entry_rules.iter()
+    // Flat rules + all rules nested inside rule groups
+    let flat_rules = strategy.long_entry_rules.iter()
         .chain(&strategy.short_entry_rules)
         .chain(&strategy.long_exit_rules)
         .chain(&strategy.short_exit_rules);
 
-    for rule in all_rules {
+    let group_rules = strategy.long_entry_groups.iter()
+        .chain(&strategy.short_entry_groups)
+        .chain(&strategy.long_exit_groups)
+        .chain(&strategy.short_exit_groups)
+        .flat_map(|g| g.rules.iter());
+
+    for rule in flat_rules.chain(group_rules) {
         for operand in [&rule.left_operand, &rule.right_operand] {
             if operand.operand_type == OperandType::Indicator {
                 if let Some(ind) = &operand.indicator {
@@ -233,6 +240,17 @@ fn indicator_var_name(ind: &IndicatorConfig) -> String {
     };
 
     let mut s = String::from(name);
+
+    // These indicators have no parameters in their MQL5 implementation — don't
+    // append any suffix so duplicates are deduplicated and no phantom Inp_* vars are needed.
+    let no_params = matches!(ind.indicator_type,
+        IndicatorType::BarRange | IndicatorType::TrueRange |
+        IndicatorType::AwesomeOscillator | IndicatorType::VWAP |
+        IndicatorType::Fractal | IndicatorType::HeikenAshi |
+        IndicatorType::Pivots
+    );
+    if no_params { return s; }
+
     if let Some(p) = ind.params.period { write!(s, "_{}", p).ok(); }
     if let Some(p) = ind.params.fast_period { write!(s, "_f{}", p).ok(); }
     if let Some(p) = ind.params.slow_period { write!(s, "_s{}", p).ok(); }
@@ -372,6 +390,11 @@ fn pine_output_suffix(ind: &IndicatorConfig) -> &str {
             "s2" => "_s2",
             "s3" => "_s3",
             _ => "_pp",
+        },
+        IndicatorType::ADX => match field {
+            "+DI" | "plus_di" => "_pdi",
+            "-DI" | "minus_di" => "_mdi",
+            _ => "",
         },
         _ => "",
     }
@@ -620,6 +643,12 @@ fn mql5_on_init(out: &mut String, indicators: &[UniqueIndicator]) {
             IndicatorType::AwesomeOscillator => format!(
                 "iCustom(_Symbol, PERIOD_CURRENT, \"BT_AwesomeOscillator\")"
             ),
+            IndicatorType::BarRange => format!(
+                "iCustom(_Symbol, PERIOD_CURRENT, \"BT_BarRange\")"
+            ),
+            IndicatorType::TrueRange => format!(
+                "iCustom(_Symbol, PERIOD_CURRENT, \"BT_TrueRange\")"
+            ),
             IndicatorType::Momentum => format!(
                 "iCustom(_Symbol, PERIOD_CURRENT, \"BT_Momentum\", Inp_{}_period)",
                 ind.var_name
@@ -675,6 +704,11 @@ fn mql5_on_deinit(out: &mut String, indicators: &[UniqueIndicator]) {
     }
     writeln!(out, "}}").ok();
     writeln!(out).ok();
+}
+
+/// Returns true if a rule set has any rules, whether in flat list or groups.
+fn has_rules(rules: &[Rule], groups: &[RuleGroup]) -> bool {
+    !rules.is_empty() || groups.iter().any(|g| !g.rules.is_empty())
 }
 
 fn mql5_on_tick(out: &mut String, strategy: &Strategy) {
@@ -751,20 +785,21 @@ fn mql5_on_tick(out: &mut String, strategy: &Strategy) {
     let can_long = strategy.trade_direction != TradeDirection::Short;
     let can_short = strategy.trade_direction != TradeDirection::Long;
 
-    if can_long && !strategy.long_entry_rules.is_empty() {
+    let has_long_entry  = has_rules(&strategy.long_entry_rules,  &strategy.long_entry_groups);
+    let has_short_entry = has_rules(&strategy.short_entry_rules, &strategy.short_entry_groups);
+    let has_long_exit   = has_rules(&strategy.long_exit_rules,   &strategy.long_exit_groups);
+    let has_short_exit  = has_rules(&strategy.short_exit_rules,  &strategy.short_exit_groups);
+
+    if can_long && has_long_entry {
         writeln!(out, "      {}if(CheckLongEntry())", guard).ok();
         writeln!(out, "         OpenLong();").ok();
     } else if can_long {
         writeln!(out, "      // WARNING: No long entry rules defined").ok();
     }
 
-    if can_short && !strategy.short_entry_rules.is_empty() {
-        let kw = if can_long && !strategy.long_entry_rules.is_empty() { "else if" } else { "if" };
+    if can_short && has_short_entry {
+        let kw = if can_long && has_long_entry { "else if" } else { "if" };
         writeln!(out, "      {}{}(CheckShortEntry())", if guard.is_empty() { "" } else { "else " }, kw).ok();
-        // Fix: when there's a guard, we need it on the else if too
-        if !guard.is_empty() && can_long && !strategy.long_entry_rules.is_empty() {
-            // Already guarded by the outer if
-        }
         writeln!(out, "         OpenShort();").ok();
     } else if can_short {
         writeln!(out, "      // WARNING: No short entry rules defined").ok();
@@ -777,14 +812,14 @@ fn mql5_on_tick(out: &mut String, strategy: &Strategy) {
     writeln!(out, "   {{").ok();
     writeln!(out, "      long posType = PositionGetInteger(POSITION_TYPE);").ok();
     if can_long {
-        if !strategy.long_exit_rules.is_empty() {
+        if has_long_exit {
             writeln!(out, "      if(posType == POSITION_TYPE_BUY && CheckLongExit())").ok();
             writeln!(out, "         ClosePosition();").ok();
         }
     }
     if can_short {
-        let kw = if can_long && !strategy.long_exit_rules.is_empty() { "else if" } else { "if" };
-        if !strategy.short_exit_rules.is_empty() {
+        let kw = if can_long && has_long_exit { "else if" } else { "if" };
+        if has_short_exit {
             writeln!(out, "      {}(posType == POSITION_TYPE_SELL && CheckShortExit())", kw).ok();
             writeln!(out, "         ClosePosition();").ok();
         }
@@ -797,26 +832,40 @@ fn mql5_on_tick(out: &mut String, strategy: &Strategy) {
     writeln!(out).ok();
 }
 
-fn mql5_check_rules_fn(out: &mut String, rules: &[Rule], fn_name: &str, indicators: &[UniqueIndicator]) {
-    writeln!(out, "//+------------------------------------------------------------------+").ok();
-    writeln!(out, "bool {}()", fn_name).ok();
-    writeln!(out, "{{").ok();
+/// Flatten all rules from rule groups into a Vec<Rule> (for buffer collection).
+fn all_rules_from_groups(groups: &[RuleGroup]) -> Vec<Rule> {
+    groups.iter().flat_map(|g| g.rules.iter().cloned()).collect()
+}
 
-    if rules.is_empty() {
-        writeln!(out, "   // WARNING: No rules defined — always returns false").ok();
-        writeln!(out, "   return false;").ok();
-        writeln!(out, "}}").ok();
-        writeln!(out).ok();
-        return;
+/// Emit one rule expression (shared between flat and group paths).
+fn mql5_rule_expr(rule: &Rule, indicators: &[UniqueIndicator]) -> String {
+    let left_curr = mql5_operand_expr(&rule.left_operand, 0, indicators);
+    let right_curr = mql5_operand_expr(&rule.right_operand, 0, indicators);
+    match rule.comparator {
+        Comparator::GreaterThan   => format!("{} > {}",  left_curr, right_curr),
+        Comparator::LessThan      => format!("{} < {}",  left_curr, right_curr),
+        Comparator::GreaterOrEqual => format!("{} >= {}", left_curr, right_curr),
+        Comparator::LessOrEqual   => format!("{} <= {}", left_curr, right_curr),
+        Comparator::Equal         => format!("{} == {}", left_curr, right_curr),
+        Comparator::CrossAbove => {
+            let lp = mql5_operand_expr(&rule.left_operand,  1, indicators);
+            let rp = mql5_operand_expr(&rule.right_operand, 1, indicators);
+            format!("({} <= {} && {} > {})", lp, rp, left_curr, right_curr)
+        }
+        Comparator::CrossBelow => {
+            let lp = mql5_operand_expr(&rule.left_operand,  1, indicators);
+            let rp = mql5_operand_expr(&rule.right_operand, 1, indicators);
+            format!("({} >= {} && {} < {})", lp, rp, left_curr, right_curr)
+        }
     }
+}
 
-    // Declare and copy buffers for needed indicators
+/// Emit the CopyBuffer declarations for a slice of rules.
+fn mql5_emit_buffers(out: &mut String, rules: &[Rule], indicators: &[UniqueIndicator]) {
     let needed = collect_indicators_from_rules(rules);
     for ind_key in &needed {
         if let Some(ind) = indicators.iter().find(|i| i.config.cache_key() == *ind_key) {
-            // Need to determine which buffers are used
-            let buffers_used = collect_buffers_used(rules, ind);
-            for buf_idx in buffers_used {
+            for buf_idx in collect_buffers_used(rules, ind) {
                 let suffix = buffer_suffix(ind.config.indicator_type, buf_idx);
                 writeln!(out, "   double {}{}[];", ind.var_name, suffix).ok();
                 writeln!(out, "   ArraySetAsSeries({}{}, true);", ind.var_name, suffix).ok();
@@ -825,43 +874,79 @@ fn mql5_check_rules_fn(out: &mut String, rules: &[Rule], fn_name: &str, indicato
             }
         }
     }
+}
+
+fn mql5_check_rules_fn(out: &mut String, rules: &[Rule], groups: &[RuleGroup], fn_name: &str, indicators: &[UniqueIndicator]) {
+    writeln!(out, "//+------------------------------------------------------------------+").ok();
+    writeln!(out, "bool {}()", fn_name).ok();
+    writeln!(out, "{{").ok();
+
+    // ── Groups path: when non-empty, groups take precedence over flat rules ──
+    if !groups.is_empty() {
+        let all_rules = all_rules_from_groups(groups);
+
+        if all_rules.is_empty() {
+            writeln!(out, "   // WARNING: No rules defined — always returns false").ok();
+            writeln!(out, "   return false;").ok();
+            writeln!(out, "}}").ok();
+            writeln!(out).ok();
+            return;
+        }
+
+        mql5_emit_buffers(out, &all_rules, indicators);
+        writeln!(out).ok();
+
+        // Evaluate each non-empty group
+        let non_empty: Vec<&RuleGroup> = groups.iter().filter(|g| !g.rules.is_empty()).collect();
+        for (gi, group) in non_empty.iter().enumerate() {
+            let gn = gi + 1;
+            for (ri, rule) in group.rules.iter().enumerate() {
+                writeln!(out, "   bool g{}r{} = {};", gn, ri + 1, mql5_rule_expr(rule, indicators)).ok();
+            }
+            let int_op = if group.internal == LogicalOperator::Or { "||" } else { "&&" };
+            let mut gexpr = format!("g{}r1", gn);
+            for i in 1..group.rules.len() {
+                write!(gexpr, " {} g{}r{}", int_op, gn, i + 1).ok();
+            }
+            writeln!(out, "   bool group{} = ({});", gn, gexpr).ok();
+            writeln!(out).ok();
+        }
+
+        // Combine groups
+        let mut combined = "group1".to_string();
+        for i in 1..non_empty.len() {
+            let join_op = match non_empty[i - 1].join {
+                Some(LogicalOperator::Or) => "||",
+                _ => "&&",
+            };
+            write!(combined, " {} group{}", join_op, i + 1).ok();
+        }
+        writeln!(out, "   return {};", combined).ok();
+        writeln!(out, "}}").ok();
+        writeln!(out).ok();
+        return;
+    }
+
+    // ── Flat rules path ──
+    if rules.is_empty() {
+        writeln!(out, "   // WARNING: No rules defined — always returns false").ok();
+        writeln!(out, "   return false;").ok();
+        writeln!(out, "}}").ok();
+        writeln!(out).ok();
+        return;
+    }
+
+    mql5_emit_buffers(out, rules, indicators);
     writeln!(out).ok();
 
-    // Build rule expressions
     for (i, rule) in rules.iter().enumerate() {
-        let left_curr = mql5_operand_expr(&rule.left_operand, 0, indicators);
-        let right_curr = mql5_operand_expr(&rule.right_operand, 0, indicators);
-
-        let expr = match rule.comparator {
-            Comparator::GreaterThan => format!("{} > {}", left_curr, right_curr),
-            Comparator::LessThan => format!("{} < {}", left_curr, right_curr),
-            Comparator::GreaterOrEqual => format!("{} >= {}", left_curr, right_curr),
-            Comparator::LessOrEqual => format!("{} <= {}", left_curr, right_curr),
-            Comparator::Equal => format!("{} == {}", left_curr, right_curr),
-            Comparator::CrossAbove => {
-                let left_prev = mql5_operand_expr(&rule.left_operand, 1, indicators);
-                let right_prev = mql5_operand_expr(&rule.right_operand, 1, indicators);
-                format!("({} <= {} && {} > {})", left_prev, right_prev, left_curr, right_curr)
-            }
-            Comparator::CrossBelow => {
-                let left_prev = mql5_operand_expr(&rule.left_operand, 1, indicators);
-                let right_prev = mql5_operand_expr(&rule.right_operand, 1, indicators);
-                format!("({} >= {} && {} < {})", left_prev, right_prev, left_curr, right_curr)
-            }
-        };
-
-        writeln!(out, "   bool rule{} = {};", i + 1, expr).ok();
+        writeln!(out, "   bool rule{} = {};", i + 1, mql5_rule_expr(rule, indicators)).ok();
     }
     writeln!(out).ok();
 
-    // Combine with logical operators
     let mut combined = "rule1".to_string();
     for (i, _rule) in rules.iter().enumerate().skip(1) {
-        let op = if let Some(LogicalOperator::Or) = rules[i - 1].logical_operator {
-            "||"
-        } else {
-            "&&"
-        };
+        let op = if let Some(LogicalOperator::Or) = rules[i - 1].logical_operator { "||" } else { "&&" };
         write!(combined, " {} rule{}", op, i + 1).ok();
     }
 
@@ -1056,60 +1141,70 @@ fn mql5_lot_size(out: &mut String, strategy: &Strategy) {
     writeln!(out, "//+------------------------------------------------------------------+").ok();
     writeln!(out, "double CalculateLotSize(double price, double sl)").ok();
     writeln!(out, "{{").ok();
+    // Shared normalization helper emitted into every branch
+    writeln!(out, "   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);").ok();
+    writeln!(out, "   double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);").ok();
+    writeln!(out, "   double step   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);").ok();
+    writeln!(out, "   if(step <= 0) step = 0.01;").ok();
+    writeln!(out).ok();
 
     match strategy.position_sizing.sizing_type {
         PositionSizingType::FixedLots => {
-            writeln!(out, "   return InpLotSize;").ok();
+            writeln!(out, "   double lots = InpLotSize;").ok();
         }
         PositionSizingType::FixedAmount => {
             writeln!(out, "   // Fixed Amount: risk exactly $X per trade based on SL distance").ok();
             writeln!(out, "   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);").ok();
-            writeln!(out, "   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);").ok();
-            writeln!(out, "   if(sl == 0 || tickValue == 0 || tickSize == 0) return SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);").ok();
-            writeln!(out, "   double slDistance = MathAbs(price - sl);").ok();
+            writeln!(out, "   double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);").ok();
+            writeln!(out, "   if(sl == 0 || tickValue <= 0 || tickSize <= 0) return minLot;").ok();
+            writeln!(out, "   double slDistance    = MathAbs(price - sl);").ok();
             writeln!(out, "   double slMoneyPerLot = (slDistance / tickSize) * tickValue;").ok();
+            writeln!(out, "   if(slMoneyPerLot <= 0) return minLot;").ok();
             writeln!(out, "   double lots = InpFixedAmount / slMoneyPerLot;").ok();
-            writeln!(out, "   return NormalizeDouble(MathMax(lots, SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN)), 2);").ok();
         }
         PositionSizingType::PercentEquity => {
             writeln!(out, "   // Percent Equity: risk equity*X% per trade based on SL distance").ok();
-            writeln!(out, "   double equity = AccountInfoDouble(ACCOUNT_EQUITY);").ok();
+            writeln!(out, "   double equity    = AccountInfoDouble(ACCOUNT_EQUITY);").ok();
             writeln!(out, "   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);").ok();
-            writeln!(out, "   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);").ok();
-            writeln!(out, "   if(sl == 0 || tickValue == 0 || tickSize == 0) return SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);").ok();
-            writeln!(out, "   double riskAmount = equity * InpRiskPct / 100.0;").ok();
-            writeln!(out, "   double slDistance = MathAbs(price - sl);").ok();
+            writeln!(out, "   double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);").ok();
+            writeln!(out, "   if(sl == 0 || tickValue <= 0 || tickSize <= 0) return minLot;").ok();
+            writeln!(out, "   double riskAmount    = equity * InpRiskPct / 100.0;").ok();
+            writeln!(out, "   double slDistance    = MathAbs(price - sl);").ok();
             writeln!(out, "   double slMoneyPerLot = (slDistance / tickSize) * tickValue;").ok();
+            writeln!(out, "   if(slMoneyPerLot <= 0) return minLot;").ok();
             writeln!(out, "   double lots = riskAmount / slMoneyPerLot;").ok();
-            writeln!(out, "   return NormalizeDouble(MathMax(lots, SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN)), 2);").ok();
         }
         PositionSizingType::RiskBased => {
             writeln!(out, "   // Risk-based: risk equity*X% per trade based on SL distance").ok();
-            writeln!(out, "   double equity = AccountInfoDouble(ACCOUNT_EQUITY);").ok();
-            writeln!(out, "   double riskAmount = equity * InpRiskPct / 100.0;").ok();
+            writeln!(out, "   double equity    = AccountInfoDouble(ACCOUNT_EQUITY);").ok();
             writeln!(out, "   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);").ok();
-            writeln!(out, "   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);").ok();
-            writeln!(out, "   if(sl == 0 || tickValue == 0 || tickSize == 0) return SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);").ok();
-            writeln!(out, "   double slDistance = MathAbs(price - sl);").ok();
+            writeln!(out, "   double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);").ok();
+            writeln!(out, "   if(sl == 0 || tickValue <= 0 || tickSize <= 0) return minLot;").ok();
+            writeln!(out, "   double riskAmount    = equity * InpRiskPct / 100.0;").ok();
+            writeln!(out, "   double slDistance    = MathAbs(price - sl);").ok();
             writeln!(out, "   double slMoneyPerLot = (slDistance / tickSize) * tickValue;").ok();
+            writeln!(out, "   if(slMoneyPerLot <= 0) return minLot;").ok();
             writeln!(out, "   double lots = riskAmount / slMoneyPerLot;").ok();
-            writeln!(out, "   return NormalizeDouble(MathMax(lots, SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN)), 2);").ok();
         }
         PositionSizingType::AntiMartingale => {
-            // AntiMartingale uses risk-based sizing; consecutive-loss tracking requires EA-level state
             writeln!(out, "   // AntiMartingale: risk-based sizing (consecutive-loss decay managed externally)").ok();
-            writeln!(out, "   double equity = AccountInfoDouble(ACCOUNT_EQUITY);").ok();
-            writeln!(out, "   double riskAmount = equity * InpRiskPct / 100.0;").ok();
+            writeln!(out, "   double equity    = AccountInfoDouble(ACCOUNT_EQUITY);").ok();
             writeln!(out, "   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);").ok();
-            writeln!(out, "   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);").ok();
-            writeln!(out, "   if(sl == 0 || tickValue == 0 || tickSize == 0) return SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);").ok();
-            writeln!(out, "   double slDistance = MathAbs(price - sl);").ok();
+            writeln!(out, "   double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);").ok();
+            writeln!(out, "   if(sl == 0 || tickValue <= 0 || tickSize <= 0) return minLot;").ok();
+            writeln!(out, "   double riskAmount    = equity * InpRiskPct / 100.0;").ok();
+            writeln!(out, "   double slDistance    = MathAbs(price - sl);").ok();
             writeln!(out, "   double slMoneyPerLot = (slDistance / tickSize) * tickValue;").ok();
+            writeln!(out, "   if(slMoneyPerLot <= 0) return minLot;").ok();
             writeln!(out, "   double lots = riskAmount / slMoneyPerLot;").ok();
-            writeln!(out, "   return NormalizeDouble(MathMax(lots, SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN)), 2);").ok();
         }
     }
 
+    // Normalize: floor to SYMBOL_VOLUME_STEP, then clamp to [min, max]
+    writeln!(out).ok();
+    writeln!(out, "   lots = MathFloor(lots / step) * step;").ok();
+    writeln!(out, "   lots = MathMax(minLot, MathMin(maxLot, lots));").ok();
+    writeln!(out, "   return lots;").ok();
     writeln!(out, "}}").ok();
     writeln!(out).ok();
 }
@@ -1134,7 +1229,7 @@ fn mql5_sl_tp_helpers(out: &mut String, strategy: &Strategy) {
                 let var = format!("atr_{}", sl.atr_period.unwrap_or(14));
                 writeln!(out, "   double atrBuf[];").ok();
                 writeln!(out, "   ArraySetAsSeries(atrBuf, true);").ok();
-                writeln!(out, "   CopyBuffer(handle_{}, 0, 0, 1, atrBuf);", var).ok();
+                writeln!(out, "   if(CopyBuffer(handle_{}, 0, 0, 1, atrBuf) < 1) return 0;", var).ok();
                 writeln!(out, "   double dist = atrBuf[0] * InpSLAtrMult;").ok();
                 writeln!(out, "   return (orderType == ORDER_TYPE_BUY) ? price - dist : price + dist;").ok();
             }
@@ -1166,7 +1261,7 @@ fn mql5_sl_tp_helpers(out: &mut String, strategy: &Strategy) {
                 let var = format!("atr_{}", tp.atr_period.unwrap_or(14));
                 writeln!(out, "   double atrBuf[];").ok();
                 writeln!(out, "   ArraySetAsSeries(atrBuf, true);").ok();
-                writeln!(out, "   CopyBuffer(handle_{}, 0, 0, 1, atrBuf);", var).ok();
+                writeln!(out, "   if(CopyBuffer(handle_{}, 0, 0, 1, atrBuf) < 1) return 0;", var).ok();
                 writeln!(out, "   double dist = atrBuf[0] * InpTPAtrMult;").ok();
                 writeln!(out, "   return (orderType == ORDER_TYPE_BUY) ? price + dist : price - dist;").ok();
             }
@@ -1197,7 +1292,7 @@ fn mql5_trailing_stop(out: &mut String, strategy: &Strategy) {
             let var = format!("atr_{}", ts.atr_period.unwrap_or(14));
             writeln!(out, "   double atrBuf[];").ok();
             writeln!(out, "   ArraySetAsSeries(atrBuf, true);").ok();
-            writeln!(out, "   CopyBuffer(handle_{}, 0, 0, 1, atrBuf);", var).ok();
+            writeln!(out, "   if(CopyBuffer(handle_{}, 0, 0, 1, atrBuf) < 1) return;", var).ok();
             writeln!(out, "   double trailDist = atrBuf[0] * InpTSAtrMult;").ok();
         }
         TrailingStopType::RiskReward => {
@@ -2716,17 +2811,27 @@ int OnCalculate(const int rates_total,
 fn gen_mql5_adx() -> String {
     let mut out = mql5_indicator_header("BT_ADX");
     out.push_str(r#"#property indicator_separate_window
-#property indicator_buffers 1
-#property indicator_plots   1
+#property indicator_buffers 3
+#property indicator_plots   3
 #property indicator_label1  "ADX"
 #property indicator_type1   DRAW_LINE
 #property indicator_color1  clrDodgerBlue
 #property indicator_width1  1
+#property indicator_label2  "+DI"
+#property indicator_type2   DRAW_LINE
+#property indicator_color2  clrLime
+#property indicator_width2  1
+#property indicator_label3  "-DI"
+#property indicator_type3   DRAW_LINE
+#property indicator_color3  clrRed
+#property indicator_width3  1
 #property indicator_level1  25
 
 input int InpPeriod = 14; // Period
 
 double AdxBuffer[];
+double PdiBuffer[];
+double MdiBuffer[];
 
 // Internal state for Wilder's smoothing
 double gSmoothTR = 0;
@@ -2741,8 +2846,14 @@ double gDxSum = 0;
 int OnInit()
 {
    SetIndexBuffer(0, AdxBuffer, INDICATOR_DATA);
+   SetIndexBuffer(1, PdiBuffer, INDICATOR_DATA);
+   SetIndexBuffer(2, MdiBuffer, INDICATOR_DATA);
    PlotIndexSetInteger(0, PLOT_DRAW_BEGIN, InpPeriod * 2);
+   PlotIndexSetInteger(1, PLOT_DRAW_BEGIN, InpPeriod);
+   PlotIndexSetInteger(2, PLOT_DRAW_BEGIN, InpPeriod);
    PlotIndexSetDouble(0, PLOT_EMPTY_VALUE, EMPTY_VALUE);
+   PlotIndexSetDouble(1, PLOT_EMPTY_VALUE, EMPTY_VALUE);
+   PlotIndexSetDouble(2, PLOT_EMPTY_VALUE, EMPTY_VALUE);
    IndicatorSetString(INDICATOR_SHORTNAME, "BT_ADX(" + IntegerToString(InpPeriod) + ")");
    return INIT_SUCCEEDED;
 }
@@ -2763,6 +2874,8 @@ int OnCalculate(const int rates_total,
    if(prev_calculated == 0)
    {
       ArrayInitialize(AdxBuffer, EMPTY_VALUE);
+      ArrayInitialize(PdiBuffer, EMPTY_VALUE);
+      ArrayInitialize(MdiBuffer, EMPTY_VALUE);
 
       // Initialize: sum first 'period' TR, +DM, -DM (indices 1..period)
       gSmoothTR = 0;
@@ -2790,6 +2903,8 @@ int OnCalculate(const int rates_total,
       {
          double pdi = (gSmoothTR == 0) ? 0 : 100.0 * gSmoothPDM / gSmoothTR;
          double mdi = (gSmoothTR == 0) ? 0 : 100.0 * gSmoothMDM / gSmoothTR;
+         PdiBuffer[InpPeriod] = pdi;
+         MdiBuffer[InpPeriod] = mdi;
          double diSum = pdi + mdi;
          double dx = (diSum == 0) ? 0 : 100.0 * MathAbs(pdi - mdi) / diSum;
          gDxSum += dx;
@@ -2815,6 +2930,8 @@ int OnCalculate(const int rates_total,
 
          double pdi = (gSmoothTR == 0) ? 0 : 100.0 * gSmoothPDM / gSmoothTR;
          double mdi = (gSmoothTR == 0) ? 0 : 100.0 * gSmoothMDM / gSmoothTR;
+         PdiBuffer[i] = pdi;
+         MdiBuffer[i] = mdi;
          double diSum = pdi + mdi;
          double dx = (diSum == 0) ? 0 : 100.0 * MathAbs(pdi - mdi) / diSum;
          gDxSum += dx;
@@ -2841,6 +2958,8 @@ int OnCalculate(const int rates_total,
 
          double pdi = (gSmoothTR == 0) ? 0 : 100.0 * gSmoothPDM / gSmoothTR;
          double mdi = (gSmoothTR == 0) ? 0 : 100.0 * gSmoothMDM / gSmoothTR;
+         PdiBuffer[i] = pdi;
+         MdiBuffer[i] = mdi;
          double diSum = pdi + mdi;
          double dx = (diSum == 0) ? 0 : 100.0 * MathAbs(pdi - mdi) / diSum;
          gDxSum += dx;
@@ -2870,6 +2989,8 @@ int OnCalculate(const int rates_total,
 
          double pdi = (gSmoothTR == 0) ? 0 : 100.0 * gSmoothPDM / gSmoothTR;
          double mdi = (gSmoothTR == 0) ? 0 : 100.0 * gSmoothMDM / gSmoothTR;
+         PdiBuffer[i] = pdi;
+         MdiBuffer[i] = mdi;
          double diSum = pdi + mdi;
          double dx = (diSum == 0) ? 0 : 100.0 * MathAbs(pdi - mdi) / diSum;
 
@@ -2898,6 +3019,8 @@ int OnCalculate(const int rates_total,
 
          double pdi = (gSmoothTR == 0) ? 0 : 100.0 * gSmoothPDM / gSmoothTR;
          double mdi = (gSmoothTR == 0) ? 0 : 100.0 * gSmoothMDM / gSmoothTR;
+         PdiBuffer[i] = pdi;
+         MdiBuffer[i] = mdi;
          double diSum = pdi + mdi;
          double dx = (diSum == 0) ? 0 : 100.0 * MathAbs(pdi - mdi) / diSum;
 
@@ -4380,5 +4503,697 @@ mod tests {
         let rsi_file = result.files.iter().find(|f| f.filename == "BT_RSI.mq5").unwrap();
         assert!(rsi_file.code.contains("OnCalculate"));
         assert!(rsi_file.code.contains("Wilder"));
+    }
+}
+
+// ══════════════════════════════════════════════════════════════
+// SR MQL5 code generation
+// ══════════════════════════════════════════════════════════════
+
+/// Generate an MQL5 Expert Advisor from a Symbolic Regression strategy.
+/// The EA evaluates the three formula trees at each new bar using BT_* custom
+/// indicators and applies the configured position sizing, SL, TP, and costs.
+pub fn generate_sr_mql5(
+    strategy: &crate::models::sr_result::SrStrategy,
+    name: &str,
+) -> Result<CodeGenerationResult, AppError> {
+    use crate::models::sr_result::{BinaryOpType, SrNode, UnaryOpType};
+    use crate::models::strategy::{
+        PositionSizingType, StopLossType, TakeProfitType, TradeDirection, TrailingStopType,
+    };
+    use std::collections::{HashMap, HashSet};
+
+    let ea_name = name.replace(|c: char| !c.is_alphanumeric() && c != '_' && c != '-', "_");
+
+    // ── 1. Collect unique indicator leaves ────────────────────────────────────
+    fn collect_leaves(node: &SrNode, seen: &mut HashMap<String, IndicatorConfig>) {
+        match node {
+            SrNode::Constant(_) => {}
+            SrNode::IndicatorLeaf { config, .. } => {
+                seen.entry(config.cache_key()).or_insert_with(|| config.clone());
+            }
+            SrNode::BinaryOp { left, right, .. } => {
+                collect_leaves(left, seen);
+                collect_leaves(right, seen);
+            }
+            SrNode::UnaryOp { child, .. } => collect_leaves(child, seen),
+        }
+    }
+
+    let mut leaf_map: HashMap<String, IndicatorConfig> = HashMap::new();
+    collect_leaves(&strategy.entry_long, &mut leaf_map);
+    collect_leaves(&strategy.entry_short, &mut leaf_map);
+    collect_leaves(&strategy.exit, &mut leaf_map);
+
+    // Sort for deterministic output
+    let mut leaves: Vec<(String, IndicatorConfig)> = leaf_map.into_iter().collect();
+    leaves.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Build var_name map: cache_key → var_name
+    let var_map: HashMap<String, String> = leaves.iter()
+        .map(|(key, cfg)| (key.clone(), indicator_var_name(cfg)))
+        .collect();
+
+    // ── 2. Recursive MQL5 expression compiler ─────────────────────────────────
+    fn node_to_mql5(
+        node: &SrNode,
+        var_map: &HashMap<String, String>,
+        buffer_map: &HashMap<String, usize>,
+    ) -> String {
+        match node {
+            SrNode::Constant(v) => format!("{:.6}", v),
+            SrNode::IndicatorLeaf { config, buffer_index } => {
+                let key = config.cache_key();
+                let var = var_map.get(&key).map(|s| s.as_str()).unwrap_or("__unknown");
+                let buf = buffer_map.get(&format!("{}_{}", key, buffer_index)).copied().unwrap_or(*buffer_index);
+                format!("g_{}_{}", var, buf)
+            }
+            SrNode::BinaryOp { op, left, right } => {
+                let l = node_to_mql5(left, var_map, buffer_map);
+                let r = node_to_mql5(right, var_map, buffer_map);
+                match op {
+                    BinaryOpType::Add => format!("({} + {})", l, r),
+                    BinaryOpType::Sub => format!("({} - {})", l, r),
+                    BinaryOpType::Mul => format!("({} * {})", l, r),
+                    BinaryOpType::ProtectedDiv => format!(
+                        "(MathAbs({r}) < 1e-10 ? 0.0 : ({l}) / ({r}))",
+                        l = l, r = r
+                    ),
+                }
+            }
+            SrNode::UnaryOp { op, child } => {
+                let c = node_to_mql5(child, var_map, buffer_map);
+                match op {
+                    UnaryOpType::Sqrt => format!("MathSqrt(MathAbs({}))", c),
+                    UnaryOpType::Abs  => format!("MathAbs({})", c),
+                    UnaryOpType::Log  => format!("MathLog(MathAbs({}) + 1e-10)", c),
+                    UnaryOpType::Neg  => format!("(-({}))", c),
+                }
+            }
+        }
+    }
+
+    // Collect which (cache_key, buffer_index) pairs are actually used
+    fn collect_buffers_used(node: &SrNode, out: &mut Vec<(String, usize)>) {
+        match node {
+            SrNode::Constant(_) => {}
+            SrNode::IndicatorLeaf { config, buffer_index } => {
+                out.push((config.cache_key(), *buffer_index));
+            }
+            SrNode::BinaryOp { left, right, .. } => {
+                collect_buffers_used(left, out);
+                collect_buffers_used(right, out);
+            }
+            SrNode::UnaryOp { child, .. } => collect_buffers_used(child, out),
+        }
+    }
+    let mut used_buffers: Vec<(String, usize)> = Vec::new();
+    collect_buffers_used(&strategy.entry_long, &mut used_buffers);
+    collect_buffers_used(&strategy.entry_short, &mut used_buffers);
+    collect_buffers_used(&strategy.exit, &mut used_buffers);
+    used_buffers.sort();
+    used_buffers.dedup();
+
+    let buffer_map: HashMap<String, usize> = used_buffers.iter()
+        .map(|(key, buf)| (format!("{}_{}", key, buf), *buf))
+        .collect();
+
+    let expr_long  = node_to_mql5(&strategy.entry_long,  &var_map, &buffer_map);
+    let expr_short = node_to_mql5(&strategy.entry_short, &var_map, &buffer_map);
+    let expr_exit  = node_to_mql5(&strategy.exit,        &var_map, &buffer_map);
+
+    // ── 3. Determine which ATR handles are needed for SL / TP / TS ───────────
+    //
+    // The SR backtester pre-computes ATR-14 for all SL/TP regardless of atr_period.
+    // We match that behaviour: always use period 14 for the SL/TP ATR handle unless
+    // the field specifies a different period.
+    let mut atr_periods_needed: HashSet<usize> = HashSet::new();
+    if let Some(sl) = &strategy.stop_loss {
+        if sl.sl_type == StopLossType::ATR {
+            atr_periods_needed.insert(sl.atr_period.unwrap_or(14));
+        }
+    }
+    if let Some(tp) = &strategy.take_profit {
+        if tp.tp_type == TakeProfitType::ATR {
+            atr_periods_needed.insert(tp.atr_period.unwrap_or(14));
+        }
+    }
+    if let Some(ts) = &strategy.trailing_stop {
+        if ts.ts_type == TrailingStopType::ATR {
+            atr_periods_needed.insert(ts.atr_period.unwrap_or(14));
+        }
+    }
+    let mut atr_periods: Vec<usize> = atr_periods_needed.into_iter().collect();
+    atr_periods.sort();
+
+    let need_trailing = strategy.trailing_stop.is_some();
+    let allow_long  = !matches!(strategy.trade_direction, TradeDirection::Short);
+    let allow_short = !matches!(strategy.trade_direction, TradeDirection::Long);
+
+    // ── 4. Generate EA code ───────────────────────────────────────────────────
+    let mut out = String::with_capacity(8192);
+
+    // Header
+    writeln!(out, "//+------------------------------------------------------------------+").ok();
+    writeln!(out, "//| SR Strategy EA: {:<48}|", ea_name).ok();
+    writeln!(out, "//| Generated by Backtester SR Builder                               |").ok();
+    writeln!(out, "//|                                                                  |").ok();
+    writeln!(out, "//| Entry Long  condition : formula > InpLongThreshold               |").ok();
+    writeln!(out, "//| Entry Short condition : formula < InpShortThreshold              |").ok();
+    writeln!(out, "//| Exit condition        : exit formula changes sign                |").ok();
+    writeln!(out, "//|   (exit guard: no exit on the bar immediately after entry)       |").ok();
+    writeln!(out, "//| Signals read at shift=1 (previous completed bar) to match       |").ok();
+    writeln!(out, "//| the backtester CopyBuffer(shift=1) behaviour exactly.            |").ok();
+    writeln!(out, "//+------------------------------------------------------------------+").ok();
+    writeln!(out, "#property copyright \"Backtester SR Builder\"").ok();
+    writeln!(out, "#property version   \"2.00\"").ok();
+    writeln!(out, "#include <Trade\\Trade.mqh>").ok();
+    writeln!(out).ok();
+
+    // ── Inputs ────────────────────────────────────────────────────────────────
+    writeln!(out, "// ── Entry / exit thresholds (evolved by SR — edit with care) ──────").ok();
+    writeln!(out, "input double InpLongThreshold  = {:.6}; // Entry Long:  formula > this", strategy.long_threshold).ok();
+    writeln!(out, "input double InpShortThreshold = {:.6}; // Entry Short: formula < this", strategy.short_threshold).ok();
+    writeln!(out).ok();
+    writeln!(out, "// ── Trade management ──────────────────────────────────────────────").ok();
+    writeln!(out, "input int    InpMagicNumber = 88888;  // Magic number").ok();
+
+    // Position sizing inputs
+    match &strategy.position_sizing.sizing_type {
+        PositionSizingType::FixedLots => {
+            writeln!(out, "input double InpLotSize     = {:.2};  // Fixed lot size", strategy.position_sizing.value).ok();
+        }
+        PositionSizingType::PercentEquity | PositionSizingType::RiskBased => {
+            writeln!(out, "input double InpRiskPct     = {:.2};  // % of equity to risk per trade", strategy.position_sizing.value).ok();
+        }
+        PositionSizingType::FixedAmount => {
+            writeln!(out, "input double InpFixedAmount = {:.2};  // Fixed dollar amount to risk per trade", strategy.position_sizing.value).ok();
+        }
+        PositionSizingType::AntiMartingale => {
+            writeln!(out, "input double InpRiskPct         = {:.2};  // % of equity to risk per trade", strategy.position_sizing.value).ok();
+            writeln!(out, "input double InpDecreaseFactor  = {:.2};  // Lot multiplier after each loss (0-1)", strategy.position_sizing.decrease_factor).ok();
+        }
+    }
+
+    // SL inputs
+    if let Some(sl) = &strategy.stop_loss {
+        match sl.sl_type {
+            StopLossType::Pips       => { writeln!(out, "input double InpSLPips    = {:.1};  // Stop Loss in pips", sl.value).ok(); }
+            StopLossType::Percentage => { writeln!(out, "input double InpSLPct     = {:.4};  // Stop Loss as % of price", sl.value).ok(); }
+            StopLossType::ATR        => { writeln!(out, "input double InpSLAtrMult = {:.2};  // Stop Loss ATR multiplier", sl.value).ok(); }
+        }
+    }
+
+    // TP inputs
+    if let Some(tp) = &strategy.take_profit {
+        match tp.tp_type {
+            TakeProfitType::Pips        => { writeln!(out, "input double InpTPPips    = {:.1};  // Take Profit in pips", tp.value).ok(); }
+            TakeProfitType::RiskReward  => { writeln!(out, "input double InpTPRR      = {:.2};  // Take Profit risk:reward ratio", tp.value).ok(); }
+            TakeProfitType::ATR         => { writeln!(out, "input double InpTPAtrMult = {:.2};  // Take Profit ATR multiplier", tp.value).ok(); }
+        }
+    }
+
+    // Trailing stop inputs
+    if let Some(ts) = &strategy.trailing_stop {
+        match ts.ts_type {
+            TrailingStopType::ATR        => { writeln!(out, "input double InpTSAtrMult = {:.2};  // Trailing Stop ATR multiplier", ts.value).ok(); }
+            TrailingStopType::RiskReward => { writeln!(out, "input double InpTSRR      = {:.2};  // Trailing Stop risk:reward ratio", ts.value).ok(); }
+        }
+    }
+    writeln!(out).ok();
+
+    // Indicator parameter inputs
+    if !leaves.is_empty() {
+        writeln!(out, "// ── SR indicator parameters (values fixed by SR evolution) ────────").ok();
+        for (_, cfg) in &leaves {
+            let v = indicator_var_name(cfg);
+            if let Some(p) = cfg.params.period          { writeln!(out, "input int    Inp_{v}_period = {p};").ok(); }
+            if let Some(p) = cfg.params.fast_period     { writeln!(out, "input int    Inp_{v}_fast   = {p};").ok(); }
+            if let Some(p) = cfg.params.slow_period     { writeln!(out, "input int    Inp_{v}_slow   = {p};").ok(); }
+            if let Some(p) = cfg.params.signal_period   { writeln!(out, "input int    Inp_{v}_signal = {p};").ok(); }
+            if let Some(p) = cfg.params.k_period        { writeln!(out, "input int    Inp_{v}_k      = {p};").ok(); }
+            if let Some(p) = cfg.params.d_period        { writeln!(out, "input int    Inp_{v}_d      = {p};").ok(); }
+            if let Some(x) = cfg.params.std_dev         { writeln!(out, "input double Inp_{v}_stddev = {x};").ok(); }
+            if let Some(x) = cfg.params.acceleration_factor { writeln!(out, "input double Inp_{v}_af  = {x};").ok(); }
+            if let Some(x) = cfg.params.maximum_factor  { writeln!(out, "input double Inp_{v}_max    = {x};").ok(); }
+            if let Some(x) = cfg.params.gamma           { writeln!(out, "input double Inp_{v}_gamma  = {x};").ok(); }
+            if let Some(x) = cfg.params.multiplier      { writeln!(out, "input double Inp_{v}_mult   = {x};").ok(); }
+        }
+        writeln!(out).ok();
+    }
+
+    // ── Globals ───────────────────────────────────────────────────────────────
+    writeln!(out, "// ── Global handles & state ────────────────────────────────────────").ok();
+    writeln!(out, "CTrade g_trade;").ok();
+    for (_, cfg) in &leaves {
+        let v = indicator_var_name(cfg);
+        writeln!(out, "int    g_{v}_handle  = INVALID_HANDLE;").ok();
+    }
+    // ATR handles for SL/TP/TS
+    for &period in &atr_periods {
+        writeln!(out, "int    g_atr{period}_handle = INVALID_HANDLE;  // ATR({period}) for SL/TP/TS").ok();
+    }
+    // Indicator value buffers (read once per bar)
+    for (key, buf) in &used_buffers {
+        if let Some(v) = var_map.get(key) {
+            writeln!(out, "double g_{v}_{buf} = 0.0;").ok();
+        }
+    }
+    // ATR value buffers
+    for &period in &atr_periods {
+        writeln!(out, "double g_atr{period}   = 0.0;  // ATR({period}) value (shift=1)").ok();
+    }
+    // Exit sign-change state
+    writeln!(out, "double   g_exit_prev      = 0.0;    // exit formula value on previous bar").ok();
+    // Entry bar time (for exit guard: no exit within 1 bar of entry)
+    writeln!(out, "datetime g_entry_bar_time = 0;      // bar open time when position was opened").ok();
+    // AntiMartingale consecutive loss counter
+    if matches!(strategy.position_sizing.sizing_type, PositionSizingType::AntiMartingale) {
+        writeln!(out, "int      g_consec_losses  = 0;      // consecutive losses for AntiMartingale sizing").ok();
+    }
+    writeln!(out).ok();
+
+    // ── OnInit ────────────────────────────────────────────────────────────────
+    writeln!(out, "//+------------------------------------------------------------------+").ok();
+    writeln!(out, "int OnInit()").ok();
+    writeln!(out, "{{").ok();
+    writeln!(out, "   g_trade.SetExpertMagicNumber(InpMagicNumber);").ok();
+    writeln!(out).ok();
+    writeln!(out, "   // Create SR indicator handles").ok();
+    for (_, cfg) in &leaves {
+        let v = indicator_var_name(cfg);
+        let call = sr_icustom_call(cfg, &v);
+        writeln!(out, "   g_{v}_handle = {call};").ok();
+        writeln!(out, "   if(g_{v}_handle == INVALID_HANDLE) {{ Print(\"ERROR: failed to create handle for {v}\"); return INIT_FAILED; }}").ok();
+    }
+    if !atr_periods.is_empty() {
+        writeln!(out).ok();
+        writeln!(out, "   // Create ATR handles for SL/TP/TS").ok();
+    }
+    for &period in &atr_periods {
+        writeln!(out, "   g_atr{period}_handle = iATR(_Symbol, PERIOD_CURRENT, {period});").ok();
+        writeln!(out, "   if(g_atr{period}_handle == INVALID_HANDLE) {{ Print(\"ERROR: failed to create ATR({period}) handle\"); return INIT_FAILED; }}").ok();
+    }
+    writeln!(out).ok();
+    writeln!(out, "   // Reset state").ok();
+    writeln!(out, "   g_exit_prev      = 0.0;").ok();
+    writeln!(out, "   g_entry_bar_time = 0;").ok();
+    writeln!(out, "   return INIT_SUCCEEDED;").ok();
+    writeln!(out, "}}").ok();
+    writeln!(out).ok();
+
+    // ── OnDeinit ──────────────────────────────────────────────────────────────
+    writeln!(out, "//+------------------------------------------------------------------+").ok();
+    writeln!(out, "void OnDeinit(const int reason)").ok();
+    writeln!(out, "{{").ok();
+    for (_, cfg) in &leaves {
+        let v = indicator_var_name(cfg);
+        writeln!(out, "   if(g_{v}_handle != INVALID_HANDLE) IndicatorRelease(g_{v}_handle);").ok();
+    }
+    for &period in &atr_periods {
+        writeln!(out, "   if(g_atr{period}_handle != INVALID_HANDLE) IndicatorRelease(g_atr{period}_handle);").ok();
+    }
+    writeln!(out, "}}").ok();
+    writeln!(out).ok();
+
+    // ── OnTick ────────────────────────────────────────────────────────────────
+    writeln!(out, "//+------------------------------------------------------------------+").ok();
+    writeln!(out, "void OnTick()").ok();
+    writeln!(out, "{{").ok();
+
+    // New-bar guard — all logic runs once per bar at bar open
+    writeln!(out, "   // Execute only once per bar (bar-open logic, matching backtester)").ok();
+    writeln!(out, "   static datetime s_prev_bar = 0;").ok();
+    writeln!(out, "   datetime cur_bar = iTime(_Symbol, PERIOD_CURRENT, 0);").ok();
+    writeln!(out, "   if(cur_bar == 0 || cur_bar == s_prev_bar) return;").ok();
+    writeln!(out, "   s_prev_bar = cur_bar;").ok();
+    writeln!(out).ok();
+
+    // Read indicator buffers at shift=1 (previous completed bar)
+    writeln!(out, "   // ── Read indicator values at shift=1 (previous bar, matching backtester) ──").ok();
+    writeln!(out, "   double _b[];").ok();
+    for (key, buf) in &used_buffers {
+        if let Some(v) = var_map.get(key) {
+            writeln!(out, "   if(CopyBuffer(g_{v}_handle, {buf}, 1, 1, _b) == 1) g_{v}_{buf} = _b[0]; else {{ Print(\"WARN: CopyBuffer failed for {v} buf={buf}\"); }}").ok();
+        }
+    }
+    // Read ATR values at shift=1
+    if !atr_periods.is_empty() {
+        writeln!(out).ok();
+        writeln!(out, "   // ── Read ATR values at shift=1 ───────────────────────────────────").ok();
+        for &period in &atr_periods {
+            writeln!(out, "   if(CopyBuffer(g_atr{period}_handle, 0, 1, 1, _b) == 1) g_atr{period} = _b[0];").ok();
+        }
+    }
+    writeln!(out).ok();
+
+    // Evaluate SR formulas
+    writeln!(out, "   // ── Evaluate SR formulas ──────────────────────────────────────────").ok();
+    writeln!(out, "   double signal_long  = {expr_long};").ok();
+    writeln!(out, "   double signal_short = {expr_short};").ok();
+    writeln!(out, "   double signal_exit  = {expr_exit};").ok();
+    writeln!(out).ok();
+
+    // Exit sign-change detection
+    // Matches runner.rs: (prev >= 0 && cur < 0) || (prev <= 0 && cur > 0)
+    // Exit guard: i > entry_bar + 1 → in MQL5: the bar before current (shift=1) must NOT be the entry bar.
+    writeln!(out, "   // ── Exit logic ────────────────────────────────────────────────────").ok();
+    writeln!(out, "   // Sign change in exit formula triggers close (matches backtester runner.rs).").ok();
+    writeln!(out, "   bool sign_changed = (g_exit_prev >= 0.0 && signal_exit < 0.0)").ok();
+    writeln!(out, "                    || (g_exit_prev <= 0.0 && signal_exit > 0.0);").ok();
+    writeln!(out, "   // Exit guard: do NOT exit on the bar immediately after entry").ok();
+    writeln!(out, "   // (matches condition: i > pos.entry_bar + 1 in the backtester).").ok();
+    writeln!(out, "   datetime prev_bar = iTime(_Symbol, PERIOD_CURRENT, 1);").ok();
+    writeln!(out, "   bool exit_guard_ok = (g_entry_bar_time == 0 || prev_bar != g_entry_bar_time);").ok();
+    writeln!(out, "   bool do_exit = sign_changed && exit_guard_ok;").ok();
+    writeln!(out, "   g_exit_prev = signal_exit;").ok();
+    writeln!(out).ok();
+
+    // Manage open positions: handle exit signal + trailing stop
+    writeln!(out, "   bool has_long  = false;").ok();
+    writeln!(out, "   bool has_short = false;").ok();
+    writeln!(out, "   for(int _i = PositionsTotal() - 1; _i >= 0; _i--)").ok();
+    writeln!(out, "   {{").ok();
+    writeln!(out, "      ulong ticket = PositionGetTicket(_i);").ok();
+    writeln!(out, "      if(ticket == 0) continue;").ok();
+    writeln!(out, "      if((long)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;").ok();
+    writeln!(out, "      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;").ok();
+    writeln!(out, "      ENUM_POSITION_TYPE ptype = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);").ok();
+    writeln!(out, "      if(ptype == POSITION_TYPE_BUY)  has_long  = true;").ok();
+    writeln!(out, "      if(ptype == POSITION_TYPE_SELL) has_short = true;").ok();
+    writeln!(out, "      if(do_exit) g_trade.PositionClose(ticket);").ok();
+    writeln!(out, "   }}").ok();
+    writeln!(out).ok();
+
+    // Trailing stop update (after exit check, before entry)
+    if need_trailing {
+        writeln!(out, "   // ── Trailing stop ─────────────────────────────────────────────────").ok();
+        writeln!(out, "   if(!do_exit && (has_long || has_short)) SR_ManageTrailingStop();").ok();
+        writeln!(out).ok();
+    }
+
+    // Entry logic
+    writeln!(out, "   // ── Entry logic ───────────────────────────────────────────────────").ok();
+    writeln!(out, "   // If exit just fired, skip entry this bar (same as backtester).").ok();
+    writeln!(out, "   if(!do_exit && !has_long && !has_short)").ok();
+    writeln!(out, "   {{").ok();
+
+    if allow_long && allow_short {
+        // Both: long takes priority when both fire
+        writeln!(out, "      bool go_long  = (signal_long  >  InpLongThreshold)  && MathIsValidNumber(signal_long);").ok();
+        writeln!(out, "      bool go_short = (signal_short <  InpShortThreshold) && MathIsValidNumber(signal_short);").ok();
+        writeln!(out).ok();
+        writeln!(out, "      if(go_long)  // Long takes priority when both fire (matches backtester)").ok();
+        writeln!(out, "      {{").ok();
+        writeln!(out, "         double entry = SymbolInfoDouble(_Symbol, SYMBOL_ASK);").ok();
+        writeln!(out, "         double sl    = SR_CalcSL(ORDER_TYPE_BUY, entry);").ok();
+        writeln!(out, "         double tp    = SR_CalcTP(ORDER_TYPE_BUY, entry, sl);").ok();
+        writeln!(out, "         double lots  = SR_CalcLots(entry, sl);").ok();
+        writeln!(out, "         if(g_trade.Buy(lots, _Symbol, entry, sl, tp, \"{ea_name}\"))").ok();
+        writeln!(out, "            g_entry_bar_time = cur_bar;").ok();
+        writeln!(out, "      }}").ok();
+        writeln!(out, "      else if(go_short)").ok();
+        writeln!(out, "      {{").ok();
+        writeln!(out, "         double entry = SymbolInfoDouble(_Symbol, SYMBOL_BID);").ok();
+        writeln!(out, "         double sl    = SR_CalcSL(ORDER_TYPE_SELL, entry);").ok();
+        writeln!(out, "         double tp    = SR_CalcTP(ORDER_TYPE_SELL, entry, sl);").ok();
+        writeln!(out, "         double lots  = SR_CalcLots(entry, sl);").ok();
+        writeln!(out, "         if(g_trade.Sell(lots, _Symbol, entry, sl, tp, \"{ea_name}\"))").ok();
+        writeln!(out, "            g_entry_bar_time = cur_bar;").ok();
+        writeln!(out, "      }}").ok();
+    } else if allow_long {
+        writeln!(out, "      if((signal_long > InpLongThreshold) && MathIsValidNumber(signal_long))").ok();
+        writeln!(out, "      {{").ok();
+        writeln!(out, "         double entry = SymbolInfoDouble(_Symbol, SYMBOL_ASK);").ok();
+        writeln!(out, "         double sl    = SR_CalcSL(ORDER_TYPE_BUY, entry);").ok();
+        writeln!(out, "         double tp    = SR_CalcTP(ORDER_TYPE_BUY, entry, sl);").ok();
+        writeln!(out, "         double lots  = SR_CalcLots(entry, sl);").ok();
+        writeln!(out, "         if(g_trade.Buy(lots, _Symbol, entry, sl, tp, \"{ea_name}\"))").ok();
+        writeln!(out, "            g_entry_bar_time = cur_bar;").ok();
+        writeln!(out, "      }}").ok();
+    } else if allow_short {
+        writeln!(out, "      if((signal_short < InpShortThreshold) && MathIsValidNumber(signal_short))").ok();
+        writeln!(out, "      {{").ok();
+        writeln!(out, "         double entry = SymbolInfoDouble(_Symbol, SYMBOL_BID);").ok();
+        writeln!(out, "         double sl    = SR_CalcSL(ORDER_TYPE_SELL, entry);").ok();
+        writeln!(out, "         double tp    = SR_CalcTP(ORDER_TYPE_SELL, entry, sl);").ok();
+        writeln!(out, "         double lots  = SR_CalcLots(entry, sl);").ok();
+        writeln!(out, "         if(g_trade.Sell(lots, _Symbol, entry, sl, tp, \"{ea_name}\"))").ok();
+        writeln!(out, "            g_entry_bar_time = cur_bar;").ok();
+        writeln!(out, "      }}").ok();
+    }
+
+    writeln!(out, "   }} // end entry block").ok();
+    writeln!(out, "}}").ok();
+    writeln!(out).ok();
+
+    // ── SR_CalcLots ──────────────────────────────────────────────────────────
+    writeln!(out, "//+------------------------------------------------------------------+").ok();
+    writeln!(out, "// SR_CalcLots: mirrors position.rs calculate_lots()").ok();
+    writeln!(out, "// price = entry price, sl = stop loss price (0 = no SL)").ok();
+    writeln!(out, "double SR_CalcLots(double price, double sl)").ok();
+    writeln!(out, "{{").ok();
+    writeln!(out, "   double minLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);").ok();
+    writeln!(out, "   double maxLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);").ok();
+    writeln!(out, "   double step    = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);").ok();
+    writeln!(out, "   if(step <= 0.0) step = minLot;").ok();
+
+    match &strategy.position_sizing.sizing_type {
+        PositionSizingType::FixedLots => {
+            writeln!(out, "   double lots = InpLotSize;").ok();
+        }
+        PositionSizingType::FixedAmount => {
+            writeln!(out, "   // Fixed-amount risk: if no SL fall back to min lot").ok();
+            writeln!(out, "   if(sl == 0.0) return minLot;").ok();
+            writeln!(out, "   double tickVal  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);").ok();
+            writeln!(out, "   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);").ok();
+            writeln!(out, "   if(tickVal <= 0.0 || tickSize <= 0.0) return minLot;").ok();
+            writeln!(out, "   double slMoney = (MathAbs(price - sl) / tickSize) * tickVal;").ok();
+            writeln!(out, "   if(slMoney <= 0.0) return minLot;").ok();
+            writeln!(out, "   double lots = InpFixedAmount / slMoney;").ok();
+        }
+        PositionSizingType::PercentEquity | PositionSizingType::RiskBased => {
+            writeln!(out, "   // Risk-based sizing: equity * pct% / SL monetary distance per lot").ok();
+            writeln!(out, "   if(sl == 0.0) return minLot;").ok();
+            writeln!(out, "   double equity   = AccountInfoDouble(ACCOUNT_EQUITY);").ok();
+            writeln!(out, "   double tickVal  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);").ok();
+            writeln!(out, "   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);").ok();
+            writeln!(out, "   if(tickVal <= 0.0 || tickSize <= 0.0) return minLot;").ok();
+            writeln!(out, "   double riskAmt  = equity * InpRiskPct / 100.0;").ok();
+            writeln!(out, "   double slMoney  = (MathAbs(price - sl) / tickSize) * tickVal;").ok();
+            writeln!(out, "   if(slMoney <= 0.0) return minLot;").ok();
+            writeln!(out, "   double lots = riskAmt / slMoney;").ok();
+        }
+        PositionSizingType::AntiMartingale => {
+            writeln!(out, "   // AntiMartingale: risk-based with decay per consecutive loss").ok();
+            writeln!(out, "   if(sl == 0.0) return minLot;").ok();
+            writeln!(out, "   double equity   = AccountInfoDouble(ACCOUNT_EQUITY);").ok();
+            writeln!(out, "   double tickVal  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);").ok();
+            writeln!(out, "   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);").ok();
+            writeln!(out, "   if(tickVal <= 0.0 || tickSize <= 0.0) return minLot;").ok();
+            writeln!(out, "   double riskAmt  = equity * InpRiskPct / 100.0;").ok();
+            writeln!(out, "   double slMoney  = (MathAbs(price - sl) / tickSize) * tickVal;").ok();
+            writeln!(out, "   if(slMoney <= 0.0) return minLot;").ok();
+            writeln!(out, "   double decay    = MathPow(InpDecreaseFactor, g_consec_losses);").ok();
+            writeln!(out, "   double lots = (riskAmt / slMoney) * decay;").ok();
+        }
+    }
+
+    writeln!(out, "   lots = MathFloor(lots / step) * step;").ok();
+    writeln!(out, "   lots = MathMax(minLot, MathMin(maxLot, lots));").ok();
+    writeln!(out, "   return lots;").ok();
+    writeln!(out, "}}").ok();
+    writeln!(out).ok();
+
+    // ── SR_CalcSL ─────────────────────────────────────────────────────────────
+    writeln!(out, "//+------------------------------------------------------------------+").ok();
+    writeln!(out, "// SR_CalcSL: mirrors position.rs calculate_stop_loss()").ok();
+    writeln!(out, "// Returns stop-loss price, or 0.0 if no SL configured.").ok();
+    writeln!(out, "double SR_CalcSL(ENUM_ORDER_TYPE dir, double price)").ok();
+    writeln!(out, "{{").ok();
+    if let Some(sl) = &strategy.stop_loss {
+        let period = sl.atr_period.unwrap_or(14);
+        match sl.sl_type {
+            StopLossType::Pips => {
+                // pip = _Point * 10 for 5-digit brokers; this matches pip_size = 0.0001
+                writeln!(out, "   double dist = InpSLPips * _Point * 10.0;  // pips → price distance").ok();
+                writeln!(out, "   double sl   = (dir == ORDER_TYPE_BUY) ? price - dist : price + dist;").ok();
+                writeln!(out, "   return NormalizeDouble(sl, _Digits);").ok();
+            }
+            StopLossType::Percentage => {
+                writeln!(out, "   double dist = price * InpSLPct / 100.0;").ok();
+                writeln!(out, "   double sl   = (dir == ORDER_TYPE_BUY) ? price - dist : price + dist;").ok();
+                writeln!(out, "   return NormalizeDouble(sl, _Digits);").ok();
+            }
+            StopLossType::ATR => {
+                writeln!(out, "   if(g_atr{period} <= 0.0) return 0.0;  // ATR not ready yet").ok();
+                writeln!(out, "   double dist = g_atr{period} * InpSLAtrMult;").ok();
+                writeln!(out, "   double sl   = (dir == ORDER_TYPE_BUY) ? price - dist : price + dist;").ok();
+                writeln!(out, "   return NormalizeDouble(sl, _Digits);").ok();
+            }
+        }
+    } else {
+        writeln!(out, "   return 0.0;  // No stop loss configured").ok();
+    }
+    writeln!(out, "}}").ok();
+    writeln!(out).ok();
+
+    // ── SR_CalcTP ─────────────────────────────────────────────────────────────
+    writeln!(out, "//+------------------------------------------------------------------+").ok();
+    writeln!(out, "// SR_CalcTP: mirrors position.rs calculate_take_profit()").ok();
+    writeln!(out, "// sl = stop-loss price (used for RiskReward TP); 0.0 = no SL.").ok();
+    writeln!(out, "double SR_CalcTP(ENUM_ORDER_TYPE dir, double price, double sl)").ok();
+    writeln!(out, "{{").ok();
+    if let Some(tp) = &strategy.take_profit {
+        let period = tp.atr_period.unwrap_or(14);
+        match tp.tp_type {
+            TakeProfitType::Pips => {
+                writeln!(out, "   double dist = InpTPPips * _Point * 10.0;").ok();
+                writeln!(out, "   double tp   = (dir == ORDER_TYPE_BUY) ? price + dist : price - dist;").ok();
+                writeln!(out, "   return NormalizeDouble(tp, _Digits);").ok();
+            }
+            TakeProfitType::RiskReward => {
+                writeln!(out, "   if(sl == 0.0) return 0.0;  // need SL for R:R TP").ok();
+                writeln!(out, "   double slDist = MathAbs(price - sl);").ok();
+                writeln!(out, "   double dist   = slDist * InpTPRR;").ok();
+                writeln!(out, "   double tp     = (dir == ORDER_TYPE_BUY) ? price + dist : price - dist;").ok();
+                writeln!(out, "   return NormalizeDouble(tp, _Digits);").ok();
+            }
+            TakeProfitType::ATR => {
+                writeln!(out, "   if(g_atr{period} <= 0.0) return 0.0;  // ATR not ready yet").ok();
+                writeln!(out, "   double dist = g_atr{period} * InpTPAtrMult;").ok();
+                writeln!(out, "   double tp   = (dir == ORDER_TYPE_BUY) ? price + dist : price - dist;").ok();
+                writeln!(out, "   return NormalizeDouble(tp, _Digits);").ok();
+            }
+        }
+    } else {
+        writeln!(out, "   return 0.0;  // No take profit configured").ok();
+    }
+    writeln!(out, "}}").ok();
+    writeln!(out).ok();
+
+    // ── SR_ManageTrailingStop ─────────────────────────────────────────────────
+    if let Some(ts) = &strategy.trailing_stop {
+        let ts_period = ts.atr_period.unwrap_or(14);
+        writeln!(out, "//+------------------------------------------------------------------+").ok();
+        writeln!(out, "// SR_ManageTrailingStop: mirrors position.rs update_trailing_stop()").ok();
+        writeln!(out, "void SR_ManageTrailingStop()").ok();
+        writeln!(out, "{{").ok();
+        writeln!(out, "   for(int _i = PositionsTotal() - 1; _i >= 0; _i--)").ok();
+        writeln!(out, "   {{").ok();
+        writeln!(out, "      ulong ticket = PositionGetTicket(_i);").ok();
+        writeln!(out, "      if(ticket == 0) continue;").ok();
+        writeln!(out, "      if((long)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;").ok();
+        writeln!(out, "      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;").ok();
+        writeln!(out).ok();
+        writeln!(out, "      double curSL    = PositionGetDouble(POSITION_SL);").ok();
+        writeln!(out, "      double curTP    = PositionGetDouble(POSITION_TP);").ok();
+        writeln!(out, "      double entry    = PositionGetDouble(POSITION_PRICE_OPEN);").ok();
+        writeln!(out, "      ENUM_POSITION_TYPE ptype = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);").ok();
+        writeln!(out).ok();
+
+        match ts.ts_type {
+            TrailingStopType::ATR => {
+                writeln!(out, "      // ATR trailing stop").ok();
+                writeln!(out, "      if(g_atr{ts_period} <= 0.0) continue;").ok();
+                writeln!(out, "      double trailDist = g_atr{ts_period} * InpTSAtrMult;").ok();
+            }
+            TrailingStopType::RiskReward => {
+                writeln!(out, "      // Risk:Reward trailing stop (distance = initial SL distance * ratio)").ok();
+                writeln!(out, "      if(curSL == 0.0) continue;").ok();
+                writeln!(out, "      double trailDist = MathAbs(entry - curSL) * InpTSRR;").ok();
+            }
+        }
+
+        writeln!(out).ok();
+        writeln!(out, "      if(ptype == POSITION_TYPE_BUY)").ok();
+        writeln!(out, "      {{").ok();
+        writeln!(out, "         double newSL = NormalizeDouble(SymbolInfoDouble(_Symbol, SYMBOL_BID) - trailDist, _Digits);").ok();
+        writeln!(out, "         // Only move SL upward and only if it improves on current SL").ok();
+        writeln!(out, "         if(newSL > curSL + _Point && newSL < SymbolInfoDouble(_Symbol, SYMBOL_BID))").ok();
+        writeln!(out, "            g_trade.PositionModify(_Symbol, newSL, curTP);").ok();
+        writeln!(out, "      }}").ok();
+        writeln!(out, "      else if(ptype == POSITION_TYPE_SELL)").ok();
+        writeln!(out, "      {{").ok();
+        writeln!(out, "         double newSL = NormalizeDouble(SymbolInfoDouble(_Symbol, SYMBOL_ASK) + trailDist, _Digits);").ok();
+        writeln!(out, "         // Only move SL downward and only if it improves on current SL").ok();
+        writeln!(out, "         if((curSL == 0.0 || newSL < curSL - _Point) && newSL > SymbolInfoDouble(_Symbol, SYMBOL_ASK))").ok();
+        writeln!(out, "            g_trade.PositionModify(_Symbol, newSL, curTP);").ok();
+        writeln!(out, "      }}").ok();
+        writeln!(out, "   }}").ok();
+        writeln!(out, "}}").ok();
+        writeln!(out).ok();
+    }
+
+    // ── OnTradeTransaction (AntiMartingale loss counter) ──────────────────────
+    if matches!(strategy.position_sizing.sizing_type, PositionSizingType::AntiMartingale) {
+        writeln!(out, "//+------------------------------------------------------------------+").ok();
+        writeln!(out, "// Track consecutive losses for AntiMartingale position sizing.").ok();
+        writeln!(out, "void OnTradeTransaction(const MqlTradeTransaction &trans,").ok();
+        writeln!(out, "                        const MqlTradeRequest &req,").ok();
+        writeln!(out, "                        const MqlTradeResult  &res)").ok();
+        writeln!(out, "{{").ok();
+        writeln!(out, "   if(trans.type != TRADE_TRANSACTION_DEAL_ADD) return;").ok();
+        writeln!(out, "   if((long)HistoryDealGetInteger(trans.deal, DEAL_MAGIC) != InpMagicNumber) return;").ok();
+        writeln!(out, "   if(HistoryDealGetString(trans.deal, DEAL_SYMBOL) != _Symbol) return;").ok();
+        writeln!(out, "   ENUM_DEAL_ENTRY entry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(trans.deal, DEAL_ENTRY);").ok();
+        writeln!(out, "   if(entry != DEAL_ENTRY_OUT) return;").ok();
+        writeln!(out, "   double profit = HistoryDealGetDouble(trans.deal, DEAL_PROFIT)").ok();
+        writeln!(out, "                 + HistoryDealGetDouble(trans.deal, DEAL_SWAP)").ok();
+        writeln!(out, "                 + HistoryDealGetDouble(trans.deal, DEAL_COMMISSION);").ok();
+        writeln!(out, "   if(profit < 0.0) g_consec_losses++;").ok();
+        writeln!(out, "   else             g_consec_losses = 0;").ok();
+        writeln!(out, "}}").ok();
+        writeln!(out).ok();
+    }
+
+    Ok(CodeGenerationResult {
+        files: vec![CodeFile {
+            filename: format!("{}.mq5", ea_name),
+            code: out,
+            is_main: true,
+        }],
+    })
+}
+
+/// Build the `iCustom()` call string for an SR indicator leaf.
+fn sr_icustom_call(cfg: &IndicatorConfig, var: &str) -> String {
+    match cfg.indicator_type {
+        IndicatorType::SMA => format!("iCustom(_Symbol, PERIOD_CURRENT, \"BT_SMA\", Inp_{}_period)", var),
+        IndicatorType::EMA => format!("iCustom(_Symbol, PERIOD_CURRENT, \"BT_EMA\", Inp_{}_period)", var),
+        IndicatorType::RSI => format!("iCustom(_Symbol, PERIOD_CURRENT, \"BT_RSI\", Inp_{}_period)", var),
+        IndicatorType::MACD => format!("iCustom(_Symbol, PERIOD_CURRENT, \"BT_MACD\", Inp_{0}_fast, Inp_{0}_slow, Inp_{0}_signal)", var),
+        IndicatorType::BollingerBands => format!("iCustom(_Symbol, PERIOD_CURRENT, \"BT_BollingerBands\", Inp_{0}_period, Inp_{0}_stddev)", var),
+        IndicatorType::ATR => format!("iCustom(_Symbol, PERIOD_CURRENT, \"BT_ATR\", Inp_{}_period)", var),
+        IndicatorType::Stochastic => format!("iCustom(_Symbol, PERIOD_CURRENT, \"BT_Stochastic\", Inp_{0}_k, Inp_{0}_d)", var),
+        IndicatorType::ADX => format!("iCustom(_Symbol, PERIOD_CURRENT, \"BT_ADX\", Inp_{}_period)", var),
+        IndicatorType::CCI => format!("iCustom(_Symbol, PERIOD_CURRENT, \"BT_CCI\", Inp_{}_period)", var),
+        IndicatorType::WilliamsR => format!("iCustom(_Symbol, PERIOD_CURRENT, \"BT_WilliamsR\", Inp_{}_period)", var),
+        IndicatorType::ParabolicSAR => format!("iCustom(_Symbol, PERIOD_CURRENT, \"BT_ParabolicSAR\", Inp_{0}_af, Inp_{0}_max)", var),
+        IndicatorType::ROC => format!("iCustom(_Symbol, PERIOD_CURRENT, \"BT_ROC\", Inp_{}_period)", var),
+        IndicatorType::VWAP => "iCustom(_Symbol, PERIOD_CURRENT, \"BT_VWAP\")".to_string(),
+        IndicatorType::Ichimoku => format!("iCustom(_Symbol, PERIOD_CURRENT, \"BT_Ichimoku\", Inp_{0}_tenkan, Inp_{0}_kijun, Inp_{0}_senkou)", var),
+        IndicatorType::KeltnerChannel => format!("iCustom(_Symbol, PERIOD_CURRENT, \"BT_KeltnerChannel\", Inp_{0}_period, Inp_{0}_mult)", var),
+        IndicatorType::SuperTrend => format!("iCustom(_Symbol, PERIOD_CURRENT, \"BT_SuperTrend\", Inp_{0}_period, Inp_{0}_mult)", var),
+        IndicatorType::LaguerreRSI => format!("iCustom(_Symbol, PERIOD_CURRENT, \"BT_LaguerreRSI\", Inp_{}_gamma)", var),
+        IndicatorType::BearsPower => format!("iCustom(_Symbol, PERIOD_CURRENT, \"BT_BearsPower\", Inp_{}_period)", var),
+        IndicatorType::BullsPower => format!("iCustom(_Symbol, PERIOD_CURRENT, \"BT_BullsPower\", Inp_{}_period)", var),
+        IndicatorType::DeMarker => format!("iCustom(_Symbol, PERIOD_CURRENT, \"BT_DeMarker\", Inp_{}_period)", var),
+        IndicatorType::AwesomeOscillator => "iCustom(_Symbol, PERIOD_CURRENT, \"BT_AwesomeOscillator\")".to_string(),
+        IndicatorType::BarRange => "iCustom(_Symbol, PERIOD_CURRENT, \"BT_BarRange\")".to_string(),
+        IndicatorType::TrueRange => "iCustom(_Symbol, PERIOD_CURRENT, \"BT_TrueRange\")".to_string(),
+        IndicatorType::Momentum => format!("iCustom(_Symbol, PERIOD_CURRENT, \"BT_Momentum\", Inp_{}_period)", var),
+        IndicatorType::LinearRegression => format!("iCustom(_Symbol, PERIOD_CURRENT, \"BT_LinearRegression\", Inp_{}_period)", var),
+        IndicatorType::Fractal => "iCustom(_Symbol, PERIOD_CURRENT, \"BT_Fractal\")".to_string(),
+        IndicatorType::StdDev => format!("iCustom(_Symbol, PERIOD_CURRENT, \"BT_StdDev\", Inp_{}_period)", var),
+        IndicatorType::HeikenAshi => "iCustom(_Symbol, PERIOD_CURRENT, \"BT_HeikenAshi\")".to_string(),
+        _ => {
+            let type_name = format!("{:?}", cfg.indicator_type);
+            if cfg.params.period.is_some() {
+                format!("iCustom(_Symbol, PERIOD_CURRENT, \"BT_{}\", Inp_{}_period)", type_name, var)
+            } else {
+                format!("iCustom(_Symbol, PERIOD_CURRENT, \"BT_{}\")", type_name)
+            }
+        }
     }
 }
