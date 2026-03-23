@@ -19,7 +19,6 @@ pub enum IndicatorType {
     ROC,
     WilliamsR,
     ParabolicSAR,
-    VWAP,
     // New indicators
     Aroon,
     AwesomeOscillator,

@@ -209,7 +209,6 @@ fn indicator_var_name(ind: &IndicatorConfig) -> String {
         IndicatorType::ROC => "roc",
         IndicatorType::WilliamsR => "wpr",
         IndicatorType::ParabolicSAR => "sar",
-        IndicatorType::VWAP => "vwap",
         IndicatorType::Aroon => "aroon",
         IndicatorType::AwesomeOscillator => "ao",
         IndicatorType::BarRange => "barrange",
@@ -245,7 +244,7 @@ fn indicator_var_name(ind: &IndicatorConfig) -> String {
     // append any suffix so duplicates are deduplicated and no phantom Inp_* vars are needed.
     let no_params = matches!(ind.indicator_type,
         IndicatorType::BarRange | IndicatorType::TrueRange |
-        IndicatorType::AwesomeOscillator | IndicatorType::VWAP |
+        IndicatorType::AwesomeOscillator |
         IndicatorType::Fractal | IndicatorType::HeikenAshi |
         IndicatorType::Pivots
     );
@@ -493,7 +492,7 @@ fn mql5_inputs(out: &mut String, strategy: &Strategy, indicators: &[UniqueIndica
                 writeln!(out, "input double Inp_{}_af = {:.2};", ind.var_name, p.acceleration_factor.unwrap_or(0.02)).ok();
                 writeln!(out, "input double Inp_{}_max = {:.2};", ind.var_name, p.maximum_factor.unwrap_or(0.20)).ok();
             }
-            IndicatorType::VWAP | IndicatorType::AwesomeOscillator |
+            IndicatorType::AwesomeOscillator |
             IndicatorType::BarRange | IndicatorType::Fractal |
             IndicatorType::HeikenAshi | IndicatorType::TrueRange |
             IndicatorType::Pivots => {
@@ -607,9 +606,6 @@ fn mql5_on_init(out: &mut String, indicators: &[UniqueIndicator]) {
             IndicatorType::ROC => format!(
                 "iCustom(_Symbol, PERIOD_CURRENT, \"BT_ROC\", Inp_{}_period)",
                 ind.var_name
-            ),
-            IndicatorType::VWAP => format!(
-                "iCustom(_Symbol, PERIOD_CURRENT, \"BT_VWAP\")"
             ),
             IndicatorType::Ichimoku => format!(
                 "iCustom(_Symbol, PERIOD_CURRENT, \"BT_Ichimoku\", Inp_{0}_tenkan, Inp_{0}_kijun, Inp_{0}_senkou)",
@@ -1435,7 +1431,7 @@ fn pine_inputs(out: &mut String, strategy: &Strategy, indicators: &[UniqueIndica
                 writeln!(out, "i_{}_af = input.float({:.2}, \"SAR Accel\")", ind.var_name, p.acceleration_factor.unwrap_or(0.02)).ok();
                 writeln!(out, "i_{}_max = input.float({:.2}, \"SAR Max\")", ind.var_name, p.maximum_factor.unwrap_or(0.20)).ok();
             }
-            IndicatorType::VWAP | IndicatorType::AwesomeOscillator |
+            IndicatorType::AwesomeOscillator |
             IndicatorType::BarRange | IndicatorType::Fractal |
             IndicatorType::HeikenAshi | IndicatorType::TrueRange |
             IndicatorType::Pivots => {} // no params
@@ -1541,9 +1537,6 @@ fn pine_indicators(out: &mut String, indicators: &[UniqueIndicator]) {
             }
             IndicatorType::ParabolicSAR => {
                 writeln!(out, "{} = ta.sar(i_{0}_af, i_{0}_af, i_{0}_max)", ind.var_name).ok();
-            }
-            IndicatorType::VWAP => {
-                writeln!(out, "{} = ta.vwap(hlc3)", ind.var_name).ok();
             }
             IndicatorType::Aroon => {
                 writeln!(out, "{0}_up = 100.0 * (i_{0}_period - ta.highestbars(high, i_{0}_period)) / i_{0}_period", ind.var_name).ok();
@@ -2049,9 +2042,6 @@ fn pine_plots(out: &mut String, indicators: &[UniqueIndicator], strategy: &Strat
             IndicatorType::ParabolicSAR => {
                 writeln!(out, "plot({}, \"SAR\", style=plot.style_circles, color=color.purple, linewidth=1)", ind.var_name).ok();
             }
-            IndicatorType::VWAP => {
-                writeln!(out, "plot({}, \"VWAP\", color=color.yellow, linewidth=2)", ind.var_name).ok();
-            }
             _ => {} // Non-overlay indicators (RSI, MACD, etc.) would need separate pane
         }
     }
@@ -2091,7 +2081,6 @@ fn generate_custom_indicator(ind_type: IndicatorType) -> Option<(String, String)
         IndicatorType::ROC => ("BT_ROC.mq5".into(), gen_mql5_roc()),
         IndicatorType::WilliamsR => ("BT_WilliamsR.mq5".into(), gen_mql5_williams_r()),
         IndicatorType::ParabolicSAR => ("BT_ParabolicSAR.mq5".into(), gen_mql5_parabolic_sar()),
-        IndicatorType::VWAP => ("BT_VWAP.mq5".into(), gen_mql5_vwap()),
         // Extended indicators — custom MQL5 indicator files
         IndicatorType::Aroon => ("BT_Aroon.mq5".into(), gen_mql5_aroon()),
         IndicatorType::BarRange => ("BT_BarRange.mq5".into(), gen_mql5_bar_range()),
@@ -3353,88 +3342,6 @@ int OnCalculate(const int rates_total,
       // For live bars, recalc the last bar only if state is tracked.
       // For simplicity and correctness, recalc all.
       return 0; // Forces full recalc next tick
-   }
-
-   return rates_total;
-}
-"#);
-    out
-}
-
-// ── BT_VWAP ──
-
-fn gen_mql5_vwap() -> String {
-    let mut out = mql5_indicator_header("BT_VWAP");
-    out.push_str(r#"#property indicator_chart_window
-#property indicator_buffers 1
-#property indicator_plots   1
-#property indicator_label1  "VWAP"
-#property indicator_type1   DRAW_LINE
-#property indicator_color1  clrGold
-#property indicator_width1  2
-
-double VwapBuffer[];
-
-// Internal state for daily reset
-double gCumTPVol = 0;
-double gCumVol   = 0;
-int    gLastDay  = -1;
-
-int OnInit()
-{
-   SetIndexBuffer(0, VwapBuffer, INDICATOR_DATA);
-   PlotIndexSetDouble(0, PLOT_EMPTY_VALUE, EMPTY_VALUE);
-   IndicatorSetString(INDICATOR_SHORTNAME, "BT_VWAP");
-   return INIT_SUCCEEDED;
-}
-
-int OnCalculate(const int rates_total,
-                const int prev_calculated,
-                const datetime &time[],
-                const double &open[],
-                const double &high[],
-                const double &low[],
-                const double &close[],
-                const long &tick_volume[],
-                const long &volume[],
-                const int &spread[])
-{
-   if(rates_total < 1) return 0;
-
-   int start;
-   if(prev_calculated == 0)
-   {
-      gCumTPVol = 0;
-      gCumVol   = 0;
-      gLastDay  = -1;
-      start = 0;
-   }
-   else
-   {
-      start = prev_calculated - 1;
-   }
-
-   for(int i = start; i < rates_total; i++)
-   {
-      MqlDateTime dt;
-      TimeToStruct(time[i], dt);
-      int currentDay = dt.day_of_year;
-
-      // Reset on new day
-      if(currentDay != gLastDay)
-      {
-         gCumTPVol = 0;
-         gCumVol   = 0;
-         gLastDay  = currentDay;
-      }
-
-      double tp = (high[i] + low[i] + close[i]) / 3.0;
-      // Use tick_volume as volume proxy (standard for forex in MT5)
-      double vol = (double)tick_volume[i];
-      gCumTPVol += tp * vol;
-      gCumVol   += vol;
-
-      VwapBuffer[i] = (gCumVol == 0) ? tp : gCumTPVol / gCumVol;
    }
 
    return rates_total;
@@ -5171,7 +5078,6 @@ fn sr_icustom_call(cfg: &IndicatorConfig, var: &str) -> String {
         IndicatorType::WilliamsR => format!("iCustom(_Symbol, PERIOD_CURRENT, \"BT_WilliamsR\", Inp_{}_period)", var),
         IndicatorType::ParabolicSAR => format!("iCustom(_Symbol, PERIOD_CURRENT, \"BT_ParabolicSAR\", Inp_{0}_af, Inp_{0}_max)", var),
         IndicatorType::ROC => format!("iCustom(_Symbol, PERIOD_CURRENT, \"BT_ROC\", Inp_{}_period)", var),
-        IndicatorType::VWAP => "iCustom(_Symbol, PERIOD_CURRENT, \"BT_VWAP\")".to_string(),
         IndicatorType::Ichimoku => format!("iCustom(_Symbol, PERIOD_CURRENT, \"BT_Ichimoku\", Inp_{0}_tenkan, Inp_{0}_kijun, Inp_{0}_senkou)", var),
         IndicatorType::KeltnerChannel => format!("iCustom(_Symbol, PERIOD_CURRENT, \"BT_KeltnerChannel\", Inp_{0}_period, Inp_{0}_mult)", var),
         IndicatorType::SuperTrend => format!("iCustom(_Symbol, PERIOD_CURRENT, \"BT_SuperTrend\", Inp_{0}_period, Inp_{0}_mult)", var),

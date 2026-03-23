@@ -15,6 +15,7 @@ import { StrategyDetailOverlay } from "./StrategyDetailOverlay";
 import { ProjectBreadcrumb } from "./ProjectBreadcrumb";
 import { SrTab } from "./tabs/SrTab";
 import { SrResultsPanel } from "./SrResultsPanel";
+import { BuilderResultsView } from "./BuilderResultsView";
 import type { BuilderSavedStrategy } from "@/lib/types";
 
 type TopTab = "progress" | "fullSettings" | "results";
@@ -136,9 +137,7 @@ export function BuilderPage() {
                 onClose={() => setBuilderDetailStrategy(null)}
               />
             ) : (
-              <div className="flex h-full items-center justify-center text-sm text-muted-foreground/40">
-                Haz doble clic en una estrategia del databank para ver sus resultados
-              </div>
+              <BuilderResultsView />
             )
           )}
 

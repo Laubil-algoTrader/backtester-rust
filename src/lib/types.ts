@@ -254,7 +254,6 @@ export type IndicatorType =
   | "ROC"
   | "WilliamsR"
   | "ParabolicSAR"
-  | "VWAP"
   | "Aroon"
   | "AwesomeOscillator"
   | "BarRange"
@@ -1218,6 +1217,16 @@ export interface SrConfig {
   trailing_stop?: TrailingStop;
   trading_costs: TradingCosts;
   trade_direction: TradeDirection;
+  // Initial strategy filters (Phase 1 databank acceptance)
+  initial_min_sharpe?: number;
+  initial_min_profit_factor?: number;
+  /** Max drawdown % allowed (e.g. 30 = reject if drawdown > 30%). 0 = no filter. */
+  initial_max_drawdown_pct?: number;
+  // Final strategy filters (applied to Pareto front before returning to UI)
+  final_min_sharpe?: number;
+  final_min_profit_factor?: number;
+  final_min_trades?: number;
+  final_max_drawdown_pct?: number;
 }
 
 export interface SrObjectives {
@@ -1240,7 +1249,7 @@ export interface SrFrontItem {
 }
 
 export type SrProgressEvent =
-  | { type: "Generation"; data: { gen: number; total: number; pareto_size: number; best_sharpe: number; databank_count: number; databank_limit: number } }
+  | { type: "Generation"; data: { gen: number; total: number; pareto_size: number; best_sharpe: number; databank_count: number; databank_limit: number; total_evaluated: number; strategies_per_sec: number } }
   | { type: "CmaesProgress"; data: { current: number; total: number } }
   | { type: "CmaesComplete"; data: { improved_count: number } }
   | { type: "Done"; data: { front: SrFrontItem[] } }

@@ -33,7 +33,6 @@ export const INDICATOR_OPTIONS: { value: IndicatorType; label: string }[] = [
   { value: "ROC", label: "ROC" },
   { value: "WilliamsR", label: "Williams %R" },
   { value: "ParabolicSAR", label: "Parabolic SAR" },
-  { value: "VWAP", label: "VWAP" },
   // New indicators
   { value: "Aroon", label: "Aroon" },
   { value: "AwesomeOscillator", label: "Awesome Oscillator" },
@@ -132,7 +131,6 @@ export function getIndicatorParamFields(type: IndicatorType): ParamField[] {
         { key: "acceleration_factor", label: "Accel", defaultValue: 0.02, min: 0.001, max: 0.5, step: 0.001 },
         { key: "maximum_factor", label: "Max", defaultValue: 0.2, min: 0.01, max: 1.0, step: 0.01 },
       ];
-    case "VWAP":
     case "AwesomeOscillator":
     case "BarRange":
     case "Fractal":

@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { listen } from "@tauri-apps/api/event";
 import { Play, Square, Pause, Trash2, ChevronDown } from "lucide-react";
 import { useAppStore } from "@/stores/useAppStore";
-import { startBuilder, stopBuilder, pauseBuilder } from "@/lib/tauri";
+import { startBuilder, stopBuilder, pauseBuilder, cancelSrBuilder } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import type { BuilderRuntimeStats, BuilderSavedStrategy, BuilderIslandStats } from "@/lib/types";
 
@@ -160,11 +160,178 @@ function SettingsSummary() {
   );
 }
 
+// ── SR Progress View ──────────────────────────────────────────────────────────
+
+function SrProgressView() {
+  const {
+    srRunning, setSrRunning,
+    srProgress, setSrProgress,
+    srResults,
+    setBuilderTopTab,
+  } = useAppStore();
+
+  const [startTime, setStartTime] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (srRunning) {
+      setStartTime((prev) => prev ?? Date.now());
+    } else {
+      setStartTime(null);
+    }
+  }, [srRunning]);
+
+  const elapsed = useElapsedTime(startTime, srRunning);
+
+  const handleStop = async () => {
+    setSrRunning(false);
+    setSrProgress(null);
+    try {
+      await cancelSrBuilder();
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const isGeneration = srProgress?.phase === "generation";
+  const isCmaes = srProgress?.phase === "cmaes";
+
+  const fillPct = isGeneration && srProgress
+    ? Math.min(100, (srProgress.databank_count / Math.max(1, srProgress.databank_limit)) * 100)
+    : isCmaes && srProgress
+    ? Math.min(100, (srProgress.current / Math.max(1, srProgress.total)) * 100)
+    : 0;
+
+  return (
+    <div className="flex h-full flex-col gap-0 overflow-auto">
+      <div className="flex flex-col gap-4 p-4">
+
+        {/* ── Control bar ──────────────────────────────────────────────────── */}
+        <div className="flex items-center gap-2">
+          {srRunning ? (
+            <>
+              <button
+                onClick={handleStop}
+                className="flex items-center gap-2 rounded border border-destructive/40 bg-destructive/10 px-5 py-2.5 text-sm font-semibold text-destructive transition-colors hover:bg-destructive/20"
+              >
+                <Square className="h-4 w-4" />
+                Detener SR Builder
+              </button>
+              <span className="ml-1 inline-flex items-center gap-1.5 rounded px-2 py-1 text-[11px] font-medium bg-primary/10 text-primary">
+                <span className="h-1.5 w-1.5 rounded-full animate-pulse bg-primary" />
+                {isCmaes ? "Refinando con CMA-ES…" : "Ejecutando NSGA-II…"}
+              </span>
+            </>
+          ) : (
+            <button
+              onClick={() => setBuilderTopTab("fullSettings")}
+              className="flex items-center gap-2 rounded px-5 py-2.5 text-sm font-semibold bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+            >
+              <Play className="h-4 w-4" />
+              Configurar e Iniciar
+            </button>
+          )}
+        </div>
+
+        {/* ── Big counters (generation phase) ─────────────────────────────── */}
+        {srProgress && isGeneration && (
+          <div className="flex gap-2">
+            <BigStat label="Evaluadas" value={srProgress.total_evaluated.toLocaleString()} />
+            <BigStat label="Databank" value={`${srProgress.databank_count}/${srProgress.databank_limit}`} color="text-primary" />
+            <BigStat label="Pareto" value={srProgress.pareto_size} />
+            <BigStat label="Mejor Sharpe" value={srProgress.best_sharpe.toFixed(3)} color="text-emerald-400" />
+          </div>
+        )}
+
+        {/* ── Big counters (CMA-ES phase) ──────────────────────────────────── */}
+        {srProgress && isCmaes && (
+          <div className="flex gap-2">
+            <BigStat label="Refinando" value={`${srProgress.current} / ${srProgress.total}`} color="text-primary" />
+            <BigStat label="Progreso" value={`${Math.round((srProgress.current / Math.max(1, srProgress.total)) * 100)}%`} />
+          </div>
+        )}
+
+        {/* ── Progress bar ─────────────────────────────────────────────────── */}
+        {srProgress && (
+          <div className="flex flex-col gap-1.5">
+            <div className="flex items-center justify-between text-[10px] text-muted-foreground/60">
+              <span>
+                {isGeneration
+                  ? `Generación ${srProgress.gen}${srProgress.total > 0 ? ` / ${srProgress.total}` : " — sin límite"} · Databank ${srProgress.databank_count}/${srProgress.databank_limit}`
+                  : `Refinando constantes ${srProgress.current} / ${srProgress.total}`}
+              </span>
+              <span className="tabular-nums font-medium text-foreground/70">
+                {fillPct.toFixed(0)}%
+              </span>
+            </div>
+            <div className="h-2 w-full overflow-hidden rounded-full bg-muted/30">
+              <div
+                className="h-full rounded-full bg-primary transition-all duration-500"
+                style={{ width: `${fillPct}%` }}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* ── Time stats (generation phase only) ──────────────────────────── */}
+        {srProgress && isGeneration && (
+          <div className="grid grid-cols-3 gap-4 rounded border border-border/25 bg-muted/5 px-4 py-3">
+            <TimeStat
+              label="Estrategias / seg"
+              value={
+                srProgress.strategies_per_sec >= 1
+                  ? srProgress.strategies_per_sec.toFixed(0)
+                  : srProgress.strategies_per_sec.toFixed(1)
+              }
+            />
+            <TimeStat label="Total evaluadas" value={srProgress.total_evaluated.toLocaleString()} />
+            <TimeStat label="Tiempo total" value={elapsed} />
+          </div>
+        )}
+
+        {/* ── Idle — no results ────────────────────────────────────────────── */}
+        {!srRunning && !srProgress && srResults.length === 0 && (
+          <div className="flex flex-col items-center justify-center gap-3 rounded border border-border/25 bg-muted/5 px-4 py-10 text-center">
+            <span className="text-sm text-muted-foreground/60">No hay ninguna ejecución activa</span>
+            <p className="text-[11px] text-muted-foreground/40 max-w-xs">
+              Configurá la Regresión Simbólica en{" "}
+              <strong className="text-muted-foreground/60">Configuración completa</strong>{" "}
+              y presioná <strong className="text-muted-foreground/60">Iniciar SR Builder</strong>.
+            </p>
+            <button
+              onClick={() => setBuilderTopTab("fullSettings")}
+              className="mt-1 rounded border border-border/40 px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:border-primary/50 transition-colors"
+            >
+              Ir a Configuración →
+            </button>
+          </div>
+        )}
+
+        {/* ── Done — results ready ─────────────────────────────────────────── */}
+        {!srRunning && srResults.length > 0 && (
+          <div className="flex flex-col items-center justify-center gap-3 rounded border border-primary/20 bg-primary/5 px-4 py-6 text-center">
+            <span className="text-sm font-medium text-foreground">
+              SR Builder completado — {srResults.length} estrategia{srResults.length !== 1 ? "s" : ""} en el frente de Pareto
+            </span>
+            <button
+              onClick={() => setBuilderTopTab("results")}
+              className="rounded bg-primary/10 border border-primary/30 px-4 py-1.5 text-xs text-primary hover:bg-primary/20 transition-colors"
+            >
+              Ver resultados →
+            </button>
+          </div>
+        )}
+
+      </div>
+    </div>
+  );
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 export function ProgressTab() {
   const { t } = useTranslation("builder");
   const {
+    builderMethod,
     builderRunning,
     builderPaused,
     setBuilderRunning,
@@ -205,6 +372,9 @@ export function ProgressTab() {
   }, []);
 
   const elapsed = useElapsedTime(builderStats.startTime, builderRunning);
+
+  // SR Builder uses its own progress view
+  if (builderMethod === "sr") return <SrProgressView />;
 
   const handleStart = async () => {
     const dc = builderConfig.dataConfig;
@@ -431,7 +601,13 @@ export function ProgressTab() {
         </div>
 
         {/* ── Time stats ──────────────────────────────────────────────────── */}
-        <div className="grid grid-cols-4 gap-4 rounded border border-border/25 bg-muted/5 px-4 py-3">
+        <div className="grid grid-cols-5 gap-4 rounded border border-border/25 bg-muted/5 px-4 py-3">
+          <TimeStat
+            label="Vel. generación"
+            value={builderStats.timePerStrategyMs > 0
+              ? `${(1000 / builderStats.timePerStrategyMs).toFixed(1)} /seg`
+              : "—"}
+          />
           <TimeStat
             label="Tiempo por estrategia"
             value={builderStats.timePerStrategyMs > 0 ? `${builderStats.timePerStrategyMs.toFixed(0)} ms` : "—"}

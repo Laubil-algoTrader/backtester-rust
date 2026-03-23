@@ -1,6 +1,6 @@
 import { useState, useMemo } from "react";
 import {
-  ArrowLeft, Code2, ExternalLink, Settings2, BarChart3, ChevronRight, TestTube2,
+  ArrowLeft, Code2, ExternalLink, Settings2, BarChart3, ChevronRight, TestTube2, BookmarkCheck,
 } from "lucide-react";
 import { useAppStore } from "@/stores/useAppStore";
 import {
@@ -375,8 +375,9 @@ interface StrategyDetailOverlayProps {
 }
 
 export function StrategyDetailOverlay({ saved, onClose }: StrategyDetailOverlayProps) {
-  const { setCurrentStrategy, setActiveSection, setPendingBacktestRun } = useAppStore();
+  const { setCurrentStrategy, setActiveSection, setPendingBacktestRun, saveStrategyToResults, setBuilderTopTab } = useAppStore();
   const [activeTab, setActiveTab] = useState<DetailTab>("results");
+  const [savedToResults, setSavedToResults] = useState(false);
 
   const strategy = useMemo<Strategy | null>(() => {
     try { return JSON.parse(saved.strategyJson) as Strategy; }
@@ -397,6 +398,18 @@ export function StrategyDetailOverlay({ saved, onClose }: StrategyDetailOverlayP
       setPendingBacktestRun(true);
       setActiveSection("backtest");
     }
+  };
+
+  const handleSaveToResults = () => {
+    saveStrategyToResults(saved);
+    setSavedToResults(true);
+    setTimeout(() => setSavedToResults(false), 2000);
+  };
+
+  const handleGoToResults = () => {
+    saveStrategyToResults(saved);
+    onClose();
+    setBuilderTopTab("results");
   };
 
   const TABS: { id: DetailTab; label: string; icon: React.ReactNode }[] = [
@@ -447,6 +460,19 @@ export function StrategyDetailOverlay({ saved, onClose }: StrategyDetailOverlayP
           >
             <TestTube2 className="h-3.5 w-3.5" />
             Probar en Backtest
+          </button>
+          <button
+            onClick={handleGoToResults}
+            className={cn(
+              "flex items-center gap-1.5 rounded border px-3 py-1.5 text-xs font-medium transition-colors",
+              savedToResults
+                ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-400"
+                : "border-emerald-600/30 bg-emerald-600/10 text-emerald-400 hover:bg-emerald-600/20"
+            )}
+            title="Guardar en databank Resultados y ver análisis completo"
+          >
+            <BookmarkCheck className="h-3.5 w-3.5" />
+            {savedToResults ? "¡Guardado!" : "Guardar en Resultados"}
           </button>
           <button
             onClick={handleExport}

@@ -1198,7 +1198,6 @@ fn indicator_lookback(config: &IndicatorConfig) -> usize {
         }
         ADX => config.params.period.unwrap_or(14) * 2 + 1,
         ParabolicSAR => 2,
-        VWAP => 1,
         // New indicators
         Aroon | Momentum | Vortex => config.params.period.unwrap_or(14) + 1,
         AwesomeOscillator => 34,

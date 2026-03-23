@@ -39,6 +39,67 @@ export interface SrRunMeta {
   endDate: string;
   initialCapital: number;
 }
+
+import type { SubTab, PoolEntryState } from "@/lib/srBuilderTypes";
+
+export interface SrBuilderConfig {
+  activeTab: SubTab;
+  symbolId: string;
+  timeframe: Timeframe;
+  startDate: string;
+  endDate: string;
+  initialCapital: number;
+  activePool: PoolEntryState[];
+  checkedTypes: IndicatorType[];
+  databankLimit: number;
+  maxTradesPerDay: number;
+  tradeDirection: TradeDirection;
+  populationSize: number;
+  generations: number;
+  crossoverRate: number;
+  mutationRate: number;
+  maxDepth: number;
+  minTrades: number;
+  cmaesTopK: number;
+  cmaesIterations: number;
+  initMinSharpe: number;
+  initMinPF: number;
+  initMaxDD: number;
+  finalMinSharpe: number;
+  finalMinPF: number;
+  finalMinTrades: number;
+  finalMaxDD: number;
+}
+
+const defaultSrBuilderConfig: SrBuilderConfig = {
+  activeTab: "config",
+  symbolId: "",
+  timeframe: "h1",
+  startDate: "",
+  endDate: "",
+  initialCapital: 10000,
+  activePool: [],
+  checkedTypes: [],
+  databankLimit: 50,
+  maxTradesPerDay: 0,
+  tradeDirection: "Both",
+  populationSize: 150,
+  generations: 0,
+  crossoverRate: 0.7,
+  mutationRate: 0.3,
+  maxDepth: 5,
+  minTrades: 20,
+  cmaesTopK: 10,
+  cmaesIterations: 200,
+  initMinSharpe: 0,
+  initMinPF: 0,
+  initMaxDD: 0,
+  finalMinSharpe: 0,
+  finalMinPF: 0,
+  finalMinTrades: 0,
+  finalMaxDD: 0,
+};
+
 import {
   saveProject,
   loadProjectsFromDisk,
@@ -77,7 +138,7 @@ const ALL_INDICATORS: IndicatorType[] = [
   "BollingerBands", "GannHiLo", "HeikenAshi", "HighestInRange", "HullMA", "Ichimoku", "KeltnerChannel",
   "LaguerreRSI", "LinearRegression", "LowestInRange", "MACD", "Momentum", "ParabolicSAR",
   "Pivots", "Reflex", "ROC", "RSI", "SmallestRange", "SMA", "Stochastic", "StdDev",
-  "SuperTrend", "TrueRange", "UlcerIndex", "VWAP", "Vortex", "WilliamsR",
+  "SuperTrend", "TrueRange", "UlcerIndex", "Vortex", "WilliamsR",
 ] as IndicatorType[];
 
 const defaultBuilderConfig: BuilderConfig = {
@@ -403,6 +464,7 @@ interface AppState {
   setTargetDatabankId: (id: string) => void;
   addToBuilderDatabank: (strategy: BuilderSavedStrategy) => void;
   removeFromBuilderDatabank: (databankId: string, strategyIds: string[]) => void;
+  saveStrategyToResults: (strategy: BuilderSavedStrategy) => void;
   builderIslandStats: BuilderIslandStats[];
   upsertBuilderIslandStats: (stats: BuilderIslandStats) => void;
   clearBuilderIslandStats: () => void;
@@ -438,6 +500,9 @@ interface AppState {
   /** Config used for the last SR run — needed by "View in Backtest" */
   srLastConfig: SrRunMeta | null;
   setSrLastConfig: (c: SrRunMeta | null) => void;
+  /** Persisted SR builder configuration — survives tab navigation */
+  srBuilderConfig: SrBuilderConfig;
+  updateSrBuilderConfig: (partial: Partial<SrBuilderConfig>) => void;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -661,9 +726,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   setBuilderStats: (partial) =>
     set((state) => ({ builderStats: { ...state.builderStats, ...partial } })),
-  builderDatabanks: [{ id: "results", name: "Results", strategies: [] }],
-  activeDatabankId: "results",
-  targetDatabankId: "results",
+  builderDatabanks: [
+    { id: "builder", name: "Builder", strategies: [] },
+    { id: "results", name: "Results", strategies: [] },
+  ],
+  activeDatabankId: "builder",
+  targetDatabankId: "builder",
   createBuilderDatabank: (name) => {
     const id = `db_${Date.now()}`;
     const bankName = name ?? `Databank ${id.slice(-4)}`;
@@ -683,7 +751,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   deleteBuilderDatabank: (id) =>
     set((s) => {
       const remaining = s.builderDatabanks.filter((db) => db.id !== id);
-      const fallback = remaining[0]?.id ?? "results";
+      const fallback = remaining[0]?.id ?? "builder";
       return {
         builderDatabanks: remaining,
         activeDatabankId: s.activeDatabankId === id ? fallback : s.activeDatabankId,
@@ -723,6 +791,20 @@ export const useAppStore = create<AppState>((set, get) => ({
       ),
       activeProjectTaskDirty: s.activeProjectTaskId ? true : s.activeProjectTaskDirty,
     })),
+  saveStrategyToResults: (strategy) =>
+    set((s) => {
+      const already = s.builderDatabanks
+        .find((db) => db.id === "results")
+        ?.strategies.some((st) => st.id === strategy.id) ?? false;
+      if (already) return {};
+      return {
+        builderDatabanks: s.builderDatabanks.map((db) =>
+          db.id === "results"
+            ? { ...db, strategies: [...db.strategies, strategy] }
+            : db
+        ),
+      };
+    }),
   builderIslandStats: [],
   upsertBuilderIslandStats: (stats) =>
     set((state) => {
@@ -789,7 +871,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           activeProjectTaskId: null,
           activeProjectTaskDirty: false,
           builderConfig: defaultBuilderConfig,
-          builderDatabanks: [{ id: "results", name: "Results", strategies: [] }],
+          builderDatabanks: [{ id: "builder", name: "Builder", strategies: [] }, { id: "results", name: "Results", strategies: [] }],
           activeSection: "projects",
         }),
       };
@@ -935,7 +1017,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({
       activeProjectTaskId: null,
       builderConfig: defaultBuilderConfig,
-      builderDatabanks: [{ id: "results", name: "Results", strategies: [] }],
+      builderDatabanks: [{ id: "builder", name: "Builder", strategies: [] }, { id: "results", name: "Results", strategies: [] }],
       activeProjectTaskDirty: false,
       activeSection: "projects",
     });
@@ -952,4 +1034,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   setSrProgress: (p) => set({ srProgress: p }),
   srLastConfig: null,
   setSrLastConfig: (c) => set({ srLastConfig: c }),
+  srBuilderConfig: defaultSrBuilderConfig,
+  updateSrBuilderConfig: (partial) =>
+    set((s) => ({ srBuilderConfig: { ...s.srBuilderConfig, ...partial } })),
 }));

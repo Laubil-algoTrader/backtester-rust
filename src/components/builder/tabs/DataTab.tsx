@@ -198,7 +198,14 @@ export function DataTab() {
               <span className="w-28 shrink-0 text-sm text-muted-foreground">{t("data.symbol")}</span>
               <Select
                 value={dc.symbolId ?? ""}
-                onValueChange={(v) => update({ symbolId: v || null })}
+                onValueChange={(v) => {
+                  const sym = symbols.find((s) => s.id === v);
+                  update({
+                    symbolId: v || null,
+                    startDate: sym?.start_date?.slice(0, 10) ?? "",
+                    endDate: sym?.end_date?.slice(0, 10) ?? "",
+                  });
+                }}
               >
                 <SelectTrigger className="h-8 flex-1 text-sm">
                   <SelectValue placeholder="— Select symbol —" />

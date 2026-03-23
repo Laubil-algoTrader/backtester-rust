@@ -1022,9 +1022,6 @@ fn random_indicator_params(
             )
         }
 
-        // VWAP: no params
-        IndicatorType::VWAP => (IndicatorParams::default(), None),
-
         // Aroon: period + dual output
         IndicatorType::Aroon => {
             let period = rand_period_step(rng, pmin, pmax, pstep);

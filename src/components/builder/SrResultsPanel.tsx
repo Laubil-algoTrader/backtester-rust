@@ -3,7 +3,6 @@ import { ChevronDown, ChevronRight, Download, BarChart2, Loader2, X, Copy, Check
 import { useAppStore } from "@/stores/useAppStore";
 import { generateSrCode, runSrBacktest } from "@/lib/tauri";
 import type { SrFrontItem } from "@/lib/types";
-import type { SrRunMeta } from "@/stores/useAppStore";
 
 function fmt(v: number, decimals = 2) {
   return isFinite(v) ? v.toFixed(decimals) : "—";
@@ -235,7 +234,7 @@ function MetricsRow({
 
 export function SrResultsPanel() {
   const {
-    srResults, srRunning, srProgress, srLastConfig,
+    srResults, srLastConfig,
     setBacktestResults, setActiveSection,
   } = useAppStore();
   const [viewError, setViewError] = useState<string | null>(null);
@@ -257,30 +256,6 @@ export function SrResultsPanel() {
     } catch (e) {
       setViewError(String(e));
     }
-  }
-
-  if (srRunning) {
-    return (
-      <div className="flex flex-col items-center justify-center h-full gap-4 text-sm text-muted-foreground">
-        <div className="w-8 h-8 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
-        {srProgress ? (
-          <div className="text-center">
-            {srProgress.phase === "generation" ? (
-              <>
-                <div>Generación {srProgress.gen} / {srProgress.total}</div>
-                <div className="text-xs text-muted-foreground/60 mt-1">
-                  Pareto size: {srProgress.pareto_size} · Best Sharpe: {srProgress.best_sharpe.toFixed(3)}
-                </div>
-              </>
-            ) : (
-              <div>Refinando constantes {srProgress.current} / {srProgress.total}…</div>
-            )}
-          </div>
-        ) : (
-          <div>Inicializando regresión simbólica…</div>
-        )}
-      </div>
-    );
   }
 
   if (srResults.length === 0) {

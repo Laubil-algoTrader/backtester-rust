@@ -69,7 +69,7 @@ pub fn compute_indicator_with_slices(
     let close = &slices.close;
     let high = &slices.high;
     let low = &slices.low;
-    let volume = &slices.volume;
+    let _volume = &slices.volume;
     let open = &slices.open;
 
     match config.indicator_type {
@@ -212,15 +212,6 @@ pub fn compute_indicator_with_slices(
             check_data_len(len, 2)?;
             Ok(IndicatorOutput {
                 primary: parabolic_sar(&high, &low, af, max_af),
-                secondary: None,
-                tertiary: None,
-                extra: None,
-            })
-        }
-        IndicatorType::VWAP => {
-            check_data_len(len, 1)?;
-            Ok(IndicatorOutput {
-                primary: vwap(&high, &low, &close, &volume, candles),
                 secondary: None,
                 tertiary: None,
                 extra: None,
@@ -873,50 +864,6 @@ pub fn parabolic_sar(
         }
 
         result[i] = sar;
-    }
-    result
-}
-
-// ── VWAP ──
-
-/// Volume Weighted Average Price, reset daily.
-pub fn vwap(
-    high: &[f64],
-    low: &[f64],
-    close: &[f64],
-    volume: &[f64],
-    candles: &[Candle],
-) -> Vec<f64> {
-    let len = high.len();
-    let mut result = vec![f64::NAN; len];
-    let mut cum_vol = 0.0f64;
-    let mut cum_tp_vol = 0.0f64;
-    let mut prev_date = String::new();
-
-    for i in 0..len {
-        // Extract date portion (first 10 chars: "YYYY-MM-DD")
-        let current_date = if candles[i].datetime.len() >= 10 {
-            &candles[i].datetime[..10]
-        } else {
-            &candles[i].datetime
-        };
-
-        // Reset on new day
-        if current_date != prev_date {
-            cum_vol = 0.0;
-            cum_tp_vol = 0.0;
-            prev_date = current_date.to_string();
-        }
-
-        let tp = (high[i] + low[i] + close[i]) / 3.0;
-        cum_tp_vol += tp * volume[i];
-        cum_vol += volume[i];
-
-        result[i] = if cum_vol == 0.0 {
-            tp
-        } else {
-            cum_tp_vol / cum_vol
-        };
     }
     result
 }
@@ -1876,26 +1823,6 @@ mod tests {
         assert!(result[13].is_finite(), "ADX[13] should be finite");
         // In a steady uptrend, ADX should be relatively high
         assert!(result[29] > 0.0, "ADX should be positive");
-    }
-
-    #[test]
-    fn test_vwap_basic() {
-        let candles = vec![
-            Candle { datetime: "2024-01-01 09:00".to_string(), open: 100.0, high: 102.0, low: 99.0, close: 101.0, volume: 1000.0, ..Default::default() },
-            Candle { datetime: "2024-01-01 10:00".to_string(), open: 101.0, high: 103.0, low: 100.0, close: 102.0, volume: 1500.0, ..Default::default() },
-            Candle { datetime: "2024-01-02 09:00".to_string(), open: 102.0, high: 104.0, low: 101.0, close: 103.0, volume: 2000.0, ..Default::default() },
-        ];
-        let high: Vec<f64> = candles.iter().map(|c| c.high).collect();
-        let low: Vec<f64> = candles.iter().map(|c| c.low).collect();
-        let close: Vec<f64> = candles.iter().map(|c| c.close).collect();
-        let volume: Vec<f64> = candles.iter().map(|c| c.volume).collect();
-        let result = vwap(&high, &low, &close, &volume, &candles);
-        // First bar: TP = (102+99+101)/3 = 100.666..., VWAP = TP (first bar)
-        let tp0 = (102.0 + 99.0 + 101.0) / 3.0;
-        assert_approx(result[0], tp0, 1e-10, "VWAP[0]");
-        // Third bar is a new day — should reset
-        let tp2 = (104.0 + 101.0 + 103.0) / 3.0;
-        assert_approx(result[2], tp2, 1e-10, "VWAP[2] (new day reset)");
     }
 
     #[test]
