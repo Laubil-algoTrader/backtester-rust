@@ -54,6 +54,48 @@ export interface SrBuilderConfig {
   databankLimit: number;
   maxTradesPerDay: number;
   tradeDirection: TradeDirection;
+  // Position sizing
+  positionSizingType: "FixedLots" | "FixedAmount" | "PercentEquity";
+  positionSizingValue: number;
+  // Trading hours
+  tradingHoursEnabled: boolean;
+  tradingHoursStartHour: number;
+  tradingHoursStartMinute: number;
+  tradingHoursEndHour: number;
+  tradingHoursEndMinute: number;
+  // Close at time
+  closeAtTimeEnabled: boolean;
+  closeAtTimeHour: number;
+  closeAtTimeMinute: number;
+  // Stop Loss
+  slEnabled: boolean;
+  slType: "Pips" | "Percentage" | "ATR";
+  slValue: number;
+  slAtrPeriod: number;
+  slAtrPeriodMin: number;
+  slAtrPeriodMax: number;
+  slAtrMultMin: number;
+  slAtrMultMax: number;
+  // Take Profit
+  tpEnabled: boolean;
+  tpType: "Pips" | "RiskReward" | "ATR";
+  tpValue: number;
+  tpAtrPeriod: number;
+  tpAtrPeriodMin: number;
+  tpAtrPeriodMax: number;
+  tpAtrMultMin: number;
+  tpAtrMultMax: number;
+  // Trailing Stop
+  tsEnabled: boolean;
+  tsType: "ATR" | "RiskReward";
+  tsValue: number;
+  tsAtrPeriod: number;
+  // Exit formula
+  useExitFormula: boolean;
+  // Trading costs
+  spreadPips: number;
+  commissionType: "FixedPerLot" | "Percentage";
+  commissionValue: number;
   populationSize: number;
   generations: number;
   crossoverRate: number;
@@ -83,6 +125,40 @@ const defaultSrBuilderConfig: SrBuilderConfig = {
   databankLimit: 50,
   maxTradesPerDay: 0,
   tradeDirection: "Both",
+  positionSizingType: "FixedLots",
+  positionSizingValue: 1.0,
+  tradingHoursEnabled: false,
+  tradingHoursStartHour: 8,
+  tradingHoursStartMinute: 0,
+  tradingHoursEndHour: 20,
+  tradingHoursEndMinute: 0,
+  closeAtTimeEnabled: false,
+  closeAtTimeHour: 22,
+  closeAtTimeMinute: 0,
+  slEnabled: false,
+  slType: "Pips",
+  slValue: 20,
+  slAtrPeriod: 14,
+  slAtrPeriodMin: 7,
+  slAtrPeriodMax: 21,
+  slAtrMultMin: 0.5,
+  slAtrMultMax: 3.0,
+  tpEnabled: false,
+  tpType: "RiskReward",
+  tpValue: 2.0,
+  tpAtrPeriod: 14,
+  tpAtrPeriodMin: 7,
+  tpAtrPeriodMax: 21,
+  tpAtrMultMin: 0.5,
+  tpAtrMultMax: 3.0,
+  tsEnabled: false,
+  tsType: "ATR",
+  tsValue: 2.0,
+  tsAtrPeriod: 14,
+  useExitFormula: true,
+  spreadPips: 1.0,
+  commissionType: "FixedPerLot",
+  commissionValue: 0,
   populationSize: 150,
   generations: 0,
   crossoverRate: 0.7,
@@ -105,6 +181,18 @@ import {
   loadProjectsFromDisk,
   deleteProjectFromDisk,
 } from "@/lib/tauri";
+
+// ── localStorage helpers ──────────────────────────────────────────────────────
+
+function lsGet<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch { return fallback; }
+}
+function lsSet(key: string, value: unknown): void {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* quota full */ }
+}
 
 // ── Default values ──
 
@@ -463,6 +551,7 @@ interface AppState {
   setActiveDatabankId: (id: string) => void;
   setTargetDatabankId: (id: string) => void;
   addToBuilderDatabank: (strategy: BuilderSavedStrategy) => void;
+  addToBuilderDatabankById: (databankId: string, strategy: BuilderSavedStrategy) => void;
   removeFromBuilderDatabank: (databankId: string, strategyIds: string[]) => void;
   saveStrategyToResults: (strategy: BuilderSavedStrategy) => void;
   builderIslandStats: BuilderIslandStats[];
@@ -503,6 +592,11 @@ interface AppState {
   /** Persisted SR builder configuration — survives tab navigation */
   srBuilderConfig: SrBuilderConfig;
   updateSrBuilderConfig: (partial: Partial<SrBuilderConfig>) => void;
+  /** Saved SR configuration presets */
+  srSavedConfigs: { id: string; name: string; createdAt: string; config: SrBuilderConfig }[];
+  saveSrConfig: (name: string) => void;
+  loadSrConfig: (id: string) => void;
+  deleteSrConfig: (id: string) => void;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -691,16 +785,23 @@ export const useAppStore = create<AppState>((set, get) => ({
   setBuilderSettingsTab: (tab) => set({ builderSettingsTab: tab }),
   setBuilderDetailStrategy: (strategy) => set({ builderDetailStrategy: strategy }),
   setPendingBacktestRun: (v) => set({ pendingBacktestRun: v }),
-  builderConfig: defaultBuilderConfig,
-  setBuilderConfig: (config) => set((s) => ({
-    builderConfig: config,
-    activeProjectTaskDirty: s.activeProjectTaskId ? true : s.activeProjectTaskDirty,
-  })),
-  updateBuilderConfig: (partial) =>
-    set((s) => ({
-      builderConfig: { ...s.builderConfig, ...partial },
+  builderConfig: lsGet("lbquant-builder-config", defaultBuilderConfig),
+  setBuilderConfig: (config) => set((s) => {
+    lsSet("lbquant-builder-config", config);
+    return {
+      builderConfig: config,
       activeProjectTaskDirty: s.activeProjectTaskId ? true : s.activeProjectTaskDirty,
-    })),
+    };
+  }),
+  updateBuilderConfig: (partial) =>
+    set((s) => {
+      const next = { ...s.builderConfig, ...partial };
+      lsSet("lbquant-builder-config", next);
+      return {
+        builderConfig: next,
+        activeProjectTaskDirty: s.activeProjectTaskId ? true : s.activeProjectTaskDirty,
+      };
+    }),
 
   // Builder runtime
   builderRunning: false,
@@ -777,6 +878,15 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => ({
       builderDatabanks: s.builderDatabanks.map((db) =>
         db.id === s.targetDatabankId
+          ? { ...db, strategies: [...db.strategies, strategy] }
+          : db
+      ),
+      activeProjectTaskDirty: s.activeProjectTaskId ? true : s.activeProjectTaskDirty,
+    })),
+  addToBuilderDatabankById: (databankId, strategy) =>
+    set((s) => ({
+      builderDatabanks: s.builderDatabanks.map((db) =>
+        db.id === databankId
           ? { ...db, strategies: [...db.strategies, strategy] }
           : db
       ),
@@ -1034,7 +1144,35 @@ export const useAppStore = create<AppState>((set, get) => ({
   setSrProgress: (p) => set({ srProgress: p }),
   srLastConfig: null,
   setSrLastConfig: (c) => set({ srLastConfig: c }),
-  srBuilderConfig: defaultSrBuilderConfig,
+  srBuilderConfig: lsGet("lbquant-sr-builder-config", defaultSrBuilderConfig),
   updateSrBuilderConfig: (partial) =>
-    set((s) => ({ srBuilderConfig: { ...s.srBuilderConfig, ...partial } })),
+    set((s) => {
+      const next = { ...s.srBuilderConfig, ...partial };
+      lsSet("lbquant-sr-builder-config", next);
+      return { srBuilderConfig: next };
+    }),
+  srSavedConfigs: lsGet("lbquant-sr-saved-configs", []),
+  saveSrConfig: (name) =>
+    set((s) => {
+      const next = [
+        ...s.srSavedConfigs,
+        { id: crypto.randomUUID(), name: name.trim() || `Config ${s.srSavedConfigs.length + 1}`, createdAt: new Date().toISOString(), config: { ...s.srBuilderConfig } },
+      ];
+      lsSet("lbquant-sr-saved-configs", next);
+      return { srSavedConfigs: next };
+    }),
+  loadSrConfig: (id) =>
+    set((s) => {
+      const found = s.srSavedConfigs.find((c) => c.id === id);
+      if (!found) return {};
+      const next = { ...found.config };
+      lsSet("lbquant-sr-builder-config", next);
+      return { srBuilderConfig: next };
+    }),
+  deleteSrConfig: (id) =>
+    set((s) => {
+      const next = s.srSavedConfigs.filter((c) => c.id !== id);
+      lsSet("lbquant-sr-saved-configs", next);
+      return { srSavedConfigs: next };
+    }),
 }));

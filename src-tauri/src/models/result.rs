@@ -195,6 +195,12 @@ pub struct BacktestResults {
     pub metrics: BacktestMetrics,
     /// The backtest configuration used to generate these results (capital, timeframe, dates, etc.)
     pub backtest_config: BacktestConfig,
+    /// Metrics computed from long trades only. None when there are no long trades.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub long_metrics: Option<BacktestMetrics>,
+    /// Metrics computed from short trades only. None when there are no short trades.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub short_metrics: Option<BacktestMetrics>,
 }
 
 // ══════════════════════════════════════════════════════════════

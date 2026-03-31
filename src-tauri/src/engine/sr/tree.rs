@@ -43,7 +43,7 @@ pub fn evaluate(node: &SrNode, idx: usize, cache: &SrCache) -> f64 {
                 BinaryOpType::Sub => l - r,
                 BinaryOpType::Mul => l * r,
                 BinaryOpType::ProtectedDiv => {
-                    if r.abs() < 1e-10 { 0.0 } else { l / r }
+                    if r.abs() < 1e-6 { 0.0 } else { l / r }
                 }
             }
         }

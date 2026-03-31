@@ -5,7 +5,9 @@
 
 use rand::Rng;
 
-use crate::models::sr_result::{PoolLeaf, SrObjectives, SrStrategy};
+use crate::models::result::BacktestMetrics;
+use crate::models::strategy::{StopLossType, TakeProfitType};
+use crate::models::sr_result::{PoolLeaf, SrAtrRange, SrObjectives, SrStrategy};
 
 use super::tree;
 
@@ -16,6 +18,9 @@ use super::tree;
 pub struct SrIndividual {
     pub strategy: SrStrategy,
     pub objectives: Option<SrObjectives>,
+    /// Cached BacktestMetrics from the last evaluation — reused by `build_front_item`
+    /// to avoid re-running the backtest just to get complete metrics.
+    pub metrics: Option<BacktestMetrics>,
     /// Pareto front rank (0 = best front). `usize::MAX` = not yet ranked.
     pub rank: usize,
     /// Crowding distance within the front. Higher = more isolated = preferred.
@@ -27,6 +32,7 @@ impl SrIndividual {
         Self {
             strategy,
             objectives: None,
+            metrics: None,
             rank: usize::MAX,
             crowding: 0.0,
         }
@@ -165,10 +171,15 @@ fn obj_val(ind: &SrIndividual, obj: usize) -> f64 {
 
 // ── Tournament Selection ──────────────────────────────────────────────────────
 
-/// Binary tournament: pick 2 random individuals, prefer lower rank, break ties by higher crowding.
+/// Binary tournament: pick 2 distinct random individuals, prefer lower rank, break ties by higher crowding.
 pub fn tournament_select<'a, R: Rng>(pop: &'a [SrIndividual], rng: &mut R) -> &'a SrIndividual {
     let a = rng.gen_range(0..pop.len());
-    let b = rng.gen_range(0..pop.len());
+    // Ensure b != a so the individual never competes against itself.
+    let b = {
+        let mut c = rng.gen_range(0..pop.len() - 1);
+        if c >= a { c += 1; }
+        c
+    };
     let ia = &pop[a];
     let ib = &pop[b];
     if ia.rank < ib.rank || (ia.rank == ib.rank && ia.crowding > ib.crowding) {
@@ -190,6 +201,8 @@ pub fn make_offspring<R: Rng>(
     max_depth: usize,
     crossover_rate: f64,
     mutation_rate: f64,
+    sl_range: Option<&SrAtrRange>,
+    tp_range: Option<&SrAtrRange>,
     rng: &mut R,
 ) -> Vec<SrIndividual> {
     let target = pop.len();
@@ -199,9 +212,9 @@ pub fn make_offspring<R: Rng>(
         let parent_a = tournament_select(pop, rng);
         let child_strategy = if rng.gen::<f64>() < crossover_rate {
             let parent_b = tournament_select(pop, rng);
-            crossover_strategies(parent_a, parent_b, max_depth, pool, mutation_rate, rng)
+            crossover_strategies(parent_a, parent_b, max_depth, pool, mutation_rate, sl_range, tp_range, rng)
         } else {
-            mutate_strategy(parent_a, max_depth, pool, mutation_rate, rng)
+            mutate_strategy(parent_a, max_depth, pool, mutation_rate, sl_range, tp_range, rng)
         };
         offspring.push(SrIndividual::new(child_strategy));
     }
@@ -215,6 +228,8 @@ fn crossover_strategies<R: Rng>(
     max_depth: usize,
     pool: &[PoolLeaf],
     mutation_rate: f64,
+    sl_range: Option<&SrAtrRange>,
+    tp_range: Option<&SrAtrRange>,
     rng: &mut R,
 ) -> SrStrategy {
     let mut s = a.strategy.clone();
@@ -236,8 +251,25 @@ fn crossover_strategies<R: Rng>(
     if rng.gen::<f64>() < 0.3 {
         s.short_threshold = b.strategy.short_threshold;
     }
+    // ATR SL/TP crossover: swap period + multiplier from parent B with 30% chance
+    if rng.gen::<f64>() < 0.3 {
+        if let (Some(sl_a), Some(sl_b)) = (&mut s.stop_loss, &b.strategy.stop_loss) {
+            if sl_range.is_some() && sl_a.sl_type == StopLossType::ATR {
+                sl_a.atr_period = sl_b.atr_period;
+                sl_a.value = sl_b.value;
+            }
+        }
+    }
+    if rng.gen::<f64>() < 0.3 {
+        if let (Some(tp_a), Some(tp_b)) = (&mut s.take_profit, &b.strategy.take_profit) {
+            if tp_range.is_some() && tp_a.tp_type == TakeProfitType::ATR {
+                tp_a.atr_period = tp_b.atr_period;
+                tp_a.value = tp_b.value;
+            }
+        }
+    }
     // Then maybe mutate
-    apply_mutation(&mut s, max_depth, pool, mutation_rate, rng);
+    apply_mutation(&mut s, max_depth, pool, mutation_rate, sl_range, tp_range, rng);
     s
 }
 
@@ -246,10 +278,12 @@ fn mutate_strategy<R: Rng>(
     max_depth: usize,
     pool: &[PoolLeaf],
     mutation_rate: f64,
+    sl_range: Option<&SrAtrRange>,
+    tp_range: Option<&SrAtrRange>,
     rng: &mut R,
 ) -> SrStrategy {
     let mut s = ind.strategy.clone();
-    apply_mutation(&mut s, max_depth, pool, mutation_rate, rng);
+    apply_mutation(&mut s, max_depth, pool, mutation_rate, sl_range, tp_range, rng);
     s
 }
 
@@ -258,6 +292,8 @@ fn apply_mutation<R: Rng>(
     max_depth: usize,
     pool: &[PoolLeaf],
     mutation_rate: f64,
+    sl_range: Option<&SrAtrRange>,
+    tp_range: Option<&SrAtrRange>,
     rng: &mut R,
 ) {
     if rng.gen::<f64>() < mutation_rate {
@@ -278,6 +314,34 @@ fn apply_mutation<R: Rng>(
     if rng.gen::<f64>() < mutation_rate * 0.5 {
         let step = (s.short_threshold.abs() * 0.2 + 1.0) * rng.gen_range(-1.0_f64..1.0);
         s.short_threshold += step;
+    }
+    // ATR SL parameter mutation
+    if let (Some(sl), Some(r)) = (&mut s.stop_loss, sl_range) {
+        if sl.sl_type == StopLossType::ATR {
+            if rng.gen::<f64>() < mutation_rate * 0.5 {
+                let cur = sl.atr_period.unwrap_or(14) as i64;
+                let step = rng.gen_range(-3_i64..=3);
+                sl.atr_period = Some((cur + step).max(r.period_min as i64).min(r.period_max as i64) as usize);
+            }
+            if rng.gen::<f64>() < mutation_rate * 0.5 {
+                let step = rng.gen_range(-0.3_f64..=0.3);
+                sl.value = (sl.value + step).max(r.mult_min).min(r.mult_max);
+            }
+        }
+    }
+    // ATR TP parameter mutation
+    if let (Some(tp), Some(r)) = (&mut s.take_profit, tp_range) {
+        if tp.tp_type == TakeProfitType::ATR {
+            if rng.gen::<f64>() < mutation_rate * 0.5 {
+                let cur = tp.atr_period.unwrap_or(14) as i64;
+                let step = rng.gen_range(-3_i64..=3);
+                tp.atr_period = Some((cur + step).max(r.period_min as i64).min(r.period_max as i64) as usize);
+            }
+            if rng.gen::<f64>() < mutation_rate * 0.5 {
+                let step = rng.gen_range(-0.3_f64..=0.3);
+                tp.value = (tp.value + step).max(r.mult_min).min(r.mult_max);
+            }
+        }
     }
 }
 
@@ -375,12 +439,35 @@ pub fn random_population<R: Rng>(
                 entry_short: tree::generate_random(0, config.max_depth, pool, rng),
                 short_threshold: rng.gen_range(-50.0_f64..50.0),
                 exit: tree::generate_random(0, config.max_depth, pool, rng),
-                stop_loss: config.stop_loss.clone(),
-                take_profit: config.take_profit.clone(),
+                stop_loss: {
+                    let mut sl = config.stop_loss.clone();
+                    if let (Some(ref mut s), Some(r)) = (&mut sl, &config.sl_atr_range) {
+                        if s.sl_type == StopLossType::ATR {
+                            s.atr_period = Some(rng.gen_range(r.period_min..=r.period_max));
+                            s.value = rng.gen_range(r.mult_min..=r.mult_max);
+                        }
+                    }
+                    sl
+                },
+                take_profit: {
+                    let mut tp = config.take_profit.clone();
+                    if let (Some(ref mut t), Some(r)) = (&mut tp, &config.tp_atr_range) {
+                        if t.tp_type == TakeProfitType::ATR {
+                            t.atr_period = Some(rng.gen_range(r.period_min..=r.period_max));
+                            t.value = rng.gen_range(r.mult_min..=r.mult_max);
+                        }
+                    }
+                    tp
+                },
                 trailing_stop: config.trailing_stop.clone(),
                 position_sizing: config.position_sizing.clone(),
                 trading_costs: config.trading_costs.clone(),
                 trade_direction: config.trade_direction,
+                use_exit_formula: config.use_exit_formula,
+                // Populated by evaluate_individual before first backtest run
+                trading_hours: None,
+                close_trades_at: None,
+                max_trades_per_day: None,
             };
             SrIndividual::new(strategy)
         })

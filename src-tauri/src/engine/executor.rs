@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use chrono::Datelike;
 use polars::prelude::*;
+use rand::SeedableRng;
+use rand::rngs::SmallRng;
 use tracing::info;
 
 use crate::errors::AppError;
@@ -10,17 +12,17 @@ use crate::models::candle::{Candle, TickColumns};
 use crate::models::config::InstrumentConfig;
 use crate::models::result::{BacktestResults, DrawdownPoint, EquityPoint};
 use crate::models::strategy::{
-    BacktestConfig, CloseTradesAt, IndicatorConfig, IndicatorType, OrderType, Strategy,
-    TradeDirection, TradingHours,
+    BacktestConfig, BacktestPrecision, CloseTradesAt, IndicatorConfig, IndicatorType, OrderType,
+    Strategy, TradeDirection, TradingHours,
 };
 use crate::models::trade::{CloseReason, TradeResult};
 
-use super::metrics::calculate_metrics;
+use super::metrics::{calculate_direction_metrics, calculate_metrics};
 use super::orders;
 use super::position::{
     calculate_lots, calculate_stop_loss, calculate_take_profit,
     calculate_trailing_stop_distance, calculate_swap_charge, check_sl_tp_hit,
-    enforce_stops_level_sl, enforce_stops_level_tp,
+    check_sl_tp_hit_open_only, enforce_stops_level_sl, enforce_stops_level_tp,
     should_charge_swap, update_mae_mfe_ba, update_trailing_stop,
     OpenPosition, PendingOrder,
 };
@@ -162,6 +164,11 @@ fn run_backtest_inner(
     // Pre-compute spread in price units (used for bid/ask OHLC derivation)
     let spread = orders::spread_price(&strategy.trading_costs, instrument);
 
+    // Seeded from OS entropy — provides a stable sequence within a single run.
+    // Passed to order functions so random slippage is reproducible across re-runs
+    // when the same seed is used.
+    let mut rng = SmallRng::from_entropy();
+
     let mut equity = config.initial_capital;
     let mut peak_equity = equity;
     let mut position: Option<OpenPosition> = Option::None;
@@ -236,6 +243,8 @@ fn run_backtest_inner(
                     drawdown_curve: vec![],
                     returns: vec![],
                     backtest_config: config.clone(),
+                    long_metrics: None,
+                    short_metrics: None,
                 });
             }
         }
@@ -269,9 +278,10 @@ fn run_backtest_inner(
                     (TradeDirection::Short, OrderType::Stop)  => candle.open <= pending.target_price || candle.low  <= pending.target_price,
                     _ => false,
                 };
-                let expired = i.saturating_sub(pending.created_bar) > 20;
+                let expiry_bars = config.pending_order_expiry_bars.unwrap_or(20);
+                let expired = i.saturating_sub(pending.created_bar) > expiry_bars;
                 if filled {
-                    let fill_price = orders::apply_entry_costs(pending.target_price, pending.direction, &strategy.trading_costs, instrument);
+                    let fill_price = orders::apply_entry_costs(pending.target_price, pending.direction, &strategy.trading_costs, instrument, &mut rng);
                     let sl_price = strategy.stop_loss.as_ref().map(|sl_cfg| {
                         let sl = calculate_stop_loss(sl_cfg, fill_price, pending.direction, pending.atr_for_sl, instrument);
                         enforce_stops_level_sl(sl, fill_price, pending.direction, instrument)
@@ -334,7 +344,7 @@ fn run_backtest_inner(
                 let exit_price = candle.open;
                 let trade = close_position(
                     pos, exit_price, &candle.datetime, i, CloseReason::Signal,
-                    instrument, strategy, config,
+                    instrument, strategy, config, &mut rng,
                 );
                 // Swap was already deducted from equity per-bar; only PnL and commission remain
                 equity += trade.pnl - trade.commission;
@@ -351,7 +361,7 @@ fn run_backtest_inner(
                 if i.saturating_sub(pos.entry_bar) >= max_bars as usize {
                     let trade = close_position(
                         pos, candle.open, &candle.datetime, i, CloseReason::ExitAfterBars,
-                        instrument, strategy, config,
+                        instrument, strategy, config, &mut rng,
                     );
                     equity += trade.pnl - trade.commission;
                     if trade.pnl >= 1e-6 { consecutive_losses = 0; }
@@ -420,7 +430,7 @@ fn run_backtest_inner(
 
                     match strategy.entry_order {
                         OrderType::Market => {
-                            let entry_price = orders::apply_entry_costs(raw_price, dir, &strategy.trading_costs, instrument);
+                            let entry_price = orders::apply_entry_costs(raw_price, dir, &strategy.trading_costs, instrument, &mut rng);
                             let sl_price = strategy.stop_loss.as_ref().map(|sl_cfg| {
                                 let sl = calculate_stop_loss(sl_cfg, entry_price, dir, atr_for_sl, instrument);
                                 enforce_stops_level_sl(sl, entry_price, dir, instrument)
@@ -613,7 +623,7 @@ fn run_backtest_inner(
                                 TradeDirection::Short | TradeDirection::Both => tick_bid,
                             };
                             let entry_price = orders::apply_entry_costs(
-                                raw_price, dir, &strategy.trading_costs, instrument,
+                                raw_price, dir, &strategy.trading_costs, instrument, &mut rng,
                             );
 
                             // ATR from bar[i-1] (last completed bar)
@@ -681,12 +691,12 @@ fn run_backtest_inner(
         // ── Phase 3: Check SL/TP for existing position ──
         if let Some(ref mut pos) = position {
             let exit_result = resolve_exit(
-                pos, candle, sub_bars, phase3_sub_start, sub_end, instrument, spread,
+                pos, candle, sub_bars, phase3_sub_start, sub_end, instrument, spread, config.precision,
             );
 
             if let Some((exit_price, exit_time, reason)) = exit_result {
                 let trade = close_position(
-                    pos, exit_price, &exit_time, i, reason, instrument, strategy, config,
+                    pos, exit_price, &exit_time, i, reason, instrument, strategy, config, &mut rng,
                 );
                 equity += trade.pnl - trade.commission;
                 if trade.pnl >= 1e-6 { consecutive_losses = 0; }
@@ -702,7 +712,7 @@ fn run_backtest_inner(
                 let exit_price = candle.close;
                 let trade = close_position(
                     pos, exit_price, &candle.datetime, i, CloseReason::TimeClose,
-                    instrument, strategy, config,
+                    instrument, strategy, config, &mut rng,
                 );
                 equity += trade.pnl - trade.commission;
                 if trade.pnl >= 1e-6 { consecutive_losses = 0; }
@@ -797,6 +807,7 @@ fn run_backtest_inner(
             instrument,
             strategy,
             config,
+            &mut rng,
         );
         equity += trade.pnl - trade.commission;
         // Note: swap was already deducted from equity per-bar; no adjustment needed here
@@ -830,6 +841,24 @@ fn run_backtest_inner(
 
     let returns: Vec<f64> = trades.iter().map(|t| t.pnl).collect();
 
+    // Per-direction metrics — only computed for the full backtest (not optimizer context).
+    let (long_metrics, short_metrics) = if shared_indicator_cache.is_none() {
+        let long_trades: Vec<_> = trades.iter()
+            .filter(|t| matches!(t.direction, TradeDirection::Long))
+            .cloned()
+            .collect();
+        let short_trades: Vec<_> = trades.iter()
+            .filter(|t| matches!(t.direction, TradeDirection::Short))
+            .cloned()
+            .collect();
+        (
+            calculate_direction_metrics(&long_trades, config.initial_capital, config.timeframe),
+            calculate_direction_metrics(&short_trades, config.initial_capital, config.timeframe),
+        )
+    } else {
+        (None, None)
+    };
+
     Ok(BacktestResults {
         trades,
         equity_curve,
@@ -837,6 +866,8 @@ fn run_backtest_inner(
         returns,
         metrics,
         backtest_config: config.clone(),
+        long_metrics,
+        short_metrics,
     })
 }
 
@@ -901,6 +932,8 @@ fn find_subbar_range(
 /// Resolve SL/TP exit for an open position.
 /// Uses sub-bar data when available, otherwise falls back to TF candle OHLC.
 /// `spread` is the full spread in price units (used to derive BidAsk prices in bar mode).
+/// `precision` controls whether SL/TP are checked only at bar open (OpenPricesOnly) or
+/// across the full OHLC range (SelectedTfOnly and above).
 /// Returns (exit_price, exit_time, reason) if an exit is triggered.
 fn resolve_exit(
     pos: &mut OpenPosition,
@@ -910,14 +943,21 @@ fn resolve_exit(
     sub_end: usize,
     instrument: &InstrumentConfig,
     spread: f64,
+    precision: BacktestPrecision,
 ) -> Option<(f64, String, CloseReason)> {
     match sub_bars {
         SubBarData::None => {
-            // SelectedTfOnly: derive bid/ask OHLC from TF candle + spread
             let ba = orders::BidAskOhlc::from_candle(candle, spread);
             update_mae_mfe_ba(pos, &ba, instrument);
-            check_sl_tp_hit(pos, &ba)
-                .map(|(price, reason)| (price, candle.datetime.clone(), reason))
+            if matches!(precision, BacktestPrecision::OpenPricesOnly) {
+                // Only check SL/TP at the bar open price — mirrors MT5 "Open prices only"
+                check_sl_tp_hit_open_only(pos, &ba)
+                    .map(|(price, reason)| (price, candle.datetime.clone(), reason))
+            } else {
+                // SelectedTfOnly: check against full OHLC range
+                check_sl_tp_hit(pos, &ba)
+                    .map(|(price, reason)| (price, candle.datetime.clone(), reason))
+            }
         }
         SubBarData::Candles(subs) => {
             // M1TickSimulation: iterate M1 sub-candles
@@ -1075,6 +1115,7 @@ fn close_position(
     instrument: &InstrumentConfig,
     strategy: &Strategy,
     config: &BacktestConfig,
+    rng: &mut SmallRng,
 ) -> TradeResult {
     // Apply exit costs (slippage on exit)
     let adjusted_exit = orders::apply_exit_costs(
@@ -1082,6 +1123,7 @@ fn close_position(
         pos.direction,
         &strategy.trading_costs,
         instrument,
+        rng,
     );
     let pnl = orders::calculate_pnl(pos.direction, pos.entry_price, adjusted_exit, pos.lots, instrument);
     let pnl_pips =

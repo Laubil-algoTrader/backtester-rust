@@ -13,7 +13,8 @@ use crate::engine::indicators::{
 use crate::engine::metrics::calculate_metrics;
 use crate::engine::orders::BidAskOhlc;
 use crate::engine::position::{
-    calculate_lots, calculate_stop_loss, calculate_take_profit, check_sl_tp_hit, OpenPosition,
+    calculate_lots, calculate_stop_loss, calculate_take_profit, calculate_trailing_stop_distance,
+    check_sl_tp_hit, update_trailing_stop, OpenPosition,
 };
 use crate::errors::AppError;
 use crate::models::candle::Candle;
@@ -23,7 +24,8 @@ use crate::models::sr_result::{
     PoolLeaf, SrConfig, SrFrontItem, SrObjectives, SrProgressEvent, SrStrategy,
 };
 use crate::models::strategy::{
-    BacktestConfig, IndicatorConfig, IndicatorParams, IndicatorType, TradeDirection,
+    BacktestConfig, CloseTradesAt, IndicatorConfig, IndicatorParams, IndicatorType, TradeDirection,
+    TradingHours,
 };
 use crate::models::trade::{CloseReason, TradeResult};
 
@@ -118,6 +120,40 @@ fn build_atr_series(candles: &[Candle]) -> Vec<f64> {
         .unwrap_or_else(|_| vec![0.0; candles.len()])
 }
 
+// ── Time helpers ─────────────────────────────────────────────────────────────
+
+/// Extract hour and minute from a datetime string "YYYY-MM-DD HH:MM:SS...".
+#[inline(always)]
+fn extract_hm(datetime: &str) -> (u8, u8) {
+    let b = datetime.as_bytes();
+    if b.len() >= 16 {
+        let h = (b[11] - b'0') * 10 + (b[12] - b'0');
+        let m = (b[14] - b'0') * 10 + (b[15] - b'0');
+        (h, m)
+    } else {
+        (0, 0)
+    }
+}
+
+/// Returns `true` if hour:minute is within the configured trading window.
+/// Handles ranges that cross midnight (e.g. 22:00 → 06:00).
+#[inline(always)]
+fn within_trading_hours(hours: &TradingHours, h: u8, m: u8) -> bool {
+    let current = h as u16 * 60 + m as u16;
+    let start = hours.start_hour as u16 * 60 + hours.start_minute as u16;
+    let end = hours.end_hour as u16 * 60 + hours.end_minute as u16;
+    if start <= end { current >= start && current < end } else { current >= start || current < end }
+}
+
+/// Returns `true` if the bar's time has reached or passed the force-close time.
+#[inline(always)]
+fn should_force_close(close_at: &CloseTradesAt, datetime: &str) -> bool {
+    let (h, m) = extract_hm(datetime);
+    let current = h as u16 * 60 + m as u16;
+    let target = close_at.hour as u16 * 60 + close_at.minute as u16;
+    current >= target
+}
+
 // ── Lightweight SR Backtest ───────────────────────────────────────────────────
 
 /// Evaluate an SR strategy on historical candles.
@@ -162,6 +198,7 @@ pub fn sr_backtest(
     // Trade frequency tracking
     let mut trades_today: u32 = 0;
     let mut last_trade_date = String::new();
+    let mut consecutive_losses: u32 = 0;
 
     for i in 1..n {
         let candle = &candles[i];
@@ -183,7 +220,7 @@ pub fn sr_backtest(
             }
 
             // Check exit formula sign change
-            if closed_price.is_none() {
+            if closed_price.is_none() && strategy.use_exit_formula {
                 let sign_changed = (prev_exit_signal >= 0.0 && exit_signal < 0.0)
                     || (prev_exit_signal <= 0.0 && exit_signal > 0.0);
                 if sign_changed && i > pos.entry_bar + 1 {
@@ -194,6 +231,20 @@ pub fn sr_backtest(
                     };
                     closed_price = Some(fill);
                     close_reason = CloseReason::Signal;
+                }
+            }
+
+            // Check force-close at configured time
+            if closed_price.is_none() {
+                if let Some(ref ct) = strategy.close_trades_at {
+                    if should_force_close(ct, &candle.datetime) {
+                        let fill = match pos.direction {
+                            TradeDirection::Short => ba.ask_open,
+                            _ => ba.bid_open,
+                        };
+                        closed_price = Some(fill);
+                        close_reason = CloseReason::TimeClose;
+                    }
                 }
             }
 
@@ -210,6 +261,7 @@ pub fn sr_backtest(
                 let commission = commission_per_lot(pos.lots);
                 let pnl = pnl_pips * instrument.pip_value * pos.lots - commission;
                 equity += pnl;
+                if pnl >= 0.0 { consecutive_losses = 0; } else { consecutive_losses += 1; }
 
                 let duration_bars = i.saturating_sub(pos.entry_bar);
                 trades.push(TradeResult {
@@ -233,7 +285,7 @@ pub fn sr_backtest(
             }
         }
 
-        // ── Phase 2: update MAE/MFE of open position ─────────────────────────
+        // ── Phase 2: update MAE/MFE and trailing stop of open position ────────
         if let Some(ref mut pos) = open {
             let (excursion_positive, excursion_negative) = match pos.direction {
                 TradeDirection::Long | TradeDirection::Both => (
@@ -247,6 +299,7 @@ pub fn sr_backtest(
             };
             pos.mfe_pips = pos.mfe_pips.max(excursion_positive);
             pos.mae_pips = pos.mae_pips.max(excursion_negative);
+            update_trailing_stop(pos, &ba);
         }
 
         // ── Phase 3: entry evaluation (when no position open) ────────────────
@@ -262,8 +315,11 @@ pub fn sr_backtest(
             } else {
                 true
             };
+            // Trading hours filter
+            let within_hours = strategy.trading_hours.as_ref()
+                .map_or(true, |th| { let (h, m) = extract_hm(&candle.datetime); within_trading_hours(th, h, m) });
 
-            if can_enter {
+            if can_enter && within_hours {
                 let entry_dir = eval_entry(strategy, i - 1, cache, &ba);
                 if let Some(direction) = entry_dir {
                     // Check allowed direction
@@ -293,13 +349,16 @@ pub fn sr_backtest(
                                 instrument,
                             )
                         });
+                        let ts_distance = strategy.trailing_stop.as_ref().map(|ts| {
+                            calculate_trailing_stop_distance(ts, entry_price, sl_price, atr_val, instrument)
+                        });
                         let lots = calculate_lots(
                             &strategy.position_sizing,
                             equity,
                             entry_price,
                             sl_price,
                             instrument,
-                            0,
+                            consecutive_losses,
                         );
 
                         let commission = commission_per_lot(lots);
@@ -313,7 +372,7 @@ pub fn sr_backtest(
                             lots,
                             stop_loss: sl_price,
                             take_profit: tp_price,
-                            trailing_stop_distance: None,
+                            trailing_stop_distance: ts_distance,
                             highest_since_entry: candle.high,
                             lowest_since_entry: candle.low,
                             mae_pips: 0.0,
@@ -414,6 +473,10 @@ pub fn sr_backtest_full(
         }
     };
 
+    let mut consecutive_losses: u32 = 0;
+    let mut trades_today_full: u32 = 0;
+    let mut last_trade_date_full = String::new();
+
     for i in 1..n {
         let candle = &candles[i];
         let ba = BidAskOhlc::from_candle(candle, spread_price);
@@ -430,7 +493,7 @@ pub fn sr_backtest_full(
                 close_reason = reason;
             }
 
-            if closed_price.is_none() {
+            if closed_price.is_none() && strategy.use_exit_formula {
                 let sign_changed = (prev_exit_signal >= 0.0 && exit_signal < 0.0)
                     || (prev_exit_signal <= 0.0 && exit_signal > 0.0);
                 if sign_changed && i > pos.entry_bar + 1 {
@@ -439,6 +502,20 @@ pub fn sr_backtest_full(
                         _ => ba.bid_open,
                     };
                     closed_price = Some(fill);
+                }
+            }
+
+            // Force-close at configured time
+            if closed_price.is_none() {
+                if let Some(ref ct) = strategy.close_trades_at {
+                    if should_force_close(ct, &candle.datetime) {
+                        let fill = match pos.direction {
+                            TradeDirection::Short => ba.ask_open,
+                            _ => ba.bid_open,
+                        };
+                        closed_price = Some(fill);
+                        close_reason = CloseReason::TimeClose;
+                    }
                 }
             }
 
@@ -455,6 +532,7 @@ pub fn sr_backtest_full(
                 let commission = commission_per_lot(pos.lots);
                 let pnl = pnl_pips * instrument.pip_value * pos.lots - commission;
                 equity += pnl;
+                if pnl >= 0.0 { consecutive_losses = 0; } else { consecutive_losses += 1; }
                 let dur = i.saturating_sub(pos.entry_bar);
                 trades.push(TradeResult {
                     id: trades.len().to_string(),
@@ -490,10 +568,25 @@ pub fn sr_backtest_full(
             };
             pos.mfe_pips = pos.mfe_pips.max(excursion_positive);
             pos.mae_pips = pos.mae_pips.max(excursion_negative);
+            update_trailing_stop(pos, &ba);
         }
 
         if open.is_none() {
-            let entry_dir = eval_entry(strategy, i - 1, cache, &ba);
+            // Trade frequency filter — mirrors sr_backtest behaviour so displayed
+            // metrics match those used during NSGA-II fitness evaluation.
+            let can_enter = if let Some(max_tpd) = strategy.max_trades_per_day {
+                let bar_date = candle.datetime.get(..10).unwrap_or(&candle.datetime).to_string();
+                if bar_date != last_trade_date_full {
+                    last_trade_date_full = bar_date;
+                    trades_today_full = 0;
+                }
+                trades_today_full < max_tpd
+            } else {
+                true
+            };
+            let within_hours = strategy.trading_hours.as_ref()
+                .map_or(true, |th| { let (h, m) = extract_hm(&candle.datetime); within_trading_hours(th, h, m) });
+            let entry_dir = if can_enter && within_hours { eval_entry(strategy, i - 1, cache, &ba) } else { None };
             if let Some(direction) = entry_dir {
                 let allowed = match strategy.trade_direction {
                     TradeDirection::Long => direction == TradeDirection::Long,
@@ -513,7 +606,10 @@ pub fn sr_backtest_full(
                     let tp_price = strategy.take_profit.as_ref().map(|tp| {
                         calculate_take_profit(tp, entry_price, sl_price, direction, atr_val, instrument)
                     });
-                    let lots = calculate_lots(&strategy.position_sizing, equity, entry_price, sl_price, instrument, 0);
+                    let ts_distance = strategy.trailing_stop.as_ref().map(|ts| {
+                        calculate_trailing_stop_distance(ts, entry_price, sl_price, atr_val, instrument)
+                    });
+                    let lots = calculate_lots(&strategy.position_sizing, equity, entry_price, sl_price, instrument, consecutive_losses);
                     let commission = commission_per_lot(lots);
                     equity -= commission;
                     open = Some(OpenPosition {
@@ -524,7 +620,7 @@ pub fn sr_backtest_full(
                         lots,
                         stop_loss: sl_price,
                         take_profit: tp_price,
-                        trailing_stop_distance: None,
+                        trailing_stop_distance: ts_distance,
                         highest_since_entry: candle.high,
                         lowest_since_entry: candle.low,
                         mae_pips: 0.0,
@@ -534,6 +630,7 @@ pub fn sr_backtest_full(
                         accumulated_swap: 0.0,
                         sl_moved_to_be: false,
                     });
+                    trades_today_full += 1;
                 }
             }
         }
@@ -607,7 +704,7 @@ pub fn sr_backtest_full(
     let metrics = calculate_metrics(&trades, &equity_curve, initial_capital, timeframe);
     let returns: Vec<f64> = trades.iter().map(|t| t.pnl).collect();
 
-    Some(BacktestResults { trades, equity_curve, drawdown_curve, returns, metrics, backtest_config: bt_config })
+    Some(BacktestResults { trades, equity_curve, drawdown_curve, returns, metrics, backtest_config: bt_config, long_metrics: None, short_metrics: None })
 }
 
 /// Evaluate entry signals for the current bar.
@@ -655,20 +752,27 @@ pub fn compute_objectives_pub(
     // cap the other objectives to prevent degenerate cases from polluting the front.
     let trade_penalty = if metrics.total_trades < min_trades / 2 { 0.5 } else { 1.0 };
 
+    // temporal_consistency and neg_max_drawdown were previously unclamped, which meant
+    // NaN or extreme values could corrupt NSGA-II dominance comparisons. Clamp all objectives
+    // uniformly so that is_valid() checks and dominance logic always see finite values.
+    let temporal_consistency = if metrics.total_trades < min_trades / 2 {
+        -2.0_f64
+    } else {
+        metrics.temporal_consistency
+    }.clamp(-5.0, 5.0);
+
     SrObjectives {
-        sharpe: (metrics.sharpe_ratio * trade_penalty).max(-5.0).min(10.0),
-        profit_factor: (metrics.profit_factor * trade_penalty).max(0.0).min(10.0),
-        temporal_consistency: if metrics.total_trades < min_trades / 2 {
-            -2.0
-        } else {
-            metrics.temporal_consistency
-        },
-        neg_max_drawdown: -metrics.max_drawdown_pct,
+        sharpe: (metrics.sharpe_ratio * trade_penalty).clamp(-5.0, 10.0),
+        profit_factor: (metrics.profit_factor * trade_penalty).clamp(0.0, 10.0),
+        temporal_consistency,
+        neg_max_drawdown: (-metrics.max_drawdown_pct).clamp(-200.0, 0.0),
         expectancy_ratio: expectancy_ratio * trade_penalty,
     }
 }
 
 /// Evaluate a single individual, setting its objectives in-place.
+/// Propagates trading_hours and close_trades_at from config into the strategy so
+/// these constraints are applied consistently during evolution and saved with the strategy.
 fn evaluate_individual(
     ind: &mut SrIndividual,
     candles: &[Candle],
@@ -678,7 +782,10 @@ fn evaluate_individual(
     config: &SrConfig,
     timeframe: Timeframe,
 ) {
-    ind.objectives = sr_backtest(
+    ind.strategy.trading_hours = config.trading_hours.clone();
+    ind.strategy.close_trades_at = config.close_trades_at.clone();
+    ind.strategy.max_trades_per_day = config.max_trades_per_day;
+    let metrics = sr_backtest(
         &ind.strategy,
         candles,
         cache,
@@ -687,8 +794,10 @@ fn evaluate_individual(
         config.initial_capital,
         timeframe,
         config.max_trades_per_day,
-    )
-    .map(|m| compute_objectives_pub(&m, config.min_trades));
+    );
+    // Cache the metrics so build_front_item can reuse them without re-running the backtest.
+    ind.objectives = metrics.as_ref().map(|m| compute_objectives_pub(m, config.min_trades));
+    ind.metrics = metrics;
 }
 
 // ── Main SR Builder Loop ──────────────────────────────────────────────────────
@@ -753,9 +862,14 @@ pub fn run_sr_builder(
     }
 
     // ── Continuous NSGA-II loop — stops when databank is full or cancelled ──
+    // Maps tree key → index in `databank` so we can update an existing entry
+    // when a later generation produces a better version of the same structure.
     let mut databank: Vec<SrIndividual> = Vec::new();
-    let mut seen_databank: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut databank_index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut gen = 0usize;
+    // Count the initial population that was already evaluated above.
+    let mut total_evaluated: usize = config.population_size;
+    let loop_start = std::time::Instant::now();
 
     loop {
         if cancel_flag.load(Ordering::Relaxed) {
@@ -764,28 +878,68 @@ pub fn run_sr_builder(
         // Sort current population (assigns rank and crowding distance)
         population = nsga2_select(population, config.population_size);
 
-        // Collect rank-0 individuals with valid objectives into databank
+        // Collect rank-0 individuals with valid objectives into databank.
+        // If the same tree key already exists, replace it only when the new
+        // individual has a higher scalar fitness (e.g. Sharpe improved by
+        // CMA-ES coefficient refinement without changing tree structure).
         let pareto_size = population.iter().filter(|i| i.rank == 0).count();
         for ind in population.iter().filter(|i| i.rank == 0) {
             if ind.objectives.as_ref().map(|o| o.is_valid()).unwrap_or(false) {
+                // Apply initial filters before accepting into databank
+                if let Some(obj) = &ind.objectives {
+                    if let Some(min_s) = config.initial_min_sharpe {
+                        if obj.sharpe < min_s { continue; }
+                    }
+                    if let Some(min_pf) = config.initial_min_profit_factor {
+                        if obj.profit_factor < min_pf { continue; }
+                    }
+                    if let Some(max_dd) = config.initial_max_drawdown_pct {
+                        // neg_max_drawdown = -drawdown_pct, so drawdown_pct = -neg_max_drawdown
+                        if -obj.neg_max_drawdown > max_dd { continue; }
+                    }
+                }
                 let fl = tree::format_tree(&ind.strategy.entry_long);
                 let fs = tree::format_tree(&ind.strategy.entry_short);
                 let fe = tree::format_tree(&ind.strategy.exit);
                 let key = format!("{fl}|{fs}|{fe}");
-                if seen_databank.insert(key) {
-                    databank.push(ind.clone());
+                match databank_index.get(&key).copied() {
+                    Some(idx) => {
+                        // Update if this version is strictly better
+                        if ind.scalar_fitness() > databank[idx].scalar_fitness() {
+                            databank[idx] = ind.clone();
+                        }
+                    }
+                    None => {
+                        let idx = databank.len();
+                        databank_index.insert(key, idx);
+                        databank.push(ind.clone());
+                    }
                 }
             }
         }
 
-        // Keep databank sorted by fitness, trimmed to limit
+        // Keep databank sorted by fitness, trimmed to limit.
+        // After sorting, rebuild the index to keep positions valid.
         databank.sort_by(|a, b| {
             b.scalar_fitness()
                 .partial_cmp(&a.scalar_fitness())
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        databank.truncate(config.databank_limit);
+        if databank.len() > config.databank_limit {
+            databank.truncate(config.databank_limit);
+            // Rebuild index after truncation (removes evicted entries)
+            databank_index.clear();
+            for (i, ind) in databank.iter().enumerate() {
+                let fl = tree::format_tree(&ind.strategy.entry_long);
+                let fs = tree::format_tree(&ind.strategy.entry_short);
+                let fe = tree::format_tree(&ind.strategy.exit);
+                databank_index.insert(format!("{fl}|{fs}|{fe}"), i);
+            }
+        }
         let databank_count = databank.len();
+        total_evaluated += config.population_size;
+        let elapsed_secs = loop_start.elapsed().as_secs_f64().max(0.001);
+        let strategies_per_sec = total_evaluated as f64 / elapsed_secs;
 
         let front_sharpe = best_front_sharpe(&population);
         emit(SrProgressEvent::Generation {
@@ -795,6 +949,8 @@ pub fn run_sr_builder(
             best_sharpe: front_sharpe,
             databank_count,
             databank_limit: config.databank_limit,
+            total_evaluated,
+            strategies_per_sec,
         });
 
         // Stop when databank is full
@@ -820,6 +976,8 @@ pub fn run_sr_builder(
                 config.max_depth,
                 config.crossover_rate,
                 config.mutation_rate,
+                config.sl_atr_range.as_ref(),
+                config.tp_atr_range.as_ref(),
                 &mut rng,
             )
         };
@@ -853,6 +1011,17 @@ pub fn run_sr_builder(
 
     if cancel_flag.load(Ordering::Relaxed) {
         return Ok(vec![]);
+    }
+
+    // ── Emit NSGA-II front (pre-CMA-ES) for the "builder" databank ──────────
+    {
+        let nsga_items: Vec<SrFrontItem> = databank
+            .par_iter()
+            .filter_map(|ind| {
+                build_front_item(ind, &candles, &cache, &atr_arc, &instrument, &config, timeframe)
+            })
+            .collect();
+        emit(SrProgressEvent::NsgaDone { front: nsga_items });
     }
 
     // ── CMA-ES constant refinement on top-K databank strategies ─────────────
@@ -917,14 +1086,38 @@ pub fn run_sr_builder(
         b.objectives.scalar().partial_cmp(&a.objectives.scalar()).unwrap_or(std::cmp::Ordering::Equal)
     });
 
+    // Apply final filters to the Pareto front
+    if config.final_min_sharpe.is_some()
+        || config.final_min_profit_factor.is_some()
+        || config.final_min_trades.is_some()
+        || config.final_max_drawdown_pct.is_some()
+    {
+        final_items.retain(|item| {
+            if let Some(min_s) = config.final_min_sharpe {
+                if item.objectives.sharpe < min_s { return false; }
+            }
+            if let Some(min_pf) = config.final_min_profit_factor {
+                if item.objectives.profit_factor < min_pf { return false; }
+            }
+            if let Some(min_t) = config.final_min_trades {
+                if item.metrics.total_trades < min_t { return false; }
+            }
+            if let Some(max_dd) = config.final_max_drawdown_pct {
+                if item.metrics.max_drawdown_pct > max_dd { return false; }
+            }
+            true
+        });
+        info!("SR builder: {} items after final filters", final_items.len());
+    }
+
     emit(SrProgressEvent::Done { front: final_items.clone() });
     info!("SR builder done: {} items from {} databank strategies", final_items.len(), databank.len());
     Ok(final_items)
 }
 
-/// Build a single `SrFrontItem` from an individual — runs a full backtest to
-/// get complete `BacktestMetrics`. Returns `None` if objectives are invalid or
-/// the strategy produces no trades.
+/// Build a single `SrFrontItem` from an individual.
+/// Reuses the cached `BacktestMetrics` stored in `ind.metrics` (populated by
+/// `evaluate_individual`) to avoid re-running the backtest a second time.
 fn build_front_item(
     ind: &SrIndividual,
     candles: &[Candle],
@@ -941,16 +1134,22 @@ fn build_front_item(
     let fs = tree::format_tree(&ind.strategy.entry_short);
     let fe = tree::format_tree(&ind.strategy.exit);
 
-    let metrics = sr_backtest(
-        &ind.strategy,
-        candles,
-        cache,
-        atr_series,
-        instrument,
-        config.initial_capital,
-        timeframe,
-        config.max_trades_per_day,
-    )?;
+    // Prefer cached metrics; fall back to re-running only if cache is missing
+    // (e.g. for individuals loaded from a checkpoint without cached metrics).
+    let metrics = if let Some(m) = ind.metrics.clone() {
+        m
+    } else {
+        sr_backtest(
+            &ind.strategy,
+            candles,
+            cache,
+            atr_series,
+            instrument,
+            config.initial_capital,
+            timeframe,
+            config.max_trades_per_day,
+        )?
+    };
 
     Some(SrFrontItem {
         rank: ind.rank,

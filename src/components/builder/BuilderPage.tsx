@@ -11,11 +11,9 @@ import { MoneyManagementTab } from "./tabs/MoneyManagementTab";
 import { CrossChecksTab } from "./tabs/CrossChecksTab";
 import { RankingTab } from "./tabs/RankingTab";
 import { DatabanksPanel } from "./DatabanksPanel";
-import { StrategyDetailOverlay } from "./StrategyDetailOverlay";
 import { ProjectBreadcrumb } from "./ProjectBreadcrumb";
 import { SrTab } from "./tabs/SrTab";
-import { SrResultsPanel } from "./SrResultsPanel";
-import { BuilderResultsView } from "./BuilderResultsView";
+import { BuilderResultsView, StrategyBacktestDetail } from "./BuilderResultsView";
 import type { BuilderSavedStrategy } from "@/lib/types";
 
 type TopTab = "progress" | "fullSettings" | "results";
@@ -129,12 +127,11 @@ export function BuilderPage() {
           )}
 
           {builderTopTab === "results" && (
-            builderMethod === "sr" ? (
-              <SrResultsPanel />
-            ) : builderDetailStrategy ? (
-              <StrategyDetailOverlay
-                saved={builderDetailStrategy}
-                onClose={() => setBuilderDetailStrategy(null)}
+            builderDetailStrategy ? (
+              <StrategyBacktestDetail
+                strategy={builderDetailStrategy}
+                onBack={() => setBuilderDetailStrategy(null)}
+                backLabel="← Databank"
               />
             ) : (
               <BuilderResultsView />

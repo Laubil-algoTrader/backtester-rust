@@ -1,10 +1,12 @@
 use serde::{Deserialize, Serialize};
 
+fn bool_true() -> bool { true }
+
 use crate::models::config::Timeframe;
 use crate::models::result::BacktestMetrics;
 use crate::models::strategy::{
-    IndicatorConfig, PositionSizing, StopLoss, TakeProfit, TrailingStop, TradingCosts,
-    TradeDirection,
+    CloseTradesAt, IndicatorConfig, PositionSizing, StopLoss, TakeProfit, TrailingStop,
+    TradingCosts, TradingHours, TradeDirection,
 };
 
 // ── Tree Op Types ─────────────────────────────────────────────────────────────
@@ -98,6 +100,31 @@ pub struct SrStrategy {
     pub position_sizing: PositionSizing,
     pub trading_costs: TradingCosts,
     pub trade_direction: TradeDirection,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trading_hours: Option<TradingHours>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub close_trades_at: Option<CloseTradesAt>,
+    /// Max trade entries per calendar day. Propagated from SrConfig so the
+    /// constraint is preserved when the strategy is saved and later re-backtested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_trades_per_day: Option<u32>,
+    /// When false, the exit formula sign-change is ignored — positions close only
+    /// via SL/TP/trailing-stop/time rules. Default: true.
+    #[serde(default = "bool_true")]
+    pub use_exit_formula: bool,
+}
+
+// ── ATR Range ─────────────────────────────────────────────────────────────────
+
+/// Search range for ATR-based SL or TP parameters during SR evolution.
+/// When set, the builder samples `atr_period` and the multiplier independently
+/// for each individual instead of using fixed values.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SrAtrRange {
+    pub period_min: usize,
+    pub period_max: usize,
+    pub mult_min: f64,
+    pub mult_max: f64,
 }
 
 // ── SR Configuration ──────────────────────────────────────────────────────────
@@ -139,6 +166,47 @@ pub struct SrConfig {
     /// Max trade entries per calendar day. `None` = no limit.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_trades_per_day: Option<u32>,
+    /// Only open new trades within this time window. `None` = no restriction.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trading_hours: Option<TradingHours>,
+    /// Force-close any open position at this time each day. `None` = disabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub close_trades_at: Option<CloseTradesAt>,
+
+    // ── Initial strategy filters (Phase 1 databank acceptance) ─────────────
+    /// Minimum Sharpe ratio to accept a strategy into the databank. `None` = no filter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initial_min_sharpe: Option<f64>,
+    /// Minimum Profit Factor to accept a strategy into the databank. `None` = no filter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initial_min_profit_factor: Option<f64>,
+    /// Maximum drawdown % allowed during Phase 1 acceptance. `None` = no filter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initial_max_drawdown_pct: Option<f64>,
+
+    // ── Final strategy filters (applied to Pareto front before returning to UI) ──
+    /// Minimum Sharpe ratio for the final front. `None` = no filter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub final_min_sharpe: Option<f64>,
+    /// Minimum Profit Factor for the final front. `None` = no filter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub final_min_profit_factor: Option<f64>,
+    /// Minimum trade count for the final front. `None` = no filter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub final_min_trades: Option<usize>,
+    /// Maximum drawdown % allowed in the final front. `None` = no filter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub final_max_drawdown_pct: Option<f64>,
+    /// When false, SR does not use the exit formula sign-change to close positions.
+    /// Positions close only via SL/TP/trailing-stop/time rules. Default: true.
+    #[serde(default = "bool_true")]
+    pub use_exit_formula: bool,
+    /// ATR period + multiplier search range for SL (only used when `stop_loss.sl_type == ATR`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sl_atr_range: Option<SrAtrRange>,
+    /// ATR period + multiplier search range for TP (only used when `take_profit.tp_type == ATR`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tp_atr_range: Option<SrAtrRange>,
 }
 
 // ── NSGA-II Objectives ────────────────────────────────────────────────────────
@@ -165,7 +233,9 @@ pub struct SrObjectives {
 impl SrObjectives {
     /// Returns `true` if `self` Pareto-dominates `other`
     /// (better or equal on all objectives, strictly better on at least one).
+    /// Returns `false` immediately if `self` has any NaN/Inf objective.
     pub fn dominates(&self, other: &Self) -> bool {
+        if !self.is_valid() { return false; }
         let s = self.as_arr();
         let o = other.as_arr();
         s.iter().zip(o.iter()).all(|(a, b)| a >= b)
@@ -232,6 +302,10 @@ pub enum SrProgressEvent {
         best_sharpe: f64,
         databank_count: usize,
         databank_limit: usize,
+        /// Total individuals evaluated across all generations.
+        total_evaluated: usize,
+        /// Strategies per second (individuals evaluated / elapsed seconds).
+        strategies_per_sec: f64,
     },
     /// Emitted once per individual during the CMA-ES constant-refinement phase.
     CmaesProgress {
@@ -240,6 +314,12 @@ pub enum SrProgressEvent {
     },
     CmaesComplete {
         improved_count: usize,
+    },
+    /// Emitted after NSGA-II completes and before CMA-ES refinement starts.
+    /// Contains the full Pareto front from the generation phase — used to
+    /// populate the "builder" databank on the frontend.
+    NsgaDone {
+        front: Vec<SrFrontItem>,
     },
     Done {
         front: Vec<SrFrontItem>,

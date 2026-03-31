@@ -15,8 +15,10 @@ import type {
   IndicatorType,
   SrConfig,
   SrProgressEvent,
+  SrFrontItem,
   Timeframe,
   TradeDirection,
+  BuilderSavedStrategy,
 } from "@/lib/types";
 import {
   ALL_INDICATORS,
@@ -26,6 +28,8 @@ import {
 } from "@/lib/srBuilderTypes";
 import type { IndicatorMeta, PoolEntryState } from "@/lib/srBuilderTypes";
 import { cn } from "@/lib/utils";
+import { useState } from "react";
+import { Save, X } from "lucide-react";
 
 // ── Sub-components ─────────────────────────────────────────────────────────────
 
@@ -103,13 +107,32 @@ export function SrTab() {
     setBuilderTopTab,
     srBuilderConfig,
     updateSrBuilderConfig,
+    addToBuilderDatabankById,
+    clearBuilderDatabank,
+    srSavedConfigs,
+    saveSrConfig,
+    loadSrConfig,
+    deleteSrConfig,
   } = useAppStore();
+
+  const [presetName, setPresetName] = useState("");
 
   // Destructure all config fields for convenient access
   const {
     activeTab, symbolId, timeframe, startDate, endDate, initialCapital,
     activePool, checkedTypes,
     databankLimit, maxTradesPerDay, tradeDirection,
+    positionSizingType, positionSizingValue,
+    tradingHoursEnabled, tradingHoursStartHour, tradingHoursStartMinute,
+    tradingHoursEndHour, tradingHoursEndMinute,
+    closeAtTimeEnabled, closeAtTimeHour, closeAtTimeMinute,
+    slEnabled, slType, slValue, slAtrPeriod,
+    slAtrPeriodMin, slAtrPeriodMax, slAtrMultMin, slAtrMultMax,
+    tpEnabled, tpType, tpValue, tpAtrPeriod,
+    tpAtrPeriodMin, tpAtrPeriodMax, tpAtrMultMin, tpAtrMultMax,
+    tsEnabled, tsType, tsValue, tsAtrPeriod,
+    useExitFormula,
+    spreadPips, commissionType, commissionValue,
     populationSize, generations, crossoverRate, mutationRate,
     maxDepth, minTrades,
     cmaesTopK, cmaesIterations,
@@ -165,6 +188,40 @@ export function SrTab() {
     });
   };
 
+  // ── SR front item → BuilderSavedStrategy conversion ──
+  const srFrontItemToSaved = (item: SrFrontItem, sid: string, sName: string): BuilderSavedStrategy => {
+    const { objectives: o, metrics: m } = item;
+    return {
+      id: crypto.randomUUID(),
+      name: `SR Rank ${item.rank} — Sharpe ${o.sharpe.toFixed(2)}`,
+      createdAt: new Date().toISOString(),
+      fitness: o.sharpe,
+      symbolId: sid,
+      symbolName: sName,
+      timeframe,
+      netProfit: m.net_profit,
+      miniEquityCurve: [],
+      trades: m.total_trades,
+      profitFactor: o.profit_factor,
+      sharpeRatio: o.sharpe,
+      rExpectancy: o.expectancy_ratio,
+      annualReturnPct: m.annualized_return_pct,
+      maxDrawdownAbs: m.max_drawdown_pct,
+      winRatePct: m.win_rate_pct,
+      winLossRatio: m.avg_loss !== 0 ? Math.abs(m.avg_win / m.avg_loss) : 0,
+      retDDRatio: m.max_drawdown_pct > 0 ? m.annualized_return_pct / m.max_drawdown_pct : 0,
+      cagrMaxDDPct: 0,
+      avgWin: m.avg_win,
+      avgLoss: m.avg_loss,
+      avgBarsWin: m.avg_bars_in_trade,
+      strategyJson: JSON.stringify(item.strategy),
+      startDate: srBuilderConfig.startDate,
+      endDate: srBuilderConfig.endDate,
+      initialCapital: srBuilderConfig.initialCapital,
+      isSr: true,
+    };
+  };
+
   // ── Run / Stop ──
   const handleRun = async () => {
     if (!symbol) return;
@@ -174,6 +231,8 @@ export function SrTab() {
     setSrRunning(true);
     setSrProgress(null);
     setSrResults([]);
+    clearBuilderDatabank("builder");
+    clearBuilderDatabank("results");
     setBuilderTopTab("progress");
     setSrLastConfig({ symbolId: symbol.id, timeframe, startDate, endDate, initialCapital });
 
@@ -189,21 +248,33 @@ export function SrTab() {
       mutation_rate: mutationRate,
       databank_limit: databankLimit,
       max_trades_per_day: maxTradesPerDay > 0 ? maxTradesPerDay : undefined,
+      trading_hours: tradingHoursEnabled ? {
+        start_hour: tradingHoursStartHour,
+        start_minute: tradingHoursStartMinute,
+        end_hour: tradingHoursEndHour,
+        end_minute: tradingHoursEndMinute,
+      } : undefined,
+      close_trades_at: closeAtTimeEnabled ? {
+        hour: closeAtTimeHour,
+        minute: closeAtTimeMinute,
+      } : undefined,
       symbol_id: symbol.id,
       timeframe,
       start_date: startDate,
       end_date: endDate,
       initial_capital: initialCapital,
       leverage: 1.0,
-      position_sizing: { sizing_type: "FixedLots", value: 1.0 },
-      stop_loss: undefined,
-      take_profit: undefined,
-      trailing_stop: undefined,
+      position_sizing: { sizing_type: positionSizingType, value: positionSizingValue },
+      stop_loss: slEnabled ? { sl_type: slType, value: slType === "ATR" ? slAtrMultMin : slValue, ...(slType === "ATR" ? { atr_period: slAtrPeriodMin } : {}) } : undefined,
+      sl_atr_range: slEnabled && slType === "ATR" ? { period_min: slAtrPeriodMin, period_max: slAtrPeriodMax, mult_min: slAtrMultMin, mult_max: slAtrMultMax } : undefined,
+      take_profit: tpEnabled ? { tp_type: tpType, value: tpType === "ATR" ? tpAtrMultMin : tpValue, ...(tpType === "ATR" ? { atr_period: tpAtrPeriodMin } : {}) } : undefined,
+      tp_atr_range: tpEnabled && tpType === "ATR" ? { period_min: tpAtrPeriodMin, period_max: tpAtrPeriodMax, mult_min: tpAtrMultMin, mult_max: tpAtrMultMax } : undefined,
+      trailing_stop: tsEnabled ? { ts_type: tsType, value: tsValue, ...(tsType === "ATR" ? { atr_period: tsAtrPeriod } : {}) } : undefined,
       trading_costs: {
-        spread_pips: builderConfig.dataConfig.spreadPips ?? 1.0,
-        commission_type: "FixedPerLot",
-        commission_value: 0,
-        slippage_pips: builderConfig.dataConfig.slippagePips ?? 0,
+        spread_pips: spreadPips,
+        commission_type: commissionType,
+        commission_value: commissionValue,
+        slippage_pips: 0,
         slippage_random: false,
       },
       trade_direction: tradeDirection,
@@ -214,7 +285,11 @@ export function SrTab() {
       final_min_profit_factor: finalMinPF > 0 ? finalMinPF : undefined,
       final_min_trades: finalMinTrades > 0 ? finalMinTrades : undefined,
       final_max_drawdown_pct: finalMaxDD > 0 ? finalMaxDD : undefined,
+      use_exit_formula: useExitFormula,
     };
+
+    const symName = symbol.name;
+    const symId = symbol.id;
 
     const unlisten = await listen<SrProgressEvent>("sr-progress", (event) => {
       const ev = event.payload;
@@ -222,7 +297,16 @@ export function SrTab() {
         setSrProgress({ phase: "generation", ...ev.data });
       } else if (ev.type === "CmaesProgress") {
         setSrProgress({ phase: "cmaes", ...ev.data });
+      } else if (ev.type === "NsgaDone") {
+        // Save NSGA-II pre-refinement strategies to "builder" databank
+        ev.data.front.forEach((item) => {
+          addToBuilderDatabankById("builder", srFrontItemToSaved(item, symId, symName));
+        });
       } else if (ev.type === "Done") {
+        // Save CMA-ES-refined strategies to "results" databank
+        ev.data.front.forEach((item) => {
+          addToBuilderDatabankById("results", srFrontItemToSaved(item, symId, symName));
+        });
         setSrResults(ev.data.front);
         setSrRunning(false);
         setSrProgress(null);
@@ -260,6 +344,67 @@ export function SrTab() {
         <TabBtn label="Configuración" active={activeTab === "config"} onClick={() => u({ activeTab: "config" })} />
         <TabBtn label="Bloques de Construcción" active={activeTab === "blocks"} onClick={() => u({ activeTab: "blocks" })} />
         <TabBtn label="Filtros" active={activeTab === "filters"} onClick={() => u({ activeTab: "filters" })} />
+      </div>
+
+      {/* ── Persistent presets bar ─────────────────────────────────────────── */}
+      <div className="shrink-0 flex items-center gap-2 border-b border-border/20 bg-muted/5 px-3 py-1.5">
+        <span className="shrink-0 text-[10px] uppercase tracking-widest text-muted-foreground/50">
+          Presets
+        </span>
+
+        {/* Saved presets list (horizontal scroll) */}
+        <div className="flex flex-1 items-center gap-1 overflow-x-auto">
+          {srSavedConfigs.length === 0 ? (
+            <span className="text-[10px] italic text-muted-foreground/30">Sin presets guardados</span>
+          ) : (
+            srSavedConfigs.map((preset) => (
+              <div
+                key={preset.id}
+                className="group flex shrink-0 items-center gap-0.5 rounded border border-border/30 bg-background px-2 py-0.5"
+              >
+                <button
+                  onClick={() => loadSrConfig(preset.id)}
+                  title={`Cargar "${preset.name}"`}
+                  className="max-w-[120px] truncate text-[11px] font-medium text-foreground hover:text-primary transition-colors"
+                >
+                  {preset.name}
+                </button>
+                <button
+                  onClick={() => deleteSrConfig(preset.id)}
+                  title="Eliminar preset"
+                  className="ml-0.5 text-muted-foreground/30 hover:text-destructive transition-colors opacity-0 group-hover:opacity-100"
+                >
+                  <X className="h-2.5 w-2.5" />
+                </button>
+              </div>
+            ))
+          )}
+        </div>
+
+        {/* Save new preset */}
+        <div className="flex shrink-0 items-center gap-1">
+          <input
+            type="text"
+            value={presetName}
+            onChange={(e) => setPresetName(e.target.value)}
+            placeholder="Nombre…"
+            className="h-6 w-32 rounded border border-border/40 bg-background px-2 text-[11px] text-foreground placeholder:text-muted-foreground/35 focus:outline-none focus:border-primary/60"
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && presetName.trim()) {
+                saveSrConfig(presetName);
+                setPresetName("");
+              }
+            }}
+          />
+          <button
+            onClick={() => { if (presetName.trim()) { saveSrConfig(presetName); setPresetName(""); } }}
+            disabled={!presetName.trim()}
+            className="flex items-center gap-1 rounded border border-border/40 px-2 py-1 text-[10px] text-muted-foreground hover:border-primary/50 hover:text-primary disabled:opacity-40 transition-colors"
+          >
+            <Save className="h-3 w-3" />
+            Guardar
+          </button>
+        </div>
       </div>
 
       {/* Scrollable content area */}
@@ -349,6 +494,245 @@ export function SrTab() {
               <p className="text-[10px] text-muted-foreground/50">
                 Trades/día = 0 → sin límite diario.
               </p>
+            </Section>
+
+            <Section title="Tamaño de Posición">
+              <div className="flex gap-2">
+                {(["FixedLots", "FixedAmount", "PercentEquity"] as const).map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => u({ positionSizingType: t })}
+                    className={cn(
+                      "flex-1 rounded border px-2 py-1.5 text-[11px] font-medium transition-colors",
+                      positionSizingType === t
+                        ? "border-primary bg-primary/10 text-primary"
+                        : "border-border/40 text-muted-foreground hover:border-primary/40 hover:text-foreground"
+                    )}
+                  >
+                    {t === "FixedLots" ? "Lotaje Fijo" : t === "FixedAmount" ? "Monto Fijo" : "% Capital"}
+                  </button>
+                ))}
+              </div>
+              <Num
+                label={positionSizingType === "FixedLots" ? "Lotes" : positionSizingType === "FixedAmount" ? "Monto $" : "% del capital"}
+                value={positionSizingValue}
+                min={0.01}
+                step={positionSizingType === "FixedLots" ? 0.01 : positionSizingType === "PercentEquity" ? 0.5 : 100}
+                onChange={(v) => u({ positionSizingValue: v })}
+              />
+            </Section>
+
+            <Section title="Horarios de Trading">
+              <label className="flex items-center gap-2 text-xs cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={tradingHoursEnabled}
+                  onChange={(e) => u({ tradingHoursEnabled: e.target.checked })}
+                  className="accent-primary"
+                />
+                <span className="text-muted-foreground">Limitar horario de entradas</span>
+              </label>
+              {tradingHoursEnabled && (
+                <div className="space-y-1.5 pl-4">
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="w-28 shrink-0 text-muted-foreground">Desde (HH:MM)</span>
+                    <input type="number" value={tradingHoursStartHour} min={0} max={23}
+                      className="w-14 rounded border border-border/40 bg-background px-2 py-0.5 text-xs text-center"
+                      onChange={(e) => { const v = parseInt(e.target.value); if (!isNaN(v)) u({ tradingHoursStartHour: Math.max(0, Math.min(23, v)) }); }} />
+                    <span className="text-muted-foreground">:</span>
+                    <input type="number" value={tradingHoursStartMinute} min={0} max={59} step={5}
+                      className="w-14 rounded border border-border/40 bg-background px-2 py-0.5 text-xs text-center"
+                      onChange={(e) => { const v = parseInt(e.target.value); if (!isNaN(v)) u({ tradingHoursStartMinute: Math.max(0, Math.min(59, v)) }); }} />
+                  </div>
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="w-28 shrink-0 text-muted-foreground">Hasta (HH:MM)</span>
+                    <input type="number" value={tradingHoursEndHour} min={0} max={23}
+                      className="w-14 rounded border border-border/40 bg-background px-2 py-0.5 text-xs text-center"
+                      onChange={(e) => { const v = parseInt(e.target.value); if (!isNaN(v)) u({ tradingHoursEndHour: Math.max(0, Math.min(23, v)) }); }} />
+                    <span className="text-muted-foreground">:</span>
+                    <input type="number" value={tradingHoursEndMinute} min={0} max={59} step={5}
+                      className="w-14 rounded border border-border/40 bg-background px-2 py-0.5 text-xs text-center"
+                      onChange={(e) => { const v = parseInt(e.target.value); if (!isNaN(v)) u({ tradingHoursEndMinute: Math.max(0, Math.min(59, v)) }); }} />
+                  </div>
+                  <p className="text-[10px] text-muted-foreground/50">Soporta rangos que cruzan medianoche (ej. 22:00 → 06:00).</p>
+                </div>
+              )}
+            </Section>
+
+            <Section title="Cierre Automático">
+              <label className="flex items-center gap-2 text-xs cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={closeAtTimeEnabled}
+                  onChange={(e) => u({ closeAtTimeEnabled: e.target.checked })}
+                  className="accent-primary"
+                />
+                <span className="text-muted-foreground">Cerrar posición abierta a una hora fija</span>
+              </label>
+              {closeAtTimeEnabled && (
+                <div className="space-y-1.5 pl-4">
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="w-28 shrink-0 text-muted-foreground">Hora cierre (HH:MM)</span>
+                    <input type="number" value={closeAtTimeHour} min={0} max={23}
+                      className="w-14 rounded border border-border/40 bg-background px-2 py-0.5 text-xs text-center"
+                      onChange={(e) => { const v = parseInt(e.target.value); if (!isNaN(v)) u({ closeAtTimeHour: Math.max(0, Math.min(23, v)) }); }} />
+                    <span className="text-muted-foreground">:</span>
+                    <input type="number" value={closeAtTimeMinute} min={0} max={59} step={5}
+                      className="w-14 rounded border border-border/40 bg-background px-2 py-0.5 text-xs text-center"
+                      onChange={(e) => { const v = parseInt(e.target.value); if (!isNaN(v)) u({ closeAtTimeMinute: Math.max(0, Math.min(59, v)) }); }} />
+                  </div>
+                  <p className="text-[10px] text-muted-foreground/50">Cierra cualquier trade abierto cuando el tiempo de la barra ≥ la hora indicada.</p>
+                </div>
+              )}
+            </Section>
+
+            <Section title="Stop Loss">
+              <label className="flex items-center gap-2 text-xs cursor-pointer">
+                <input type="checkbox" checked={slEnabled} onChange={(e) => u({ slEnabled: e.target.checked })} className="accent-primary" />
+                <span className="text-muted-foreground">Activar Stop Loss</span>
+              </label>
+              {slEnabled && (
+                <div className="space-y-2 pl-4">
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="w-28 shrink-0 text-muted-foreground">Tipo</span>
+                    <select value={slType} onChange={(e) => u({ slType: e.target.value as typeof slType })}
+                      className="flex-1 rounded border border-border/40 bg-background px-2 py-0.5 text-xs text-foreground focus:outline-none focus:border-primary/60">
+                      <option value="Pips">Pips</option>
+                      <option value="Percentage">Porcentaje</option>
+                      <option value="ATR">ATR (rango)</option>
+                    </select>
+                  </div>
+                  {slType === "ATR" ? (
+                    <>
+                      <p className="text-[10px] text-muted-foreground/50">El builder busca el período y multiplicador óptimos dentro de los rangos indicados.</p>
+                      <div className="flex items-center gap-2 text-xs">
+                        <span className="w-28 shrink-0 text-muted-foreground">Período (min→max)</span>
+                        <input type="number" value={slAtrPeriodMin} min={1} step={1}
+                          className="w-14 rounded border border-border/40 bg-background px-2 py-0.5 text-xs text-center"
+                          onChange={(e) => { const v = parseInt(e.target.value); if (!isNaN(v) && v >= 1) u({ slAtrPeriodMin: v }); }} />
+                        <span className="text-muted-foreground/50">→</span>
+                        <input type="number" value={slAtrPeriodMax} min={1} step={1}
+                          className="w-14 rounded border border-border/40 bg-background px-2 py-0.5 text-xs text-center"
+                          onChange={(e) => { const v = parseInt(e.target.value); if (!isNaN(v) && v >= 1) u({ slAtrPeriodMax: v }); }} />
+                      </div>
+                      <div className="flex items-center gap-2 text-xs">
+                        <span className="w-28 shrink-0 text-muted-foreground">Multiplicador (min→max)</span>
+                        <input type="number" value={slAtrMultMin} min={0.01} step={0.1}
+                          className="w-14 rounded border border-border/40 bg-background px-2 py-0.5 text-xs text-center"
+                          onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v) && v > 0) u({ slAtrMultMin: v }); }} />
+                        <span className="text-muted-foreground/50">→</span>
+                        <input type="number" value={slAtrMultMax} min={0.01} step={0.1}
+                          className="w-14 rounded border border-border/40 bg-background px-2 py-0.5 text-xs text-center"
+                          onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v) && v > 0) u({ slAtrMultMax: v }); }} />
+                      </div>
+                    </>
+                  ) : (
+                    <Num label={slType === "Percentage" ? "% del precio" : "Pips"} value={slValue} min={0.01} step={slType === "Pips" ? 1 : 0.1} onChange={(v) => u({ slValue: v })} />
+                  )}
+                </div>
+              )}
+            </Section>
+
+            <Section title="Take Profit">
+              <label className="flex items-center gap-2 text-xs cursor-pointer">
+                <input type="checkbox" checked={tpEnabled} onChange={(e) => u({ tpEnabled: e.target.checked })} className="accent-primary" />
+                <span className="text-muted-foreground">Activar Take Profit</span>
+              </label>
+              {tpEnabled && (
+                <div className="space-y-2 pl-4">
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="w-28 shrink-0 text-muted-foreground">Tipo</span>
+                    <select value={tpType} onChange={(e) => u({ tpType: e.target.value as typeof tpType })}
+                      className="flex-1 rounded border border-border/40 bg-background px-2 py-0.5 text-xs text-foreground focus:outline-none focus:border-primary/60">
+                      <option value="Pips">Pips</option>
+                      <option value="RiskReward">Risk/Reward</option>
+                      <option value="ATR">ATR (rango)</option>
+                    </select>
+                  </div>
+                  {tpType === "ATR" ? (
+                    <>
+                      <p className="text-[10px] text-muted-foreground/50">El builder busca el período y multiplicador óptimos dentro de los rangos indicados.</p>
+                      <div className="flex items-center gap-2 text-xs">
+                        <span className="w-28 shrink-0 text-muted-foreground">Período (min→max)</span>
+                        <input type="number" value={tpAtrPeriodMin} min={1} step={1}
+                          className="w-14 rounded border border-border/40 bg-background px-2 py-0.5 text-xs text-center"
+                          onChange={(e) => { const v = parseInt(e.target.value); if (!isNaN(v) && v >= 1) u({ tpAtrPeriodMin: v }); }} />
+                        <span className="text-muted-foreground/50">→</span>
+                        <input type="number" value={tpAtrPeriodMax} min={1} step={1}
+                          className="w-14 rounded border border-border/40 bg-background px-2 py-0.5 text-xs text-center"
+                          onChange={(e) => { const v = parseInt(e.target.value); if (!isNaN(v) && v >= 1) u({ tpAtrPeriodMax: v }); }} />
+                      </div>
+                      <div className="flex items-center gap-2 text-xs">
+                        <span className="w-28 shrink-0 text-muted-foreground">Multiplicador (min→max)</span>
+                        <input type="number" value={tpAtrMultMin} min={0.01} step={0.1}
+                          className="w-14 rounded border border-border/40 bg-background px-2 py-0.5 text-xs text-center"
+                          onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v) && v > 0) u({ tpAtrMultMin: v }); }} />
+                        <span className="text-muted-foreground/50">→</span>
+                        <input type="number" value={tpAtrMultMax} min={0.01} step={0.1}
+                          className="w-14 rounded border border-border/40 bg-background px-2 py-0.5 text-xs text-center"
+                          onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v) && v > 0) u({ tpAtrMultMax: v }); }} />
+                      </div>
+                    </>
+                  ) : (
+                    <Num label={tpType === "RiskReward" ? "Ratio R/R (ej. 2 = 2:1)" : "Pips"} value={tpValue} min={0.01} step={tpType === "Pips" ? 1 : 0.1} onChange={(v) => u({ tpValue: v })} />
+                  )}
+                </div>
+              )}
+            </Section>
+
+            <Section title="Trailing Stop">
+              <label className="flex items-center gap-2 text-xs cursor-pointer">
+                <input type="checkbox" checked={tsEnabled} onChange={(e) => u({ tsEnabled: e.target.checked })} className="accent-primary" />
+                <span className="text-muted-foreground">Activar Trailing Stop</span>
+              </label>
+              {tsEnabled && (
+                <div className="space-y-2 pl-4">
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="w-28 shrink-0 text-muted-foreground">Tipo</span>
+                    <select value={tsType} onChange={(e) => u({ tsType: e.target.value as typeof tsType })}
+                      className="flex-1 rounded border border-border/40 bg-background px-2 py-0.5 text-xs text-foreground focus:outline-none focus:border-primary/60">
+                      <option value="ATR">ATR Multiplicador</option>
+                      <option value="RiskReward">Risk/Reward</option>
+                    </select>
+                  </div>
+                  {tsType === "ATR" && (
+                    <Num label="Período ATR" value={tsAtrPeriod} min={1} step={1} onChange={(v) => u({ tsAtrPeriod: v })} />
+                  )}
+                  <Num label="Multiplicador" value={tsValue} min={0.01} step={0.1} onChange={(v) => u({ tsValue: v })} />
+                </div>
+              )}
+            </Section>
+
+            <Section title="Fórmula de Salida">
+              <label className="flex items-center gap-2 text-xs cursor-pointer">
+                <input type="checkbox" checked={useExitFormula} onChange={(e) => u({ useExitFormula: e.target.checked })} className="accent-primary" />
+                <span className="text-muted-foreground">Usar fórmula de salida (sign-change)</span>
+              </label>
+              <p className="text-[10px] text-muted-foreground/50">
+                Cuando está activo, SR evoluciona un árbol de salida y cierra posiciones cuando cambia de signo. Desactivar es útil cuando solo se quiere salir por SL/TP.
+              </p>
+            </Section>
+
+            <Section title="Costos de Trading">
+              <Num label="Spread (pips)" value={spreadPips} min={0} step={0.1} onChange={(v) => u({ spreadPips: v })} />
+              <div className="flex items-center gap-2 text-xs">
+                <span className="text-muted-foreground w-36 shrink-0">Tipo comisión</span>
+                <select
+                  value={commissionType}
+                  onChange={(e) => u({ commissionType: e.target.value as typeof commissionType })}
+                  className="flex-1 rounded border border-border/40 bg-background px-2 py-0.5 text-xs text-foreground focus:outline-none focus:border-primary/60"
+                >
+                  <option value="FixedPerLot">Fija por lote</option>
+                  <option value="Percentage">Porcentaje (%)</option>
+                </select>
+              </div>
+              <Num
+                label={commissionType === "FixedPerLot" ? "Comisión ($ / lote)" : "Comisión (%)"}
+                value={commissionValue}
+                min={0}
+                step={commissionType === "FixedPerLot" ? 0.5 : 0.001}
+                onChange={(v) => u({ commissionValue: v })}
+              />
             </Section>
 
             <Section title="Evolución NSGA-II">

@@ -1,3 +1,5 @@
+use rand::Rng;
+
 use crate::models::candle::Candle;
 use crate::models::config::InstrumentConfig;
 use crate::models::strategy::{CommissionType, TradeDirection, TradingCosts};
@@ -14,6 +16,7 @@ pub struct BidAskOhlc {
     pub bid_open: f64,
     pub bid_high: f64,
     pub bid_low: f64,
+    pub bid_close: f64,
     pub ask_open: f64,
     pub ask_high: f64,
     pub ask_low: f64,
@@ -26,6 +29,7 @@ impl BidAskOhlc {
             bid_open: candle.open,
             bid_high: candle.high,
             bid_low: candle.low,
+            bid_close: candle.close,
             ask_open: candle.open + spread,
             ask_high: candle.high + spread,
             ask_low: candle.low + spread,
@@ -40,17 +44,17 @@ pub fn spread_price(costs: &TradingCosts, instrument: &InstrumentConfig) -> f64 
 
 /// Apply trading costs (spread + slippage) to the entry price.
 /// For long: buy at ask (price + spread), for short: sell at bid (price - spread).
-pub fn apply_entry_costs(
+pub fn apply_entry_costs<R: Rng>(
     price: f64,
     direction: TradeDirection,
     costs: &TradingCosts,
     instrument: &InstrumentConfig,
+    rng: &mut R,
 ) -> f64 {
     let spread = costs.spread_pips * instrument.pip_size;
     let slippage = if costs.slippage_random {
-        // Random slippage between 0 and max
-        let random_factor = rand::random::<f64>();
-        costs.slippage_pips * instrument.pip_size * random_factor
+        // Random slippage between 0 and max — uses caller-provided RNG for reproducibility
+        costs.slippage_pips * instrument.pip_size * rng.gen::<f64>()
     } else {
         costs.slippage_pips * instrument.pip_size
     };
@@ -64,15 +68,15 @@ pub fn apply_entry_costs(
 /// Apply trading costs (slippage) to the exit price.
 /// For long: sell at bid (price - slippage), for short: buy at ask (price + slippage).
 /// Note: spread is already paid on entry, only slippage affects exit.
-pub fn apply_exit_costs(
+pub fn apply_exit_costs<R: Rng>(
     price: f64,
     direction: TradeDirection,
     costs: &TradingCosts,
     instrument: &InstrumentConfig,
+    rng: &mut R,
 ) -> f64 {
     let slippage = if costs.slippage_random {
-        let random_factor = rand::random::<f64>();
-        costs.slippage_pips * instrument.pip_size * random_factor
+        costs.slippage_pips * instrument.pip_size * rng.gen::<f64>()
     } else {
         costs.slippage_pips * instrument.pip_size
     };
@@ -165,7 +169,7 @@ mod tests {
             slippage_pips: 0.0,
             slippage_random: false,
         };
-        let adjusted = apply_entry_costs(1.1000, TradeDirection::Long, &costs, &inst);
+        let adjusted = apply_entry_costs(1.1000, TradeDirection::Long, &costs, &inst, &mut rand::thread_rng());
         // Long: price + spread = 1.1000 + 2*0.0001 = 1.1002
         assert!((adjusted - 1.1002).abs() < 1e-10);
     }

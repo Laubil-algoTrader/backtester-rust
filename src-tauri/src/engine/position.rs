@@ -70,7 +70,7 @@ pub fn calculate_lots(
         PositionSizingType::FixedAmount => {
             if let Some(sl) = sl_price {
                 let sl_distance_pips = (entry_price - sl).abs() / instrument.pip_size;
-                if sl_distance_pips == 0.0 || instrument.pip_value == 0.0 {
+                if sl_distance_pips < 1e-6 || instrument.pip_value == 0.0 {
                     return instrument.min_lot;
                 }
                 sizing.value / (sl_distance_pips * instrument.pip_value)
@@ -81,7 +81,7 @@ pub fn calculate_lots(
         PositionSizingType::PercentEquity => {
             if let Some(sl) = sl_price {
                 let sl_distance_pips = (entry_price - sl).abs() / instrument.pip_size;
-                if sl_distance_pips == 0.0 || instrument.pip_value == 0.0 {
+                if sl_distance_pips < 1e-6 || instrument.pip_value == 0.0 {
                     return instrument.min_lot;
                 }
                 let risk_amount = equity * sizing.value / 100.0;
@@ -93,7 +93,7 @@ pub fn calculate_lots(
         PositionSizingType::RiskBased => {
             if let Some(sl) = sl_price {
                 let sl_distance_pips = (entry_price - sl).abs() / instrument.pip_size;
-                if sl_distance_pips == 0.0 || instrument.pip_value == 0.0 {
+                if sl_distance_pips < 1e-6 || instrument.pip_value == 0.0 {
                     return instrument.min_lot;
                 }
                 let risk_amount = equity * sizing.value / 100.0;
@@ -107,7 +107,7 @@ pub fn calculate_lots(
             // decrease_factor is in (0, 1]: 0.9 = −10% per loss, 1.0 = no decay.
             if let Some(sl) = sl_price {
                 let sl_distance_pips = (entry_price - sl).abs() / instrument.pip_size;
-                if sl_distance_pips == 0.0 || instrument.pip_value == 0.0 {
+                if sl_distance_pips < 1e-6 || instrument.pip_value == 0.0 {
                     return instrument.min_lot;
                 }
                 let risk_amount = equity * sizing.value / 100.0;
@@ -283,7 +283,10 @@ pub fn update_trailing_stop(position: &mut OpenPosition, ba: &BidAskOhlc) {
 /// Handles three realistic scenarios:
 /// 1. **Gap-through SL**: If price opens beyond SL, fill is at the open (bid/ask open).
 /// 2. **TP fill**: Fills at the TP level (limit order — always fills at target).
-/// 3. **Both hit same bar**: The level closer to the relevant open was hit first.
+/// 3. **Both hit same bar**: bar direction is used to infer which extreme was reached first.
+///    Bullish bar (close >= open) → low was hit before high.
+///    Bearish bar (close < open) → high was hit before low.
+///    This is the standard OHLC simulation convention used by MT5 and most professional platforms.
 pub fn check_sl_tp_hit(
     position: &OpenPosition,
     ba: &BidAskOhlc,
@@ -296,19 +299,62 @@ pub fn check_sl_tp_hit(
         (Some(sl), None) => Some(sl),
         (None, Some(tp)) => Some(tp),
         (Some((sl_fill, sl_reason)), Some((tp_fill, _))) => {
-            // Both triggered on same bar — closer level to the relevant open wins
-            let ref_open = match position.direction {
-                TradeDirection::Long | TradeDirection::Both => ba.bid_open,
-                TradeDirection::Short => ba.ask_open,
+            // Both triggered on same bar — use bar direction to infer which extreme came first.
+            // Bullish bar: low was reached first → for Long: SL first; for Short: TP first.
+            // Bearish bar: high was reached first → for Long: TP first; for Short: SL first.
+            let is_bullish = ba.bid_close >= ba.bid_open;
+            let sl_first = match position.direction {
+                TradeDirection::Long | TradeDirection::Both => is_bullish,
+                TradeDirection::Short => !is_bullish,
             };
-            let dist_sl = (ref_open - sl_fill).abs();
-            let dist_tp = (ref_open - tp_fill).abs();
-            if dist_sl <= dist_tp {
+            if sl_first {
                 Some((sl_fill, sl_reason))
             } else {
                 Some((tp_fill, CloseReason::TakeProfit))
             }
         }
+    }
+}
+
+/// Check SL/TP only at the bar OPEN price — matches MT5 "Open prices only" mode.
+///
+/// SL/TP can only trigger when the next bar opens beyond the configured level (gap-through).
+/// No within-bar OHLC checking is performed.
+/// When both SL and TP are triggered simultaneously at the same open (extreme gap),
+/// SL takes priority (conservative / realistic for adverse gap scenarios).
+pub fn check_sl_tp_hit_open_only(
+    position: &OpenPosition,
+    ba: &BidAskOhlc,
+) -> Option<(f64, CloseReason)> {
+    let reason = if position.trailing_stop_activated {
+        CloseReason::TrailingStop
+    } else {
+        CloseReason::StopLoss
+    };
+
+    let sl_hit = position.stop_loss.and_then(|sl| match position.direction {
+        TradeDirection::Long | TradeDirection::Both => {
+            if ba.bid_open <= sl { Some((ba.bid_open, reason)) } else { None }
+        }
+        TradeDirection::Short => {
+            if ba.ask_open >= sl { Some((ba.ask_open, reason)) } else { None }
+        }
+    });
+
+    let tp_hit = position.take_profit.and_then(|tp| match position.direction {
+        TradeDirection::Long | TradeDirection::Both => {
+            if ba.bid_open >= tp { Some((ba.bid_open, CloseReason::TakeProfit)) } else { None }
+        }
+        TradeDirection::Short => {
+            if ba.ask_open <= tp { Some((ba.ask_open, CloseReason::TakeProfit)) } else { None }
+        }
+    });
+
+    match (sl_hit, tp_hit) {
+        (None, None) => None,
+        (Some(sl), None) => Some(sl),
+        (None, Some(tp)) => Some(tp),
+        (Some(sl), Some(_)) => Some(sl), // SL priority on simultaneous gap
     }
 }
 

@@ -530,6 +530,10 @@ pub struct Strategy {
 /// Controls how SL/TP/trailing stop are resolved within each bar.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum BacktestPrecision {
+    /// Check SL/TP only at the bar OPEN price — no within-bar OHLC checking.
+    /// Matches MT5 "Open prices only" mode exactly: SL/TP can only trigger
+    /// when the next bar opens beyond the level (gap-through).
+    OpenPricesOnly,
     /// Check SL/TP only against the selected timeframe's OHLC (fastest).
     SelectedTfOnly,
     /// Use M1 sub-bars to resolve SL/TP hit order within each TF bar.
@@ -564,4 +568,8 @@ pub struct BacktestConfig {
     /// Only used during builder evaluation — normal UI backtests leave this as None.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub early_stop_no_trades_pct: Option<f32>,
+    /// How many bars a pending Limit/Stop order lives before being cancelled.
+    /// Defaults to 20 when not set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_order_expiry_bars: Option<usize>,
 }

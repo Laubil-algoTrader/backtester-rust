@@ -1017,13 +1017,6 @@ fn days_since_epoch(y: i64, m: i64, d: i64) -> Option<i64> {
     Some(days)
 }
 
-fn us_to_year(us: i64) -> i32 {
-    let secs = us / 1_000_000;
-    match chrono::DateTime::from_timestamp(secs, 0) {
-        Some(dt) => dt.naive_utc().year(),
-        None => 1970,
-    }
-}
 
 use chrono::Datelike;
 

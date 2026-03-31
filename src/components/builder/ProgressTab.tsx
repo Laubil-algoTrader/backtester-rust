@@ -276,11 +276,11 @@ function SrProgressView() {
         {srProgress && isGeneration && (
           <div className="grid grid-cols-3 gap-4 rounded border border-border/25 bg-muted/5 px-4 py-3">
             <TimeStat
-              label="Estrategias / seg"
+              label="ms / estrategia"
               value={
-                srProgress.strategies_per_sec >= 1
-                  ? srProgress.strategies_per_sec.toFixed(0)
-                  : srProgress.strategies_per_sec.toFixed(1)
+                srProgress.strategies_per_sec > 0
+                  ? (1000 / srProgress.strategies_per_sec).toFixed(1)
+                  : "—"
               }
             />
             <TimeStat label="Total evaluadas" value={srProgress.total_evaluated.toLocaleString()} />
@@ -400,7 +400,13 @@ export function ProgressTab() {
     cleanups.push(unLog);
 
     const unStrategy = await listen<BuilderSavedStrategy>("builder-strategy-found", (event) => {
-      addToBuilderDatabank(event.payload);
+      const cfg = builderConfig.dataConfig;
+      addToBuilderDatabank({
+        ...event.payload,
+        startDate: cfg.startDate ?? "",
+        endDate: cfg.endDate ?? "",
+        initialCapital: builderConfig.moneyManagement.initialCapital ?? 10000,
+      });
     });
     cleanups.push(unStrategy);
 

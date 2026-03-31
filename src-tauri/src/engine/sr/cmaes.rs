@@ -62,7 +62,8 @@ pub fn optimize_constants(
     );
 
     // ── CMA-ES parameters ────────────────────────────────────────────────────
-    let lambda: usize = (4.0 + 3.0 * (dim as f64).ln()).ceil() as usize; // offspring count
+    // Minimum 6 offspring so that even single-constant formulas explore enough.
+    let lambda: usize = ((4.0 + 3.0 * (dim as f64).ln()).ceil() as usize).max(6); // offspring count
     let mu = lambda / 2; // parents for recombination
     let mu_eff = mu as f64; // simplified (equal weights)
 
@@ -86,7 +87,7 @@ pub fn optimize_constants(
         if cancel_flag.load(Ordering::Relaxed) {
             break;
         }
-        // Sample λ offspring
+        // Sample λ offspring using Gaussian noise (required by the path-length control theory).
         let mut samples: Vec<(Vec<f64>, f64)> = Vec::with_capacity(lambda);
         for _ in 0..lambda {
             if evals >= max_evals {
@@ -94,7 +95,7 @@ pub fn optimize_constants(
             }
             let x: Vec<f64> = mean
                 .iter()
-                .map(|&m| m + sigma * rng.gen::<f64>().mul_add(2.0, -1.0)) // uniform [-σ, σ]
+                .map(|&m| m + sigma * standard_normal(&mut rng))
                 .collect();
             let s = evaluate_with_constants(
                 &mut strategy,
@@ -178,6 +179,16 @@ pub fn optimize_constants(
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Box-Muller transform: generate one standard-normal sample from two uniform samples.
+/// Used instead of uniform noise so that the path-length step-size control (chi_n,
+/// c_sigma, d_sigma) is theoretically consistent — those constants assume Gaussian sampling.
+#[inline]
+fn standard_normal(rng: &mut impl rand::Rng) -> f64 {
+    let u1: f64 = rng.gen::<f64>().max(1e-10); // avoid ln(0)
+    let u2: f64 = rng.gen();
+    (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+}
 
 fn initial_sigma(constants: &[f64]) -> f64 {
     // Start with ~10% of RMS of initial constants, clamped to [0.05, 2.0]

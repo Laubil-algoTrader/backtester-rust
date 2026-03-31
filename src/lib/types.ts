@@ -491,12 +491,14 @@ export interface BuilderOrderPriceBlock {
 // ── Backtest Precision ──
 
 export type BacktestPrecision =
+  | "OpenPricesOnly"
   | "SelectedTfOnly"
   | "M1TickSimulation"
   | "RealTickCustomSpread"
   | "RealTickRealSpread";
 
 export const PRECISION_LABELS: Record<BacktestPrecision, string> = {
+  OpenPricesOnly: "Open prices only (matches MT5)",
   SelectedTfOnly: "Selected TF only (fastest)",
   M1TickSimulation: "M1 tick simulation (slow)",
   RealTickCustomSpread: "Real Tick - custom spread (slowest)",
@@ -513,6 +515,8 @@ export interface BacktestConfig {
   initial_capital: number;
   leverage: number;
   precision: BacktestPrecision;
+  /** How many bars a pending Limit/Stop order lives before being cancelled. Defaults to 20. */
+  pending_order_expiry_bars?: number;
 }
 
 // ── Trade Result ──
@@ -637,6 +641,10 @@ export interface BacktestResults {
   metrics: BacktestMetrics;
   /** The backtest configuration used to produce these results. */
   backtest_config: BacktestConfig;
+  /** Metrics for long trades only. Absent when there are no long trades. */
+  long_metrics?: BacktestMetrics;
+  /** Metrics for short trades only. Absent when there are no short trades. */
+  short_metrics?: BacktestMetrics;
 }
 
 // ── Optimization ──
@@ -1101,6 +1109,8 @@ export interface BuilderSavedStrategy {
   name: string;
   createdAt: string;
   fitness: number;
+  /** True when this strategy comes from the SR builder (uses SrStrategy JSON, not Strategy JSON). */
+  isSr?: boolean;
   symbolId: string | null;
   symbolName: string;
   timeframe: Timeframe;
@@ -1121,6 +1131,10 @@ export interface BuilderSavedStrategy {
   avgLoss: number;
   avgBarsWin: number;
   strategyJson: string;
+  /** Dates and capital used when the strategy was built — used to auto-run the backtest detail. */
+  startDate?: string;
+  endDate?: string;
+  initialCapital?: number;
   /** Hash for fast duplicate detection — set by backend, optional for backward compat. */
   fingerprint?: number;
   // OOS metrics — present only when builder had an OOS split configured
@@ -1175,6 +1189,13 @@ export interface PoolLeaf {
   period_step?: number;
 }
 
+export interface SrAtrRange {
+  period_min: number;
+  period_max: number;
+  mult_min: number;
+  mult_max: number;
+}
+
 export interface SrStrategy {
   entry_long: SrNode;
   long_threshold: number;
@@ -1187,6 +1208,11 @@ export interface SrStrategy {
   position_sizing: PositionSizing;
   trading_costs: TradingCosts;
   trade_direction: TradeDirection;
+  trading_hours?: TradingHours;
+  close_trades_at?: CloseTradesAt;
+  max_trades_per_day?: number;
+  /** When false, exit formula sign-change is ignored; positions close only via SL/TP/time rules. */
+  use_exit_formula: boolean;
 }
 
 export interface SrConfig {
@@ -1204,6 +1230,8 @@ export interface SrConfig {
   databank_limit: number;
   /** Max trade entries per calendar day. Omit for no limit. */
   max_trades_per_day?: number;
+  trading_hours?: TradingHours;
+  close_trades_at?: CloseTradesAt;
   // Backtest config
   symbol_id: string;
   timeframe: Timeframe;
@@ -1227,6 +1255,12 @@ export interface SrConfig {
   final_min_profit_factor?: number;
   final_min_trades?: number;
   final_max_drawdown_pct?: number;
+  /** When false, SR does not use exit formula sign-change to close positions. Default: true. */
+  use_exit_formula: boolean;
+  /** ATR period + multiplier search range for SL (only used when stop_loss.sl_type === "ATR"). */
+  sl_atr_range?: SrAtrRange;
+  /** ATR period + multiplier search range for TP (only used when take_profit.tp_type === "ATR"). */
+  tp_atr_range?: SrAtrRange;
 }
 
 export interface SrObjectives {
@@ -1252,5 +1286,6 @@ export type SrProgressEvent =
   | { type: "Generation"; data: { gen: number; total: number; pareto_size: number; best_sharpe: number; databank_count: number; databank_limit: number; total_evaluated: number; strategies_per_sec: number } }
   | { type: "CmaesProgress"; data: { current: number; total: number } }
   | { type: "CmaesComplete"; data: { improved_count: number } }
+  | { type: "NsgaDone"; data: { front: SrFrontItem[] } }
   | { type: "Done"; data: { front: SrFrontItem[] } }
   | { type: "Error"; data: string };

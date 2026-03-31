@@ -283,7 +283,8 @@ fn load_sub_bar_data(
     let date_filter = loader::build_date_filter(&config.start_date, &config.end_date);
 
     let result = match config.precision {
-        BacktestPrecision::SelectedTfOnly => Ok(SubBarData::None),
+        // OpenPricesOnly: no sub-bar data needed — SL/TP checked only at bar open
+        BacktestPrecision::OpenPricesOnly | BacktestPrecision::SelectedTfOnly => Ok(SubBarData::None),
 
         BacktestPrecision::M1TickSimulation => {
             let m1_path = symbol
@@ -1303,9 +1304,17 @@ pub async fn validate_license(
 /// Load saved credentials from disk (for auto-login).
 #[tauri::command]
 pub async fn load_saved_license(
-    state: tauri::State<'_, AppState>,
+    _state: tauri::State<'_, AppState>,
 ) -> Result<Option<crate::license::SavedCredentials>, AppError> {
-    Ok(crate::license::load_credentials(&state.data_dir))
+    // ── DEV ONLY: skip login screen with hardcoded credentials ──────────────
+    #[cfg(debug_assertions)]
+    return Ok(Some(crate::license::SavedCredentials {
+        username: "laubil".to_string(),
+        license_key: "LBQ-CEYZ-VGPE-ZDW9".to_string(),
+    }));
+
+    #[cfg(not(debug_assertions))]
+    Ok(crate::license::load_credentials(&_state.data_dir))
 }
 
 /// Clear saved license and reset tier to Free.
@@ -1614,6 +1623,7 @@ pub async fn start_builder(
         // Abort evaluation early if a strategy hasn't traded in the first 30% of bars.
         // Eliminates ~60-80% of wasted compute on zero-trade random strategies.
         early_stop_no_trades_pct: Some(0.30),
+        pending_order_expiry_bars: None,
     };
 
     // Channel + drain thread: builder sends progress events through a channel,
@@ -1903,6 +1913,7 @@ pub async fn run_sr_backtest(
         leverage: 1.0,
         precision: BacktestPrecision::SelectedTfOnly,
         early_stop_no_trades_pct: None,
+        pending_order_expiry_bars: None,
     };
 
     // Build a minimal pool from the leaves used in the strategy trees

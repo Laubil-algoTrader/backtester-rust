@@ -6,8 +6,8 @@ venv/
 dist/
 src-tauri/target/
 
-# Data (user files)
-data/
+# Data (user files - runtime data, not source code)
+/data/
 
 # IDE
 .idea/

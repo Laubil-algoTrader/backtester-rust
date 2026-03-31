@@ -855,6 +855,29 @@ fn calculate_temporal_consistency(trades: &[crate::models::trade::TradeResult]) 
     (mean / (std + 1.0)).clamp(-5.0, 5.0)
 }
 
+/// Compute metrics for a subset of trades (e.g. long-only or short-only).
+///
+/// Builds a synthetic equity curve from the filtered trades starting at `initial_capital`.
+/// Returns `None` when the slice is empty.
+pub fn calculate_direction_metrics(
+    trades: &[crate::models::trade::TradeResult],
+    initial_capital: f64,
+    timeframe: Timeframe,
+) -> Option<BacktestMetrics> {
+    if trades.is_empty() {
+        return None;
+    }
+    // Build a synthetic equity curve: start at initial_capital, apply each trade in order.
+    let mut equity = initial_capital;
+    let mut curve: Vec<EquityPoint> = Vec::with_capacity(trades.len() + 1);
+    curve.push(EquityPoint { timestamp: trades[0].entry_time.clone(), equity });
+    for t in trades {
+        equity += t.pnl - t.commission + t.swap;
+        curve.push(EquityPoint { timestamp: t.exit_time.clone(), equity });
+    }
+    Some(calculate_metrics(trades, &curve, initial_capital, timeframe))
+}
+
 /// Format a number of bars to a human-readable duration, given minutes per bar.
 fn format_bars(bars: usize, minutes_per_bar: u32) -> String {
     let total_minutes = bars as u64 * minutes_per_bar as u64;
