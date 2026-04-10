@@ -4,10 +4,12 @@ import { toast } from "sonner";
 import { useAppStore } from "@/stores/useAppStore";
 import { TaskTypePicker } from "./TaskTypePicker";
 import { TaskCompareModal } from "./TaskCompareModal";
+import { BuilderPage } from "@/components/builder/BuilderPage";
 
 export function ProjectView() {
   const projects = useAppStore((s) => s.projects);
   const activeProjectId = useAppStore((s) => s.activeProjectId);
+  const activeProjectTaskId = useAppStore((s) => s.activeProjectTaskId);
   const addTaskToProject = useAppStore((s) => s.addTaskToProject);
   const deleteTaskFromProject = useAppStore((s) => s.deleteTaskFromProject);
   const openProjectTask = useAppStore((s) => s.openProjectTask);
@@ -20,6 +22,12 @@ export function ProjectView() {
 
   const project = projects.find((p) => p.id === activeProjectId);
   if (!project) return null;
+
+  // When a task is open, render the builder inline — no navigation away from this project.
+  // ProjectBreadcrumb (inside BuilderPage) provides the back button to return here.
+  if (activeProjectTaskId) {
+    return <BuilderPage />;
+  }
 
   const handleBack = () => {
     useAppStore.setState({ activeProjectId: null });
@@ -173,9 +181,9 @@ export function ProjectView() {
 
       {showPicker && (
         <TaskTypePicker
-          onSelect={(type, templateKey) => {
-            addTaskToProject(project.id, type, templateKey);
+          onSelect={async () => {
             setShowPicker(false);
+            await addTaskToProject(project.id, "builder", "blank");
           }}
           onClose={() => setShowPicker(false)}
         />

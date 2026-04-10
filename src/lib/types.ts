@@ -1238,6 +1238,8 @@ export interface SrConfig {
   start_date: string;
   end_date: string;
   initial_capital: number;
+  /** Backtest precision for SL/TP resolution during evolution. Default: SelectedTfOnly. */
+  precision?: BacktestPrecision;
   leverage: number;
   position_sizing: PositionSizing;
   stop_loss?: StopLoss;

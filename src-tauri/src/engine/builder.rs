@@ -1169,6 +1169,81 @@ fn random_indicator_params(
                 None,
             )
         }
+
+        // AvgVolume: single period
+        IndicatorType::AvgVolume => {
+            let period = rand_period_step(rng, pmin, pmax, pstep);
+            (IndicatorParams { period: Some(period), ..Default::default() }, None)
+        }
+
+        // BBWidthRatio: period + std_dev
+        IndicatorType::BBWidthRatio => {
+            let period = biased_period(rng, 20, 5, pmin, pmax);
+            let std_dev = if rng.gen_bool(0.6) {
+                rand_range(rng, 1.5f64.max(1.0), 2.5f64.min(3.5))
+            } else {
+                rand_range(rng, 1.0, 3.5)
+            };
+            (IndicatorParams { period: Some(period), std_dev: Some((std_dev * 10.0).round() / 10.0), ..Default::default() }, None)
+        }
+
+        // EfficiencyRatio: single period
+        IndicatorType::EfficiencyRatio => {
+            let period = biased_period(rng, 10, 3, pmin, pmax);
+            (IndicatorParams { period: Some(period), ..Default::default() }, None)
+        }
+
+        // HighestIndex: single period
+        IndicatorType::HighestIndex => {
+            let period = rand_period_step(rng, pmin, pmax, pstep);
+            (IndicatorParams { period: Some(period), ..Default::default() }, None)
+        }
+
+        // KAMA: adaptive period + fast/slow smoothing constants
+        IndicatorType::KAMA => {
+            let period = biased_period(rng, 10, 3, pmin, pmax);
+            (IndicatorParams { period: Some(period), fast_period: Some(2), slow_period: Some(30), ..Default::default() }, None)
+        }
+
+        // LowestIndex: single period
+        IndicatorType::LowestIndex => {
+            let period = rand_period_step(rng, pmin, pmax, pstep);
+            (IndicatorParams { period: Some(period), ..Default::default() }, None)
+        }
+
+        // QQE: rsi_period + smoothing factor + wave factor; dual output
+        IndicatorType::QQE => {
+            let period = biased_period(rng, 14, 3, pmin, pmax);
+            let output_field: Option<&str> = match rng.gen_range(0..2) {
+                0 => None,
+                _ => Some("tr_level"),
+            };
+            (
+                IndicatorParams {
+                    period: Some(period),
+                    signal_period: Some(5),
+                    multiplier: Some(4.236),
+                    ..Default::default()
+                },
+                output_field.map(|s| s.to_string()),
+            )
+        }
+
+        // SchaffTrendCycle: stochastic period + fast/slow EMA periods
+        IndicatorType::SchaffTrendCycle => {
+            let period = biased_period(rng, 10, 3, pmin.max(5), pmax.min(20));
+            let fast = biased_period(rng, 20, 5, 10, 30);
+            let slow = biased_period(rng, 50, 10, fast + 5, 80);
+            (
+                IndicatorParams {
+                    period: Some(period),
+                    fast_period: Some(fast),
+                    slow_period: Some(slow),
+                    ..Default::default()
+                },
+                None,
+            )
+        }
     }
 }
 
@@ -1363,6 +1438,7 @@ fn random_trailing_stop(grammar: &GrammarContext, rng: &mut impl Rng) -> Option<
         ts_type: TrailingStopType::ATR,
         value,
         atr_period,
+        activation_pips: None,
     })
 }
 

@@ -7,7 +7,7 @@ use rand::Rng;
 
 use crate::models::result::BacktestMetrics;
 use crate::models::strategy::{StopLossType, TakeProfitType};
-use crate::models::sr_result::{PoolLeaf, SrAtrRange, SrObjectives, SrStrategy};
+use crate::models::sr_result::{PoolLeaf, SrAtrRange, SrNode, SrObjectives, SrStrategy};
 
 use super::tree;
 
@@ -126,7 +126,7 @@ pub fn crowding_distance(front: &[usize], pop: &mut Vec<SrIndividual>) {
         pop[i].crowding = 0.0;
     }
 
-    let num_obj = 5;
+    let num_obj = 6;
     for obj in 0..num_obj {
         // Sort front by this objective (ascending)
         let mut sorted = front.to_vec();
@@ -136,16 +136,19 @@ pub fn crowding_distance(front: &[usize], pop: &mut Vec<SrIndividual>) {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        // Boundary individuals get infinite crowding
-        pop[sorted[0]].crowding = f64::INFINITY;
-        pop[sorted[n - 1]].crowding = f64::INFINITY;
-
         let min_v = obj_val(&pop[sorted[0]], obj);
         let max_v = obj_val(&pop[sorted[n - 1]], obj);
         let range = max_v - min_v;
+        // Skip objectives where all individuals have the same value — no useful crowding info.
+        // Boundary INFINITY is assigned AFTER the range check to avoid giving INFINITY to every
+        // individual in a homogeneous population (which would destroy the crowding criterion).
         if range < 1e-12 {
             continue;
         }
+
+        pop[sorted[0]].crowding = f64::INFINITY;
+        pop[sorted[n - 1]].crowding = f64::INFINITY;
+
         for k in 1..n - 1 {
             let delta =
                 (obj_val(&pop[sorted[k + 1]], obj) - obj_val(&pop[sorted[k - 1]], obj)) / range;
@@ -164,7 +167,8 @@ fn obj_val(ind: &SrIndividual, obj: usize) -> f64 {
             1 => o.profit_factor,
             2 => o.temporal_consistency,
             3 => o.neg_max_drawdown,
-            _ => o.expectancy_ratio,
+            4 => o.expectancy_ratio,
+            _ => o.neg_complexity,
         },
     }
 }
@@ -203,6 +207,8 @@ pub fn make_offspring<R: Rng>(
     mutation_rate: f64,
     sl_range: Option<&SrAtrRange>,
     tp_range: Option<&SrAtrRange>,
+    const_min_exp: f64,
+    const_max_exp: f64,
     rng: &mut R,
 ) -> Vec<SrIndividual> {
     let target = pop.len();
@@ -212,9 +218,9 @@ pub fn make_offspring<R: Rng>(
         let parent_a = tournament_select(pop, rng);
         let child_strategy = if rng.gen::<f64>() < crossover_rate {
             let parent_b = tournament_select(pop, rng);
-            crossover_strategies(parent_a, parent_b, max_depth, pool, mutation_rate, sl_range, tp_range, rng)
+            crossover_strategies(parent_a, parent_b, max_depth, pool, mutation_rate, sl_range, tp_range, const_min_exp, const_max_exp, rng)
         } else {
-            mutate_strategy(parent_a, max_depth, pool, mutation_rate, sl_range, tp_range, rng)
+            mutate_strategy(parent_a, max_depth, pool, mutation_rate, sl_range, tp_range, const_min_exp, const_max_exp, rng)
         };
         offspring.push(SrIndividual::new(child_strategy));
     }
@@ -230,19 +236,21 @@ fn crossover_strategies<R: Rng>(
     mutation_rate: f64,
     sl_range: Option<&SrAtrRange>,
     tp_range: Option<&SrAtrRange>,
+    const_min_exp: f64,
+    const_max_exp: f64,
     rng: &mut R,
 ) -> SrStrategy {
     let mut s = a.strategy.clone();
-    // Crossover each tree independently with 50% chance
+    // Crossover each tree independently with 50% chance (depth-controlled)
     if rng.gen::<f64>() < 0.5 {
-        s.entry_long = tree::subtree_crossover(&a.strategy.entry_long, &b.strategy.entry_long, rng);
+        s.entry_long = tree::subtree_crossover(&a.strategy.entry_long, &b.strategy.entry_long, max_depth, rng);
     }
     if rng.gen::<f64>() < 0.5 {
         s.entry_short =
-            tree::subtree_crossover(&a.strategy.entry_short, &b.strategy.entry_short, rng);
+            tree::subtree_crossover(&a.strategy.entry_short, &b.strategy.entry_short, max_depth, rng);
     }
     if rng.gen::<f64>() < 0.5 {
-        s.exit = tree::subtree_crossover(&a.strategy.exit, &b.strategy.exit, rng);
+        s.exit = tree::subtree_crossover(&a.strategy.exit, &b.strategy.exit, max_depth, rng);
     }
     // Threshold crossover
     if rng.gen::<f64>() < 0.3 {
@@ -269,7 +277,11 @@ fn crossover_strategies<R: Rng>(
         }
     }
     // Then maybe mutate
-    apply_mutation(&mut s, max_depth, pool, mutation_rate, sl_range, tp_range, rng);
+    apply_mutation(&mut s, max_depth, pool, mutation_rate, sl_range, tp_range, const_min_exp, const_max_exp, rng);
+    // Simplify trees to reduce bloat from redundant patterns
+    s.entry_long = tree::simplify(&s.entry_long);
+    s.entry_short = tree::simplify(&s.entry_short);
+    s.exit = tree::simplify(&s.exit);
     s
 }
 
@@ -280,10 +292,16 @@ fn mutate_strategy<R: Rng>(
     mutation_rate: f64,
     sl_range: Option<&SrAtrRange>,
     tp_range: Option<&SrAtrRange>,
+    const_min_exp: f64,
+    const_max_exp: f64,
     rng: &mut R,
 ) -> SrStrategy {
     let mut s = ind.strategy.clone();
-    apply_mutation(&mut s, max_depth, pool, mutation_rate, sl_range, tp_range, rng);
+    apply_mutation(&mut s, max_depth, pool, mutation_rate, sl_range, tp_range, const_min_exp, const_max_exp, rng);
+    // Simplify trees to reduce bloat from redundant patterns
+    s.entry_long = tree::simplify(&s.entry_long);
+    s.entry_short = tree::simplify(&s.entry_short);
+    s.exit = tree::simplify(&s.exit);
     s
 }
 
@@ -294,16 +312,24 @@ fn apply_mutation<R: Rng>(
     mutation_rate: f64,
     sl_range: Option<&SrAtrRange>,
     tp_range: Option<&SrAtrRange>,
+    const_min_exp: f64,
+    const_max_exp: f64,
     rng: &mut R,
 ) {
+    // Mutation distribution (finer-grained for better convergence):
+    //   30% subtree replacement (exploration)
+    //   20% point mutation (change operator, preserve structure)
+    //   20% hoist mutation (replace tree with subtree, reduces complexity)
+    //   20% constant perturbation (local numeric search)
+    //   10% leaf parameter nudge (indicator period change)
     if rng.gen::<f64>() < mutation_rate {
-        s.entry_long = tree::mutate(&s.entry_long, max_depth, pool, rng);
+        s.entry_long = apply_tree_mutation(&s.entry_long, max_depth, pool, const_min_exp, const_max_exp, rng);
     }
     if rng.gen::<f64>() < mutation_rate {
-        s.entry_short = tree::mutate(&s.entry_short, max_depth, pool, rng);
+        s.entry_short = apply_tree_mutation(&s.entry_short, max_depth, pool, const_min_exp, const_max_exp, rng);
     }
     if rng.gen::<f64>() < mutation_rate {
-        s.exit = tree::mutate(&s.exit, max_depth, pool, rng);
+        s.exit = apply_tree_mutation(&s.exit, max_depth, pool, const_min_exp, const_max_exp, rng);
     }
     // Threshold mutation — step proportional to current value so small and large
     // thresholds both get meaningful perturbations.
@@ -342,6 +368,34 @@ fn apply_mutation<R: Rng>(
                 tp.value = (tp.value + step).max(r.mult_min).min(r.mult_max);
             }
         }
+    }
+}
+
+/// Pick one of five mutation types for a single tree based on weighted probabilities.
+fn apply_tree_mutation<R: Rng>(
+    node: &SrNode,
+    max_depth: usize,
+    pool: &[PoolLeaf],
+    const_min_exp: f64,
+    const_max_exp: f64,
+    rng: &mut R,
+) -> SrNode {
+    let roll = rng.gen::<f64>();
+    if roll < 0.30 {
+        // Subtree replacement (exploration)
+        tree::mutate(node, max_depth, pool, const_min_exp, const_max_exp, rng)
+    } else if roll < 0.50 {
+        // Point mutation (swap operator)
+        tree::point_mutation(node, rng)
+    } else if roll < 0.70 {
+        // Hoist mutation (reduce complexity)
+        tree::hoist_mutation(node, rng)
+    } else if roll < 0.90 {
+        // Constant perturbation (local numeric search)
+        tree::constant_perturbation(node, rng)
+    } else {
+        // Leaf parameter nudge (indicator period)
+        tree::mutate_leaf_params(node, pool, rng)
     }
 }
 
@@ -431,14 +485,16 @@ pub fn random_population<R: Rng>(
 ) -> Vec<SrIndividual> {
     (0..count)
         .map(|_| {
+            let cmin = config.constant_min_exp;
+            let cmax = config.constant_max_exp;
             let strategy = SrStrategy {
-                entry_long: tree::generate_random(0, config.max_depth, pool, rng),
+                entry_long: tree::generate_random(0, config.max_depth, pool, cmin, cmax, rng),
                 // Wide threshold range: most indicators have values 0-100 or ±200,
                 // so sample thresholds from a matching range.
                 long_threshold: rng.gen_range(-50.0_f64..50.0),
-                entry_short: tree::generate_random(0, config.max_depth, pool, rng),
+                entry_short: tree::generate_random(0, config.max_depth, pool, cmin, cmax, rng),
                 short_threshold: rng.gen_range(-50.0_f64..50.0),
-                exit: tree::generate_random(0, config.max_depth, pool, rng),
+                exit: tree::generate_random(0, config.max_depth, pool, cmin, cmax, rng),
                 stop_loss: {
                     let mut sl = config.stop_loss.clone();
                     if let (Some(ref mut s), Some(r)) = (&mut sl, &config.sl_atr_range) {
@@ -468,8 +524,48 @@ pub fn random_population<R: Rng>(
                 trading_hours: None,
                 close_trades_at: None,
                 max_trades_per_day: None,
+                exit_dead_zone: 0.0,
+                max_bars_open: None,
+                min_bars_between_trades: None,
+                move_sl_to_be: false,
             };
             SrIndividual::new(strategy)
         })
         .collect()
+}
+
+// ── Island Model Helpers ──────────────────────────────────────────────────────
+
+/// Return the top `k` individuals from `island` ordered by scalar fitness (best first).
+/// Used for ring-topology migration: emigrants are the elite of each island.
+pub fn top_k_by_fitness(island: &[SrIndividual], k: usize) -> Vec<SrIndividual> {
+    if k == 0 || island.is_empty() {
+        return Vec::new();
+    }
+    let mut indices: Vec<usize> = (0..island.len()).collect();
+    indices.sort_by(|&a, &b| {
+        island[b].scalar_fitness()
+            .partial_cmp(&island[a].scalar_fitness())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    indices.iter().take(k).map(|&i| island[i].clone()).collect()
+}
+
+/// Replace the `migrants.len()` weakest individuals in `island` (by scalar fitness)
+/// with the provided `migrants`. The receiving island absorbs diversity from its
+/// neighbour without losing its own elite individuals.
+pub fn replace_weakest(island: &mut Vec<SrIndividual>, migrants: Vec<SrIndividual>) {
+    if migrants.is_empty() || island.is_empty() {
+        return;
+    }
+    // Sort ascending: worst first
+    island.sort_by(|a, b| {
+        a.scalar_fitness()
+            .partial_cmp(&b.scalar_fitness())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let k = migrants.len().min(island.len());
+    for (slot, migrant) in island[0..k].iter_mut().zip(migrants) {
+        *slot = migrant;
+    }
 }

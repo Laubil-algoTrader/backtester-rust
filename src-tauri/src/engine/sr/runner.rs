@@ -4,9 +4,13 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use rand::SeedableRng;
 use rayon::prelude::*;
 use tracing::info;
 
+use crate::engine::executor::{
+    SubBarData, find_subbar_range, process_subbars_candle, process_subbars_tick_columnar,
+};
 use crate::engine::indicators::{
     compute_indicator_with_slices, CandleSlices, IndicatorOutput,
 };
@@ -18,7 +22,7 @@ use crate::engine::position::{
 };
 use crate::errors::AppError;
 use crate::models::candle::Candle;
-use crate::models::config::{InstrumentConfig, Timeframe};
+use crate::models::config::{InstrumentConfig, SwapMode, Timeframe};
 use crate::models::result::{BacktestMetrics, BacktestResults, DrawdownPoint, EquityPoint};
 use crate::models::sr_result::{
     PoolLeaf, SrConfig, SrFrontItem, SrObjectives, SrProgressEvent, SrStrategy,
@@ -31,10 +35,11 @@ use crate::models::trade::{CloseReason, TradeResult};
 
 use super::cmaes::optimize_constants;
 use super::nsga2::{
-    best_front_sharpe, make_offspring, nsga2_select, random_population,
+    make_offspring, nsga2_select, random_population,
+    replace_weakest, top_k_by_fitness,
     SrIndividual,
 };
-use super::tree::{self, SrCache};
+use super::tree::{self, tree_depth, SrCache};
 
 // ── Pool Expansion ────────────────────────────────────────────────────────────
 
@@ -76,9 +81,10 @@ pub fn build_sr_cache_pub(
     build_sr_cache(pool, candles)
 }
 
-/// Pre-compute ATR-14 series for SL/TP (public for external callers).
+/// Pre-compute ATR series for SL/TP (public for external callers).
+/// Uses period 14 for backward compatibility; prefer passing the desired period directly.
 pub fn build_atr_series_pub(candles: &[Candle]) -> Vec<f64> {
-    build_atr_series(candles)
+    build_atr_series(candles, 14)
 }
 
 fn build_sr_cache(
@@ -106,18 +112,24 @@ fn build_sr_cache(
     Ok(Arc::new(map))
 }
 
-/// Pre-compute an ATR series (period 14) for SL/TP calculation when ATR-based types are used.
-fn build_atr_series(candles: &[Candle]) -> Vec<f64> {
+/// Pre-compute an ATR series for SL/TP calculation when ATR-based types are used.
+/// Uses `atr_period` from the caller (default 14 when not configured).
+/// Falls back to zeros on error and logs a warning — callers that use ATR-based
+/// stops will effectively have zero stop distance when this happens.
+fn build_atr_series(candles: &[Candle], atr_period: usize) -> Vec<f64> {
     let slices = CandleSlices::from_candles(candles);
     let config = IndicatorConfig {
         indicator_type: IndicatorType::ATR,
-        params: IndicatorParams { period: Some(14), ..Default::default() },
+        params: IndicatorParams { period: Some(atr_period), ..Default::default() },
         output_field: None,
         cached_hash: 0,
     };
     compute_indicator_with_slices(&config, &slices, candles)
         .map(|o| o.primary)
-        .unwrap_or_else(|_| vec![0.0; candles.len()])
+        .unwrap_or_else(|e| {
+            tracing::warn!("SR: ATR({atr_period}) computation failed: {e}. ATR-based SL/TP will use zero distance.");
+            vec![0.0; candles.len()]
+        })
 }
 
 // ── Time helpers ─────────────────────────────────────────────────────────────
@@ -154,11 +166,51 @@ fn should_force_close(close_at: &CloseTradesAt, datetime: &str) -> bool {
     current >= target
 }
 
+/// Compute overnight swap for a closed position.
+///
+/// Returns the swap in account currency (negative = cost, positive = credit).
+/// Uses `instrument.swap_long/short` and `swap_mode` so the SR backtest matches
+/// the classic builder's swap accounting. Returns 0.0 when both rates are zero.
+#[inline(always)]
+fn compute_swap(
+    direction: TradeDirection,
+    lots: f64,
+    duration_bars: usize,
+    timeframe: Timeframe,
+    entry_price: f64,
+    instrument: &InstrumentConfig,
+) -> f64 {
+    let rate = match direction {
+        TradeDirection::Long | TradeDirection::Both => instrument.swap_long,
+        TradeDirection::Short => instrument.swap_short,
+    };
+    if rate == 0.0 { return 0.0; }
+    let minutes = timeframe.minutes() as f64;
+    if minutes == 0.0 { return 0.0; }
+    let days_held = duration_bars as f64 * minutes / (24.0 * 60.0);
+    match instrument.swap_mode {
+        SwapMode::InPips => rate * instrument.pip_value * lots * days_held,
+        // InPoints: 1 point ≈ 1 tick = tick_size; monetary value = tick_size/pip_size * pip_value
+        SwapMode::InPoints => {
+            let point_value = if instrument.pip_size > 0.0 {
+                instrument.tick_size / instrument.pip_size * instrument.pip_value
+            } else { 0.0 };
+            rate * point_value * lots * days_held
+        }
+        SwapMode::InMoney => rate * lots * days_held,
+        SwapMode::AsPercent => {
+            let position_value = entry_price * instrument.lot_size * lots;
+            rate / 100.0 / instrument.swap_annual_days.max(1) as f64 * position_value * days_held
+        }
+    }
+}
+
 // ── Lightweight SR Backtest ───────────────────────────────────────────────────
 
 /// Evaluate an SR strategy on historical candles.
 ///
-/// Uses simplified SelectedTfOnly execution (no sub-bar precision).
+/// When `sub_bars` contains M1 candles or tick data, SL/TP resolution uses sub-bar
+/// precision (iterating through intra-bar data). Otherwise falls back to bar-level OHLC.
 /// Returns `BacktestMetrics` on success, or `None` if the strategy produces no trades.
 pub fn sr_backtest(
     strategy: &SrStrategy,
@@ -169,6 +221,7 @@ pub fn sr_backtest(
     initial_capital: f64,
     timeframe: Timeframe,
     max_trades_per_day: Option<u32>,
+    sub_bars: &SubBarData,
 ) -> Option<BacktestMetrics> {
     let n = candles.len();
     if n < 2 {
@@ -181,6 +234,11 @@ pub fn sr_backtest(
     let mut open: Option<OpenPosition> = None;
     let mut prev_exit_signal: f64 = 0.0;
     let spread_price = strategy.trading_costs.spread_pips * instrument.pip_size;
+    let slippage_price = strategy.trading_costs.slippage_pips * instrument.pip_size;
+    // Trailing stop activation: convert pips to price distance once
+    let ts_activation_dist = strategy.trailing_stop.as_ref()
+        .and_then(|ts| ts.activation_pips)
+        .map(|pips| pips * instrument.pip_size);
 
     // Precompute commission helper
     let commission_per_lot = |lots: f64| -> f64 {
@@ -199,30 +257,80 @@ pub fn sr_backtest(
     let mut trades_today: u32 = 0;
     let mut last_trade_date = String::new();
     let mut consecutive_losses: u32 = 0;
+    // Bar index of the most recently closed position (for cooldown tracking).
+    let mut last_exit_bar: Option<usize> = None;
+    // Sub-bar cursor for high-precision modes (advances monotonically through sub-bar data)
+    let mut sub_cursor: usize = 0;
 
     for i in 1..n {
         let candle = &candles[i];
         let ba = BidAskOhlc::from_candle(candle, spread_price);
+        // Find sub-bar range for this candle (no-op when SubBarData::None)
+        let next_dt = if i + 1 < n { candles[i + 1].datetime.as_str() } else { "" };
+        let next_ts = if i + 1 < n { candles[i + 1].timestamp } else { i64::MAX };
+        let (sub_start, sub_end) = find_subbar_range(
+            sub_bars, &mut sub_cursor, &candle.datetime, next_dt,
+            candle.timestamp, next_ts,
+        );
         // Evaluate signals using the PREVIOUS bar's completed data (i-1),
         // then act at the OPEN of the current bar (i). This matches MT5's
         // CopyBuffer(..., shift=1, ...) behaviour and avoids look-ahead bias.
         let exit_signal = tree::evaluate(&strategy.exit, i - 1, cache);
 
         // ── Phase 1: manage open position ───────────────────────────────────
-        if let Some(ref pos) = open {
+        if let Some(ref mut pos) = open {
             let mut closed_price: Option<f64> = None;
             let mut close_reason = CloseReason::Signal;
+            let mut _close_time: Option<String> = None;
 
-            // Check SL/TP
-            if let Some((fill, reason)) = check_sl_tp_hit(pos, &ba) {
-                closed_price = Some(fill);
-                close_reason = reason;
+            // Check SL/TP using sub-bar data when available, otherwise bar-level OHLC.
+            match sub_bars {
+                SubBarData::Candles(ref subs) if sub_start < sub_end => {
+                    if let Some((fill, time, reason)) = process_subbars_candle(
+                        pos, subs, sub_start, sub_end, instrument, spread_price,
+                    ) {
+                        closed_price = Some(fill);
+                        close_reason = reason;
+                        _close_time = Some(time);
+                    }
+                }
+                SubBarData::Ticks(ref ticks) if sub_start < sub_end => {
+                    if let Some((fill, time, reason)) = process_subbars_tick_columnar(
+                        pos, ticks, sub_start, sub_end, instrument,
+                    ) {
+                        closed_price = Some(fill);
+                        close_reason = reason;
+                        _close_time = Some(time);
+                    }
+                }
+                _ => {
+                    // Bar-level OHLC check (SelectedTfOnly)
+                    if let Some((fill, reason)) = check_sl_tp_hit(pos, &ba) {
+                        closed_price = Some(fill);
+                        close_reason = reason;
+                    }
+                }
             }
 
-            // Check exit formula sign change
+            // Check max_bars_open (time-based exit)
+            if closed_price.is_none() {
+                if let Some(max_bars) = strategy.max_bars_open {
+                    if i.saturating_sub(pos.entry_bar) >= max_bars {
+                        let fill = match pos.direction {
+                            TradeDirection::Short => ba.ask_open,
+                            _ => ba.bid_open,
+                        };
+                        closed_price = Some(fill);
+                        close_reason = CloseReason::ExitAfterBars;
+                    }
+                }
+            }
+
+            // Check exit formula sign change, with optional dead zone to prevent whipsaw exits.
             if closed_price.is_none() && strategy.use_exit_formula {
-                let sign_changed = (prev_exit_signal >= 0.0 && exit_signal < 0.0)
-                    || (prev_exit_signal <= 0.0 && exit_signal > 0.0);
+                let dz = strategy.exit_dead_zone;
+                let sign_changed = (prev_exit_signal > dz && exit_signal < -dz)
+                    || (prev_exit_signal < -dz && exit_signal > dz);
                 if sign_changed && i > pos.entry_bar + 1 {
                     // Close at open price of current bar
                     let fill = match pos.direction {
@@ -259,11 +367,13 @@ pub fn sr_backtest(
                     }
                 };
                 let commission = commission_per_lot(pos.lots);
-                let pnl = pnl_pips * instrument.pip_value * pos.lots - commission;
+                let duration_bars = i.saturating_sub(pos.entry_bar);
+                let swap = compute_swap(pos.direction, pos.lots, duration_bars, timeframe, pos.entry_price, instrument);
+                let pnl = pnl_pips * instrument.pip_value * pos.lots - commission + swap;
                 equity += pnl;
                 if pnl >= 0.0 { consecutive_losses = 0; } else { consecutive_losses += 1; }
+                last_exit_bar = Some(i);
 
-                let duration_bars = i.saturating_sub(pos.entry_bar);
                 trades.push(TradeResult {
                     id: trades.len().to_string(),
                     direction: pos.direction,
@@ -275,7 +385,7 @@ pub fn sr_backtest(
                     pnl,
                     pnl_pips,
                     commission,
-                    swap: 0.0,
+                    swap,
                     close_reason,
                     duration_bars,
                     duration_time: format!("{}b", duration_bars),
@@ -286,20 +396,23 @@ pub fn sr_backtest(
         }
 
         // ── Phase 2: update MAE/MFE and trailing stop of open position ────────
+        // When using sub-bar precision, these are already updated inside process_subbars_*.
         if let Some(ref mut pos) = open {
-            let (excursion_positive, excursion_negative) = match pos.direction {
-                TradeDirection::Long | TradeDirection::Both => (
-                    (ba.bid_high - pos.entry_price) / instrument.pip_size,
-                    (pos.entry_price - ba.bid_low) / instrument.pip_size,
-                ),
-                TradeDirection::Short => (
-                    (pos.entry_price - ba.ask_low) / instrument.pip_size,
-                    (ba.ask_high - pos.entry_price) / instrument.pip_size,
-                ),
-            };
-            pos.mfe_pips = pos.mfe_pips.max(excursion_positive);
-            pos.mae_pips = pos.mae_pips.max(excursion_negative);
-            update_trailing_stop(pos, &ba);
+            if matches!(sub_bars, SubBarData::None) || sub_start >= sub_end {
+                let (excursion_positive, excursion_negative) = match pos.direction {
+                    TradeDirection::Long | TradeDirection::Both => (
+                        (ba.bid_high - pos.entry_price) / instrument.pip_size,
+                        (pos.entry_price - ba.bid_low) / instrument.pip_size,
+                    ),
+                    TradeDirection::Short => (
+                        (pos.entry_price - ba.ask_low) / instrument.pip_size,
+                        (ba.ask_high - pos.entry_price) / instrument.pip_size,
+                    ),
+                };
+                pos.mfe_pips = pos.mfe_pips.max(excursion_positive);
+                pos.mae_pips = pos.mae_pips.max(excursion_negative);
+                update_trailing_stop(pos, &ba);
+            }
         }
 
         // ── Phase 3: entry evaluation (when no position open) ────────────────
@@ -318,8 +431,13 @@ pub fn sr_backtest(
             // Trading hours filter
             let within_hours = strategy.trading_hours.as_ref()
                 .map_or(true, |th| { let (h, m) = extract_hm(&candle.datetime); within_trading_hours(th, h, m) });
+            // Cooldown filter: min N bars between a close and the next entry
+            let cooldown_ok = match (last_exit_bar, strategy.min_bars_between_trades) {
+                (Some(last), Some(cd)) => i.saturating_sub(last) >= cd,
+                _ => true,
+            };
 
-            if can_enter && within_hours {
+            if can_enter && within_hours && cooldown_ok {
                 let entry_dir = eval_entry(strategy, i - 1, cache, &ba);
                 if let Some(direction) = entry_dir {
                     // Check allowed direction
@@ -329,12 +447,12 @@ pub fn sr_backtest(
                         TradeDirection::Both => true,
                     };
                     if allowed {
-                        // Long buys at ASK, Short sells at BID — matches MT5 EA behaviour.
+                        // Long buys at ASK + slippage, Short sells at BID - slippage.
                         let entry_price = match direction {
-                            TradeDirection::Short => ba.bid_open,
-                            _ => ba.ask_open,
+                            TradeDirection::Short => ba.bid_open - slippage_price,
+                            _ => ba.ask_open + slippage_price,
                         };
-                        let atr_val = atr_series.get(i).copied().filter(|v| *v > 0.0);
+                        let atr_val = atr_series.get(i - 1).copied().filter(|v| *v > 0.0);
 
                         let sl_price = strategy.stop_loss.as_ref().map(|sl| {
                             calculate_stop_loss(sl, entry_price, direction, atr_val, instrument)
@@ -361,9 +479,6 @@ pub fn sr_backtest(
                             consecutive_losses,
                         );
 
-                        let commission = commission_per_lot(lots);
-                        equity -= commission;
-
                         open = Some(OpenPosition {
                             direction,
                             entry_price,
@@ -373,16 +488,50 @@ pub fn sr_backtest(
                             stop_loss: sl_price,
                             take_profit: tp_price,
                             trailing_stop_distance: ts_distance,
-                            highest_since_entry: candle.high,
-                            lowest_since_entry: candle.low,
+                            highest_since_entry: entry_price,
+                            lowest_since_entry: entry_price,
                             mae_pips: 0.0,
                             mfe_pips: 0.0,
                             trailing_stop_activated: false,
                             last_swap_date: String::new(),
                             accumulated_swap: 0.0,
                             sl_moved_to_be: false,
+                            trailing_activation_dist: ts_activation_dist,
                         });
                         trades_today += 1;
+                    }
+                }
+            }
+        }
+
+        // ── Phase 4: break-even + trailing activation ───────────────────────
+        if let Some(ref mut pos) = open {
+            // Break-even: move SL to entry price once profit ≥ SL distance
+            if strategy.move_sl_to_be && !pos.sl_moved_to_be {
+                if let Some(sl) = pos.stop_loss {
+                    let sl_distance = (pos.entry_price - sl).abs();
+                    let profit = match pos.direction {
+                        TradeDirection::Short => pos.entry_price - ba.ask_low,
+                        _ => ba.bid_high - pos.entry_price,
+                    };
+                    if profit >= sl_distance {
+                        pos.stop_loss = Some(pos.entry_price);
+                        pos.sl_moved_to_be = true;
+                    }
+                }
+            }
+            // Trailing stop activation threshold: don't move TS until MFE exceeds threshold
+            if let Some(act_dist) = ts_activation_dist {
+                if !pos.trailing_stop_activated && pos.trailing_stop_distance.is_some() {
+                    let mfe_price = match pos.direction {
+                        TradeDirection::Short => pos.entry_price - ba.ask_low,
+                        _ => ba.bid_high - pos.entry_price,
+                    };
+                    if mfe_price < act_dist {
+                        // Not yet activated — prevent trailing stop from moving
+                        // by resetting highest/lowest to current price
+                        pos.highest_since_entry = ba.bid_high.min(pos.entry_price + act_dist);
+                        pos.lowest_since_entry = ba.ask_low.max(pos.entry_price - act_dist);
                     }
                 }
             }
@@ -392,12 +541,13 @@ pub fn sr_backtest(
         prev_exit_signal = exit_signal;
     }
 
-    // Close any remaining open position at end of data
+    // Close any remaining open position at end of data.
+    // Apply spread consistently: longs close at bid (close - spread), shorts at ask (close + spread).
     if let Some(pos) = open.take() {
         let last = candles.last().unwrap();
         let exit_price = match pos.direction {
             TradeDirection::Short => last.close + spread_price,
-            _ => last.close,
+            _ => last.close - spread_price,  // Longs pay spread on exit too
         };
         let pnl_pips = match pos.direction {
             TradeDirection::Long | TradeDirection::Both => {
@@ -406,9 +556,10 @@ pub fn sr_backtest(
             TradeDirection::Short => (pos.entry_price - exit_price) / instrument.pip_size,
         };
         let commission = commission_per_lot(pos.lots);
-        let pnl = pnl_pips * instrument.pip_value * pos.lots - commission;
-        equity += pnl;
         let dur = n.saturating_sub(pos.entry_bar);
+        let swap = compute_swap(pos.direction, pos.lots, dur, timeframe, pos.entry_price, instrument);
+        let pnl = pnl_pips * instrument.pip_value * pos.lots - commission + swap;
+        equity += pnl;
         trades.push(TradeResult {
             id: trades.len().to_string(),
             direction: pos.direction,
@@ -420,7 +571,7 @@ pub fn sr_backtest(
             pnl,
             pnl_pips,
             commission,
-            swap: 0.0,
+            swap,
             close_reason: CloseReason::EndOfData,
             duration_bars: dur,
             duration_time: format!("{}b", dur),
@@ -437,6 +588,306 @@ pub fn sr_backtest(
     Some(calculate_metrics(&trades, &equity_curve, initial_capital, timeframe))
 }
 
+/// Like `sr_backtest` but uses `cache_index_offset` to look up indicator/ATR values
+/// at their absolute position in the pre-computed cache when `candles` is a slice
+/// starting somewhere in the middle of the full dataset (e.g. an OOS segment).
+///
+/// Callers should pass the global start index of `candles` as `cache_index_offset`.
+/// For a regular full-range backtest, `cache_index_offset = 0`.
+pub fn sr_backtest_with_offset(
+    strategy: &SrStrategy,
+    candles: &[Candle],
+    cache: &SrCache,
+    atr_series: &[f64],
+    instrument: &InstrumentConfig,
+    initial_capital: f64,
+    timeframe: Timeframe,
+    max_trades_per_day: Option<u32>,
+    cache_index_offset: usize,
+    sub_bars: &SubBarData,
+) -> Option<BacktestMetrics> {
+    let n = candles.len();
+    if n < 2 { return None; }
+
+    let mut equity = initial_capital;
+    let mut trades: Vec<TradeResult> = Vec::new();
+    let mut equity_curve: Vec<EquityPoint> = Vec::with_capacity(n);
+    let mut open: Option<OpenPosition> = None;
+    let mut prev_exit_signal: f64 = 0.0;
+    let spread_price = strategy.trading_costs.spread_pips * instrument.pip_size;
+    let slippage_price = strategy.trading_costs.slippage_pips * instrument.pip_size;
+    let ts_activation_dist = strategy.trailing_stop.as_ref()
+        .and_then(|ts| ts.activation_pips)
+        .map(|pips| pips * instrument.pip_size);
+
+    let commission_per_lot = |lots: f64| -> f64 {
+        use crate::models::strategy::CommissionType;
+        match strategy.trading_costs.commission_type {
+            CommissionType::FixedPerLot => strategy.trading_costs.commission_value * lots,
+            CommissionType::Percentage => {
+                strategy.trading_costs.commission_value / 100.0 * lots * instrument.lot_size
+            }
+        }
+    };
+
+    let mut trades_today: u32 = 0;
+    let mut last_trade_date = String::new();
+    let mut consecutive_losses: u32 = 0;
+    let mut last_exit_bar: Option<usize> = None;
+    let mut sub_cursor: usize = 0;
+
+    for i in 1..n {
+        let candle = &candles[i];
+        let ba = BidAskOhlc::from_candle(candle, spread_price);
+        let next_dt = if i + 1 < n { candles[i + 1].datetime.as_str() } else { "" };
+        let next_ts = if i + 1 < n { candles[i + 1].timestamp } else { i64::MAX };
+        let (sub_start, sub_end) = find_subbar_range(
+            sub_bars, &mut sub_cursor, &candle.datetime, next_dt,
+            candle.timestamp, next_ts,
+        );
+        // Use global (offset) index for cache/ATR lookups so the correct pre-computed values
+        // are used regardless of where this slice starts in the full candle array.
+        let abs_i = i + cache_index_offset;
+        let exit_signal = tree::evaluate(&strategy.exit, abs_i - 1, cache);
+
+        if let Some(ref mut pos) = open {
+            let mut closed_price: Option<f64> = None;
+            let mut close_reason = CloseReason::Signal;
+
+            match sub_bars {
+                SubBarData::Candles(ref subs) if sub_start < sub_end => {
+                    if let Some((fill, _time, reason)) = process_subbars_candle(
+                        pos, subs, sub_start, sub_end, instrument, spread_price,
+                    ) {
+                        closed_price = Some(fill);
+                        close_reason = reason;
+                    }
+                }
+                SubBarData::Ticks(ref ticks) if sub_start < sub_end => {
+                    if let Some((fill, _time, reason)) = process_subbars_tick_columnar(
+                        pos, ticks, sub_start, sub_end, instrument,
+                    ) {
+                        closed_price = Some(fill);
+                        close_reason = reason;
+                    }
+                }
+                _ => {
+                    if let Some((fill, reason)) = check_sl_tp_hit(pos, &ba) {
+                        closed_price = Some(fill);
+                        close_reason = reason;
+                    }
+                }
+            }
+
+            if closed_price.is_none() {
+                if let Some(max_bars) = strategy.max_bars_open {
+                    if i.saturating_sub(pos.entry_bar) >= max_bars {
+                        let fill = match pos.direction {
+                            TradeDirection::Short => ba.ask_open,
+                            _ => ba.bid_open,
+                        };
+                        closed_price = Some(fill);
+                        close_reason = CloseReason::ExitAfterBars;
+                    }
+                }
+            }
+
+            if closed_price.is_none() && strategy.use_exit_formula {
+                let dz = strategy.exit_dead_zone;
+                let sign_changed = (prev_exit_signal > dz && exit_signal < -dz)
+                    || (prev_exit_signal < -dz && exit_signal > dz);
+                if sign_changed && i > pos.entry_bar + 1 {
+                    let fill = match pos.direction {
+                        TradeDirection::Short => ba.ask_open,
+                        _ => ba.bid_open,
+                    };
+                    closed_price = Some(fill);
+                }
+            }
+
+            if closed_price.is_none() {
+                if let Some(ref ct) = strategy.close_trades_at {
+                    if should_force_close(ct, &candle.datetime) {
+                        let fill = match pos.direction {
+                            TradeDirection::Short => ba.ask_open,
+                            _ => ba.bid_open,
+                        };
+                        closed_price = Some(fill);
+                        close_reason = CloseReason::TimeClose;
+                    }
+                }
+            }
+
+            if let Some(exit_price) = closed_price {
+                let pos = open.take().unwrap();
+                let pnl_pips = match pos.direction {
+                    TradeDirection::Long | TradeDirection::Both => {
+                        (exit_price - pos.entry_price) / instrument.pip_size
+                    }
+                    TradeDirection::Short => (pos.entry_price - exit_price) / instrument.pip_size,
+                };
+                let commission = commission_per_lot(pos.lots);
+                let duration_bars = i.saturating_sub(pos.entry_bar);
+                let swap = compute_swap(pos.direction, pos.lots, duration_bars, timeframe, pos.entry_price, instrument);
+                let pnl = pnl_pips * instrument.pip_value * pos.lots - commission + swap;
+                equity += pnl;
+                if pnl >= 0.0 { consecutive_losses = 0; } else { consecutive_losses += 1; }
+                last_exit_bar = Some(i);
+                trades.push(TradeResult {
+                    id: trades.len().to_string(),
+                    direction: pos.direction,
+                    entry_time: pos.entry_time.clone(),
+                    entry_price: pos.entry_price,
+                    exit_time: candle.datetime.clone(),
+                    exit_price,
+                    lots: pos.lots,
+                    pnl, pnl_pips, commission, swap,
+                    close_reason, duration_bars,
+                    duration_time: format!("{}b", duration_bars),
+                    mae: pos.mae_pips, mfe: pos.mfe_pips,
+                });
+            }
+        }
+
+        if let Some(ref mut pos) = open {
+            if matches!(sub_bars, SubBarData::None) || sub_start >= sub_end {
+                let (excursion_positive, excursion_negative) = match pos.direction {
+                    TradeDirection::Long | TradeDirection::Both => (
+                        (ba.bid_high - pos.entry_price) / instrument.pip_size,
+                        (pos.entry_price - ba.bid_low) / instrument.pip_size,
+                    ),
+                    TradeDirection::Short => (
+                        (pos.entry_price - ba.ask_low) / instrument.pip_size,
+                        (ba.ask_high - pos.entry_price) / instrument.pip_size,
+                    ),
+                };
+                pos.mfe_pips = pos.mfe_pips.max(excursion_positive);
+                pos.mae_pips = pos.mae_pips.max(excursion_negative);
+                update_trailing_stop(pos, &ba);
+            }
+        }
+
+        if open.is_none() {
+            let can_enter = if let Some(max_tpd) = max_trades_per_day {
+                let bar_date = candle.datetime.get(..10).unwrap_or(&candle.datetime).to_string();
+                if bar_date != last_trade_date {
+                    last_trade_date = bar_date;
+                    trades_today = 0;
+                }
+                trades_today < max_tpd
+            } else { true };
+            let within_hours = strategy.trading_hours.as_ref()
+                .map_or(true, |th| { let (h, m) = extract_hm(&candle.datetime); within_trading_hours(th, h, m) });
+            let cooldown_ok = match (last_exit_bar, strategy.min_bars_between_trades) {
+                (Some(last), Some(cd)) => i.saturating_sub(last) >= cd,
+                _ => true,
+            };
+
+            if can_enter && within_hours && cooldown_ok {
+                let entry_dir = eval_entry(strategy, abs_i - 1, cache, &ba);
+                if let Some(direction) = entry_dir {
+                    let allowed = match strategy.trade_direction {
+                        TradeDirection::Long => direction == TradeDirection::Long,
+                        TradeDirection::Short => direction == TradeDirection::Short,
+                        TradeDirection::Both => true,
+                    };
+                    if allowed {
+                        let entry_price = match direction {
+                            TradeDirection::Short => ba.bid_open - slippage_price,
+                            _ => ba.ask_open + slippage_price,
+                        };
+                        let atr_val = atr_series.get(abs_i - 1).copied().filter(|v| *v > 0.0);
+                        let sl_price = strategy.stop_loss.as_ref().map(|sl| {
+                            calculate_stop_loss(sl, entry_price, direction, atr_val, instrument)
+                        });
+                        let tp_price = strategy.take_profit.as_ref().map(|tp| {
+                            calculate_take_profit(tp, entry_price, sl_price, direction, atr_val, instrument)
+                        });
+                        let ts_distance = strategy.trailing_stop.as_ref().map(|ts| {
+                            calculate_trailing_stop_distance(ts, entry_price, sl_price, atr_val, instrument)
+                        });
+                        let lots = calculate_lots(&strategy.position_sizing, equity, entry_price, sl_price, instrument, consecutive_losses);
+                        open = Some(OpenPosition {
+                            direction, entry_price, entry_bar: i,
+                            entry_time: candle.datetime.clone(), lots,
+                            stop_loss: sl_price, take_profit: tp_price,
+                            trailing_stop_distance: ts_distance,
+                            highest_since_entry: entry_price,
+                            lowest_since_entry: entry_price,
+                            mae_pips: 0.0, mfe_pips: 0.0,
+                            trailing_stop_activated: false,
+                            last_swap_date: String::new(), accumulated_swap: 0.0, sl_moved_to_be: false,
+                            trailing_activation_dist: ts_activation_dist,
+                        });
+                        trades_today += 1;
+                    }
+                }
+            }
+        }
+
+        // Break-even + trailing activation
+        if let Some(ref mut pos) = open {
+            if strategy.move_sl_to_be && !pos.sl_moved_to_be {
+                if let Some(sl) = pos.stop_loss {
+                    let sl_distance = (pos.entry_price - sl).abs();
+                    let profit = match pos.direction {
+                        TradeDirection::Short => pos.entry_price - ba.ask_low,
+                        _ => ba.bid_high - pos.entry_price,
+                    };
+                    if profit >= sl_distance {
+                        pos.stop_loss = Some(pos.entry_price);
+                        pos.sl_moved_to_be = true;
+                    }
+                }
+            }
+            if let Some(act_dist) = ts_activation_dist {
+                if !pos.trailing_stop_activated && pos.trailing_stop_distance.is_some() {
+                    let mfe_price = match pos.direction {
+                        TradeDirection::Short => pos.entry_price - ba.ask_low,
+                        _ => ba.bid_high - pos.entry_price,
+                    };
+                    if mfe_price < act_dist {
+                        pos.highest_since_entry = ba.bid_high.min(pos.entry_price + act_dist);
+                        pos.lowest_since_entry = ba.ask_low.max(pos.entry_price - act_dist);
+                    }
+                }
+            }
+        }
+
+        equity_curve.push(EquityPoint { timestamp: candle.datetime.clone(), equity });
+        prev_exit_signal = exit_signal;
+    }
+
+    if let Some(pos) = open.take() {
+        let last = candles.last().unwrap();
+        let exit_price = match pos.direction {
+            TradeDirection::Short => last.close + spread_price,
+            _ => last.close - spread_price,
+        };
+        let pnl_pips = match pos.direction {
+            TradeDirection::Long | TradeDirection::Both => (exit_price - pos.entry_price) / instrument.pip_size,
+            TradeDirection::Short => (pos.entry_price - exit_price) / instrument.pip_size,
+        };
+        let commission = commission_per_lot(pos.lots);
+        let dur = n.saturating_sub(pos.entry_bar);
+        let swap = compute_swap(pos.direction, pos.lots, dur, timeframe, pos.entry_price, instrument);
+        let pnl = pnl_pips * instrument.pip_value * pos.lots - commission + swap;
+        equity += pnl;
+        trades.push(TradeResult {
+            id: trades.len().to_string(),
+            direction: pos.direction, entry_time: pos.entry_time,
+            entry_price: pos.entry_price, exit_time: last.datetime.clone(),
+            exit_price, lots: pos.lots, pnl, pnl_pips, commission, swap,
+            close_reason: CloseReason::EndOfData, duration_bars: dur,
+            duration_time: format!("{}b", dur), mae: pos.mae_pips, mfe: pos.mfe_pips,
+        });
+        equity_curve.push(EquityPoint { timestamp: last.datetime.clone(), equity });
+    }
+
+    if trades.is_empty() { return None; }
+    Some(calculate_metrics(&trades, &equity_curve, initial_capital, timeframe))
+}
+
 /// Like `sr_backtest` but returns the full `BacktestResults` including trades,
 /// equity curve, drawdown curve, and per-trade returns — for display in the Backtest page.
 pub fn sr_backtest_full(
@@ -448,6 +899,7 @@ pub fn sr_backtest_full(
     initial_capital: f64,
     timeframe: Timeframe,
     bt_config: BacktestConfig,
+    sub_bars: &SubBarData,
 ) -> Option<BacktestResults> {
     let n = candles.len();
     if n < 2 {
@@ -462,6 +914,10 @@ pub fn sr_backtest_full(
     let mut open: Option<OpenPosition> = None;
     let mut prev_exit_signal: f64 = 0.0;
     let spread_price = strategy.trading_costs.spread_pips * instrument.pip_size;
+    let slippage_price = strategy.trading_costs.slippage_pips * instrument.pip_size;
+    let ts_activation_dist = strategy.trailing_stop.as_ref()
+        .and_then(|ts| ts.activation_pips)
+        .map(|pips| pips * instrument.pip_size);
 
     let commission_per_lot = |lots: f64| -> f64 {
         use crate::models::strategy::CommissionType;
@@ -476,26 +932,68 @@ pub fn sr_backtest_full(
     let mut consecutive_losses: u32 = 0;
     let mut trades_today_full: u32 = 0;
     let mut last_trade_date_full = String::new();
+    let mut last_exit_bar_full: Option<usize> = None;
+    let mut sub_cursor: usize = 0;
 
     for i in 1..n {
         let candle = &candles[i];
         let ba = BidAskOhlc::from_candle(candle, spread_price);
+        let next_dt = if i + 1 < n { candles[i + 1].datetime.as_str() } else { "" };
+        let next_ts = if i + 1 < n { candles[i + 1].timestamp } else { i64::MAX };
+        let (sub_start, sub_end) = find_subbar_range(
+            sub_bars, &mut sub_cursor, &candle.datetime, next_dt,
+            candle.timestamp, next_ts,
+        );
         // Use previous bar's (i-1) completed indicator values to decide actions
         // at bar i's open — matches MT5 CopyBuffer(shift=1) behaviour.
         let exit_signal = tree::evaluate(&strategy.exit, i - 1, cache);
 
-        if let Some(ref pos) = open {
+        if let Some(ref mut pos) = open {
             let mut closed_price: Option<f64> = None;
             let mut close_reason = CloseReason::Signal;
 
-            if let Some((fill, reason)) = check_sl_tp_hit(pos, &ba) {
-                closed_price = Some(fill);
-                close_reason = reason;
+            match sub_bars {
+                SubBarData::Candles(ref subs) if sub_start < sub_end => {
+                    if let Some((fill, _time, reason)) = process_subbars_candle(
+                        pos, subs, sub_start, sub_end, instrument, spread_price,
+                    ) {
+                        closed_price = Some(fill);
+                        close_reason = reason;
+                    }
+                }
+                SubBarData::Ticks(ref ticks) if sub_start < sub_end => {
+                    if let Some((fill, _time, reason)) = process_subbars_tick_columnar(
+                        pos, ticks, sub_start, sub_end, instrument,
+                    ) {
+                        closed_price = Some(fill);
+                        close_reason = reason;
+                    }
+                }
+                _ => {
+                    if let Some((fill, reason)) = check_sl_tp_hit(pos, &ba) {
+                        closed_price = Some(fill);
+                        close_reason = reason;
+                    }
+                }
+            }
+
+            if closed_price.is_none() {
+                if let Some(max_bars) = strategy.max_bars_open {
+                    if i.saturating_sub(pos.entry_bar) >= max_bars {
+                        let fill = match pos.direction {
+                            TradeDirection::Short => ba.ask_open,
+                            _ => ba.bid_open,
+                        };
+                        closed_price = Some(fill);
+                        close_reason = CloseReason::ExitAfterBars;
+                    }
+                }
             }
 
             if closed_price.is_none() && strategy.use_exit_formula {
-                let sign_changed = (prev_exit_signal >= 0.0 && exit_signal < 0.0)
-                    || (prev_exit_signal <= 0.0 && exit_signal > 0.0);
+                let dz = strategy.exit_dead_zone;
+                let sign_changed = (prev_exit_signal > dz && exit_signal < -dz)
+                    || (prev_exit_signal < -dz && exit_signal > dz);
                 if sign_changed && i > pos.entry_bar + 1 {
                     let fill = match pos.direction {
                         TradeDirection::Short => ba.ask_open,
@@ -530,10 +1028,12 @@ pub fn sr_backtest_full(
                     }
                 };
                 let commission = commission_per_lot(pos.lots);
-                let pnl = pnl_pips * instrument.pip_value * pos.lots - commission;
+                let dur = i.saturating_sub(pos.entry_bar);
+                let swap = compute_swap(pos.direction, pos.lots, dur, timeframe, pos.entry_price, instrument);
+                let pnl = pnl_pips * instrument.pip_value * pos.lots - commission + swap;
                 equity += pnl;
                 if pnl >= 0.0 { consecutive_losses = 0; } else { consecutive_losses += 1; }
-                let dur = i.saturating_sub(pos.entry_bar);
+                last_exit_bar_full = Some(i);
                 trades.push(TradeResult {
                     id: trades.len().to_string(),
                     direction: pos.direction,
@@ -545,7 +1045,7 @@ pub fn sr_backtest_full(
                     pnl,
                     pnl_pips,
                     commission,
-                    swap: 0.0,
+                    swap,
                     close_reason,
                     duration_bars: dur,
                     duration_time: format!("{}b", dur),
@@ -556,19 +1056,21 @@ pub fn sr_backtest_full(
         }
 
         if let Some(ref mut pos) = open {
-            let (excursion_positive, excursion_negative) = match pos.direction {
-                TradeDirection::Long | TradeDirection::Both => (
-                    (ba.bid_high - pos.entry_price) / instrument.pip_size,
-                    (pos.entry_price - ba.bid_low) / instrument.pip_size,
-                ),
-                TradeDirection::Short => (
-                    (pos.entry_price - ba.ask_low) / instrument.pip_size,
-                    (ba.ask_high - pos.entry_price) / instrument.pip_size,
-                ),
-            };
-            pos.mfe_pips = pos.mfe_pips.max(excursion_positive);
-            pos.mae_pips = pos.mae_pips.max(excursion_negative);
-            update_trailing_stop(pos, &ba);
+            if matches!(sub_bars, SubBarData::None) || sub_start >= sub_end {
+                let (excursion_positive, excursion_negative) = match pos.direction {
+                    TradeDirection::Long | TradeDirection::Both => (
+                        (ba.bid_high - pos.entry_price) / instrument.pip_size,
+                        (pos.entry_price - ba.bid_low) / instrument.pip_size,
+                    ),
+                    TradeDirection::Short => (
+                        (pos.entry_price - ba.ask_low) / instrument.pip_size,
+                        (ba.ask_high - pos.entry_price) / instrument.pip_size,
+                    ),
+                };
+                pos.mfe_pips = pos.mfe_pips.max(excursion_positive);
+                pos.mae_pips = pos.mae_pips.max(excursion_negative);
+                update_trailing_stop(pos, &ba);
+            }
         }
 
         if open.is_none() {
@@ -586,7 +1088,11 @@ pub fn sr_backtest_full(
             };
             let within_hours = strategy.trading_hours.as_ref()
                 .map_or(true, |th| { let (h, m) = extract_hm(&candle.datetime); within_trading_hours(th, h, m) });
-            let entry_dir = if can_enter && within_hours { eval_entry(strategy, i - 1, cache, &ba) } else { None };
+            let cooldown_ok = match (last_exit_bar_full, strategy.min_bars_between_trades) {
+                (Some(last), Some(cd)) => i.saturating_sub(last) >= cd,
+                _ => true,
+            };
+            let entry_dir = if can_enter && within_hours && cooldown_ok { eval_entry(strategy, i - 1, cache, &ba) } else { None };
             if let Some(direction) = entry_dir {
                 let allowed = match strategy.trade_direction {
                     TradeDirection::Long => direction == TradeDirection::Long,
@@ -594,12 +1100,11 @@ pub fn sr_backtest_full(
                     TradeDirection::Both => true,
                 };
                 if allowed {
-                    // Long buys at ASK, Short sells at BID — matches MT5 EA behaviour.
                     let entry_price = match direction {
-                        TradeDirection::Short => ba.bid_open,
-                        _ => ba.ask_open,
+                        TradeDirection::Short => ba.bid_open - slippage_price,
+                        _ => ba.ask_open + slippage_price,
                     };
-                    let atr_val = atr_series.get(i).copied().filter(|v| *v > 0.0);
+                    let atr_val = atr_series.get(i - 1).copied().filter(|v| *v > 0.0);
                     let sl_price = strategy.stop_loss.as_ref().map(|sl| {
                         calculate_stop_loss(sl, entry_price, direction, atr_val, instrument)
                     });
@@ -610,8 +1115,6 @@ pub fn sr_backtest_full(
                         calculate_trailing_stop_distance(ts, entry_price, sl_price, atr_val, instrument)
                     });
                     let lots = calculate_lots(&strategy.position_sizing, equity, entry_price, sl_price, instrument, consecutive_losses);
-                    let commission = commission_per_lot(lots);
-                    equity -= commission;
                     open = Some(OpenPosition {
                         direction,
                         entry_price,
@@ -621,16 +1124,46 @@ pub fn sr_backtest_full(
                         stop_loss: sl_price,
                         take_profit: tp_price,
                         trailing_stop_distance: ts_distance,
-                        highest_since_entry: candle.high,
-                        lowest_since_entry: candle.low,
+                        highest_since_entry: entry_price,
+                        lowest_since_entry: entry_price,
                         mae_pips: 0.0,
                         mfe_pips: 0.0,
                         trailing_stop_activated: false,
                         last_swap_date: String::new(),
                         accumulated_swap: 0.0,
                         sl_moved_to_be: false,
+                        trailing_activation_dist: ts_activation_dist,
                     });
                     trades_today_full += 1;
+                }
+            }
+        }
+
+        // Break-even + trailing activation
+        if let Some(ref mut pos) = open {
+            if strategy.move_sl_to_be && !pos.sl_moved_to_be {
+                if let Some(sl) = pos.stop_loss {
+                    let sl_distance = (pos.entry_price - sl).abs();
+                    let profit = match pos.direction {
+                        TradeDirection::Short => pos.entry_price - ba.ask_low,
+                        _ => ba.bid_high - pos.entry_price,
+                    };
+                    if profit >= sl_distance {
+                        pos.stop_loss = Some(pos.entry_price);
+                        pos.sl_moved_to_be = true;
+                    }
+                }
+            }
+            if let Some(act_dist) = ts_activation_dist {
+                if !pos.trailing_stop_activated && pos.trailing_stop_distance.is_some() {
+                    let mfe_price = match pos.direction {
+                        TradeDirection::Short => pos.entry_price - ba.ask_low,
+                        _ => ba.bid_high - pos.entry_price,
+                    };
+                    if mfe_price < act_dist {
+                        pos.highest_since_entry = ba.bid_high.min(pos.entry_price + act_dist);
+                        pos.lowest_since_entry = ba.ask_low.max(pos.entry_price - act_dist);
+                    }
                 }
             }
         }
@@ -661,18 +1194,20 @@ pub fn sr_backtest_full(
 
     if let Some(pos) = open.take() {
         let last = candles.last().unwrap();
+        // Apply spread consistently: longs close at bid (close - spread), shorts at ask (close + spread).
         let exit_price = match pos.direction {
             TradeDirection::Short => last.close + spread_price,
-            _ => last.close,
+            _ => last.close - spread_price,
         };
         let pnl_pips = match pos.direction {
             TradeDirection::Long | TradeDirection::Both => (exit_price - pos.entry_price) / instrument.pip_size,
             TradeDirection::Short => (pos.entry_price - exit_price) / instrument.pip_size,
         };
         let commission = commission_per_lot(pos.lots);
-        let pnl = pnl_pips * instrument.pip_value * pos.lots - commission;
-        equity += pnl;
         let dur = n.saturating_sub(pos.entry_bar);
+        let swap = compute_swap(pos.direction, pos.lots, dur, timeframe, pos.entry_price, instrument);
+        let pnl = pnl_pips * instrument.pip_value * pos.lots - commission + swap;
+        equity += pnl;
         trades.push(TradeResult {
             id: trades.len().to_string(),
             direction: pos.direction,
@@ -684,7 +1219,7 @@ pub fn sr_backtest_full(
             pnl,
             pnl_pips,
             commission,
-            swap: 0.0,
+            swap,
             close_reason: CloseReason::EndOfData,
             duration_bars: dur,
             duration_time: format!("{}b", dur),
@@ -704,7 +1239,7 @@ pub fn sr_backtest_full(
     let metrics = calculate_metrics(&trades, &equity_curve, initial_capital, timeframe);
     let returns: Vec<f64> = trades.iter().map(|t| t.pnl).collect();
 
-    Some(BacktestResults { trades, equity_curve, drawdown_curve, returns, metrics, backtest_config: bt_config, long_metrics: None, short_metrics: None })
+    Some(BacktestResults { trades, equity_curve, drawdown_curve, returns, metrics, backtest_config: bt_config, long_metrics: None, short_metrics: None, warnings: vec![] })
 }
 
 /// Evaluate entry signals for the current bar.
@@ -747,15 +1282,19 @@ pub fn compute_objectives_pub(
         0.0
     };
 
-    // Apply a soft penalty when there are very few trades (less than half min_trades).
-    // temporal_consistency will already be low for such strategies, but we also
-    // cap the other objectives to prevent degenerate cases from polluting the front.
-    let trade_penalty = if metrics.total_trades < min_trades / 2 { 0.5 } else { 1.0 };
+    // Graduated penalty for insufficient trades: scales linearly from 0 (0 trades)
+    // to 1.0 (min_trades or more). Previously a binary 0.5/1.0 cliff that allowed
+    // strategies with exactly min_trades/2 trades to compete equally with 500-trade strategies.
+    let trade_penalty = if min_trades == 0 {
+        1.0
+    } else {
+        (metrics.total_trades as f64 / min_trades as f64).min(1.0)
+    };
 
-    // temporal_consistency and neg_max_drawdown were previously unclamped, which meant
-    // NaN or extreme values could corrupt NSGA-II dominance comparisons. Clamp all objectives
-    // uniformly so that is_valid() checks and dominance logic always see finite values.
-    let temporal_consistency = if metrics.total_trades < min_trades / 2 {
+    // temporal_consistency is forced to a floor value when there are very few trades.
+    // Use the same graduated threshold as trade_penalty: below min_trades/2 trades it
+    // is unreliable, above it we trust the measured value (already clamped for NaN safety).
+    let temporal_consistency = if min_trades > 0 && metrics.total_trades < min_trades / 2 {
         -2.0_f64
     } else {
         metrics.temporal_consistency
@@ -767,6 +1306,7 @@ pub fn compute_objectives_pub(
         temporal_consistency,
         neg_max_drawdown: (-metrics.max_drawdown_pct).clamp(-200.0, 0.0),
         expectancy_ratio: expectancy_ratio * trade_penalty,
+        neg_complexity: 0.0, // set by caller with actual node count
     }
 }
 
@@ -781,10 +1321,15 @@ fn evaluate_individual(
     instrument: &InstrumentConfig,
     config: &SrConfig,
     timeframe: Timeframe,
+    sub_bars: &SubBarData,
 ) {
     ind.strategy.trading_hours = config.trading_hours.clone();
     ind.strategy.close_trades_at = config.close_trades_at.clone();
     ind.strategy.max_trades_per_day = config.max_trades_per_day;
+    ind.strategy.exit_dead_zone = config.exit_dead_zone;
+    ind.strategy.max_bars_open = config.max_bars_open;
+    ind.strategy.min_bars_between_trades = config.min_bars_between_trades;
+    ind.strategy.move_sl_to_be = config.move_sl_to_be;
     let metrics = sr_backtest(
         &ind.strategy,
         candles,
@@ -794,9 +1339,18 @@ fn evaluate_individual(
         config.initial_capital,
         timeframe,
         config.max_trades_per_day,
+        sub_bars,
     );
-    // Cache the metrics so build_front_item can reuse them without re-running the backtest.
-    ind.objectives = metrics.as_ref().map(|m| compute_objectives_pub(m, config.min_trades));
+    // neg_complexity as a Pareto objective replaces the old bloat multiplier hack.
+    // NSGA-II naturally finds the trade-off between performance and simplicity.
+    let node_count = tree::count_nodes(&ind.strategy.entry_long)
+        + tree::count_nodes(&ind.strategy.entry_short)
+        + tree::count_nodes(&ind.strategy.exit);
+    ind.objectives = metrics.as_ref().map(|m| {
+        let mut obj = compute_objectives_pub(m, config.min_trades);
+        obj.neg_complexity = -(node_count as f64);
+        obj
+    });
     ind.metrics = metrics;
 }
 
@@ -812,6 +1366,7 @@ pub fn run_sr_builder(
     timeframe: Timeframe,
     cancel_flag: Arc<AtomicBool>,
     emit: impl Fn(SrProgressEvent) + Send + Sync,
+    sub_bars: SubBarData,
 ) -> Result<Vec<SrFrontItem>, AppError> {
     info!(
         "SR builder: pop={} gen={} pool={}",
@@ -832,60 +1387,250 @@ pub fn run_sr_builder(
         expanded_pool.len()
     );
 
-    // ── Pre-compute indicators ───────────────────────────────────────────────
+    // ── Pre-compute indicators (always over full candle range) ───────────────
+    // The cache covers all bars so OOS evaluation can reuse it with an index offset.
     let cache = build_sr_cache(&expanded_pool, &candles)?;
-    let atr_series = build_atr_series(&candles);
+    let atr_series = build_atr_series(&candles, config.atr_period);
     let atr_arc = Arc::new(atr_series);
 
-    // ── Initial population ───────────────────────────────────────────────────
-    let mut rng = rand::thread_rng();
-    let mut population = random_population(config.population_size, &config, &expanded_pool, &mut rng);
+    // ── In-sample / out-of-sample split ─────────────────────────────────────
+    // When oos_pct is set, evolution only sees the first (1 - oos_pct) fraction of candles.
+    // The OOS portion is reserved for final evaluation in build_front_item.
+    let is_candle_end: usize = config.oos_pct
+        .filter(|&p| p > 0.0 && p < 1.0)
+        .map(|p| ((candles.len() as f64 * (1.0 - p)).max(2.0) as usize).min(candles.len()))
+        .unwrap_or(candles.len());
+    let training_candles: &[Candle] = &candles[0..is_candle_end];
+    if is_candle_end < candles.len() {
+        info!(
+            "SR OOS split: {} in-sample bars, {} OOS bars ({:.1}%)",
+            is_candle_end,
+            candles.len() - is_candle_end,
+            config.oos_pct.unwrap_or(0.0) * 100.0
+        );
+    }
 
-    // Evaluate initial population
+    // ── Initial population ───────────────────────────────────────────────────
+    // Use StdRng always (seeded from entropy or from a user-supplied seed for reproducibility).
+    let mut rng: rand::rngs::StdRng = match config.seed {
+        Some(s) => rand::rngs::StdRng::seed_from_u64(s),
+        None => rand::rngs::StdRng::from_entropy(),
+    };
+
+    // ── Island model setup ───────────────────────────────────────────────────
+    // When num_islands == 1 the loop below is identical to the previous behaviour.
+    let num_islands = config.num_islands.max(1);
+    let island_size = (config.population_size / num_islands).max(4);
+    let mut islands: Vec<Vec<SrIndividual>> = (0..num_islands)
+        .map(|_| random_population(island_size, &config, &expanded_pool, &mut rng))
+        .collect();
+
+    // Evaluate all islands in parallel
     {
         let cache_ref = &cache;
         let atr_ref = &*atr_arc;
-        let candles_ref = &candles;
+        let candles_ref: &[Candle] = training_candles;
         let instrument_ref = &instrument;
         let config_ref = &config;
-        population.par_iter_mut().for_each(|ind| {
-            evaluate_individual(
-                ind,
-                candles_ref,
-                cache_ref,
-                atr_ref,
-                instrument_ref,
-                config_ref,
-                timeframe,
-            );
-        });
+        let sub_ref = &sub_bars;
+        for island in &mut islands {
+            island.par_iter_mut().for_each(|ind| {
+                evaluate_individual(ind, candles_ref, cache_ref, atr_ref, instrument_ref, config_ref, timeframe, sub_ref);
+            });
+        }
     }
 
     // ── Continuous NSGA-II loop — stops when databank is full or cancelled ──
-    // Maps tree key → index in `databank` so we can update an existing entry
-    // when a later generation produces a better version of the same structure.
     let mut databank: Vec<SrIndividual> = Vec::new();
     let mut databank_index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut gen = 0usize;
-    // Count the initial population that was already evaluated above.
-    let mut total_evaluated: usize = config.population_size;
+    let mut total_evaluated: usize = island_size * num_islands;
     let loop_start = std::time::Instant::now();
+    let mut sharpe_history: Vec<f64> = Vec::new();
+    let scalar_weights_ref = config.scalar_weights.as_ref();
 
     loop {
         if cancel_flag.load(Ordering::Relaxed) {
             break;
         }
-        // Sort current population (assigns rank and crowding distance)
-        population = nsga2_select(population, config.population_size);
 
-        // Collect rank-0 individuals with valid objectives into databank.
-        // If the same tree key already exists, replace it only when the new
-        // individual has a higher scalar fitness (e.g. Sharpe improved by
-        // CMA-ES coefficient refinement without changing tree structure).
+        // ── Per-island evolution step ───────────────────────────────────────
+        for island in &mut islands {
+            // Generate offspring for this island
+            let offspring = {
+                let mut o = make_offspring(
+                    island,
+                    &expanded_pool,
+                    config.max_depth,
+                    config.crossover_rate,
+                    config.mutation_rate,
+                    config.sl_atr_range.as_ref(),
+                    config.tp_atr_range.as_ref(),
+                    config.constant_min_exp,
+                    config.constant_max_exp,
+                    &mut rng,
+                );
+                // Threshold recalibration: after crossover/mutation changes the tree,
+                // the output range may shift dramatically. Evaluate on ~20 bars to
+                // compute the median output and use it as the new threshold.
+                {
+                    let n_ref = 20.min(training_candles.len().saturating_sub(2));
+                    if n_ref > 0 {
+                        let step = (training_candles.len() - 2) / n_ref;
+                        let ref_indices: Vec<usize> = (0..n_ref).map(|k| 1 + k * step).collect();
+                        for ind in o.iter_mut() {
+                            let mut vals_l: Vec<f64> = ref_indices.iter()
+                                .map(|&ri| tree::evaluate(&ind.strategy.entry_long, ri, &cache))
+                                .filter(|v| v.is_finite())
+                                .collect();
+                            if vals_l.len() >= 5 {
+                                vals_l.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                                ind.strategy.long_threshold = vals_l[vals_l.len() / 2];
+                            }
+                            let mut vals_s: Vec<f64> = ref_indices.iter()
+                                .map(|&ri| tree::evaluate(&ind.strategy.entry_short, ri, &cache))
+                                .filter(|v| v.is_finite())
+                                .collect();
+                            if vals_s.len() >= 5 {
+                                vals_s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                                ind.strategy.short_threshold = vals_s[vals_s.len() / 2];
+                            }
+                        }
+                    }
+                }
+                // Evaluate offspring in parallel
+                {
+                    let cache_ref = &cache;
+                    let atr_ref = &*atr_arc;
+                    let candles_ref = training_candles;
+                    let instrument_ref = &instrument;
+                    let config_ref = &config;
+                    let sub_ref = &sub_bars;
+                    o.par_iter_mut().for_each(|ind| {
+                        evaluate_individual(ind, candles_ref, cache_ref, atr_ref, instrument_ref, config_ref, timeframe, sub_ref);
+                    });
+                }
+                o
+            };
+            total_evaluated += offspring.len();
+            let mut combined = island.clone();
+            combined.extend(offspring);
+            *island = nsga2_select(combined, island_size);
+
+            // ── Semantic deduplication ───────────────────────────────────────
+            // Evaluate all formulas on a small set of reference bars. Individuals
+            // with identical discretized signal vectors are redundant — keep only the
+            // one with the best scalar fitness and replace the rest with fresh blood.
+            {
+                use std::collections::HashMap as DedupMap;
+                let n_ref = 30.min(training_candles.len().saturating_sub(2));
+                if n_ref > 0 {
+                    let step = (training_candles.len() - 2) / n_ref;
+                    let ref_indices: Vec<usize> = (0..n_ref).map(|k| 1 + k * step).collect();
+                    let mut seen: DedupMap<u64, usize> = DedupMap::new(); // hash → best index
+                    let mut to_replace: Vec<usize> = Vec::new();
+                    for (idx, ind) in island.iter().enumerate() {
+                        // Compute signal hash: evaluate long+short+exit at each ref bar
+                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                        for &ri in &ref_indices {
+                            let vl = tree::evaluate(&ind.strategy.entry_long, ri, &cache);
+                            let vs = tree::evaluate(&ind.strategy.entry_short, ri, &cache);
+                            let ve = tree::evaluate(&ind.strategy.exit, ri, &cache);
+                            // Discretize to reduce floating-point noise
+                            use std::hash::Hash;
+                            ((vl * 1000.0) as i64).hash(&mut hasher);
+                            ((vs * 1000.0) as i64).hash(&mut hasher);
+                            ((ve * 1000.0) as i64).hash(&mut hasher);
+                        }
+                        use std::hash::Hasher;
+                        let h = hasher.finish();
+                        match seen.get(&h) {
+                            Some(&prev) => {
+                                // Keep the one with better fitness
+                                if ind.scalar_fitness() > island[prev].scalar_fitness() {
+                                    to_replace.push(prev);
+                                    seen.insert(h, idx);
+                                } else {
+                                    to_replace.push(idx);
+                                }
+                            }
+                            None => { seen.insert(h, idx); }
+                        }
+                    }
+                    // Replace duplicates with fresh random individuals
+                    if !to_replace.is_empty() {
+                        let fresh = random_population(to_replace.len(), &config, &expanded_pool, &mut rng);
+                        for (slot_idx, new_ind) in to_replace.iter().zip(fresh) {
+                            island[*slot_idx] = new_ind;
+                        }
+                        {
+                            let cache_ref = &cache;
+                            let atr_ref = &*atr_arc;
+                            let candles_ref = training_candles;
+                            let instrument_ref = &instrument;
+                            let config_ref = &config;
+                            let sub_ref = &sub_bars;
+                            for &slot_idx in &to_replace {
+                                evaluate_individual(&mut island[slot_idx], candles_ref, cache_ref, atr_ref, instrument_ref, config_ref, timeframe, sub_ref);
+                            }
+                        }
+                        total_evaluated += to_replace.len();
+                    }
+                }
+            }
+        }
+
+        // ── Migration (ring topology) ───────────────────────────────────────
+        if num_islands > 1 && config.migration_interval > 0 && gen % config.migration_interval == 0 {
+            let k = ((island_size as f64 * config.migration_rate).ceil() as usize).max(1);
+            // Collect emigrants first to avoid borrow conflicts
+            let emigrants: Vec<Vec<SrIndividual>> = islands.iter()
+                .map(|isl| top_k_by_fitness(isl, k))
+                .collect();
+            for dest_idx in 0..num_islands {
+                let src_idx = if dest_idx == 0 { num_islands - 1 } else { dest_idx - 1 };
+                replace_weakest(&mut islands[dest_idx], emigrants[src_idx].clone());
+            }
+        }
+
+        // ── Fresh blood (anti-stagnation) ───────────────────────────────────
+        if config.fresh_blood_interval > 0 && gen > 0 && gen % config.fresh_blood_interval == 0 {
+            let n_replace = ((island_size as f64 * config.fresh_blood_pct).ceil() as usize).max(1);
+            for island in &mut islands {
+                let fresh = random_population(n_replace, &config, &expanded_pool, &mut rng);
+                // Sort island ascending by fitness so replace_weakest finds the worst
+                island.sort_by(|a, b| {
+                    a.scalar_fitness()
+                        .partial_cmp(&b.scalar_fitness())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                for (slot, new_ind) in island[0..n_replace].iter_mut().zip(fresh) {
+                    *slot = new_ind;
+                }
+                // Evaluate the fresh individuals in parallel
+                {
+                    let cache_ref = &cache;
+                    let atr_ref = &*atr_arc;
+                    let candles_ref = training_candles;
+                    let instrument_ref = &instrument;
+                    let config_ref = &config;
+                    let sub_ref = &sub_bars;
+                    island[0..n_replace].par_iter_mut().for_each(|ind| {
+                        evaluate_individual(ind, candles_ref, cache_ref, atr_ref, instrument_ref, config_ref, timeframe, sub_ref);
+                    });
+                }
+                total_evaluated += n_replace;
+            }
+        }
+
+        // ── Combined view of all islands for databank and progress ──────────
+        let population: Vec<&SrIndividual> = islands.iter().flatten().collect();
+
+        // Sort combined (by rank+crowding) to collect Pareto front
         let pareto_size = population.iter().filter(|i| i.rank == 0).count();
+
         for ind in population.iter().filter(|i| i.rank == 0) {
             if ind.objectives.as_ref().map(|o| o.is_valid()).unwrap_or(false) {
-                // Apply initial filters before accepting into databank
                 if let Some(obj) = &ind.objectives {
                     if let Some(min_s) = config.initial_min_sharpe {
                         if obj.sharpe < min_s { continue; }
@@ -894,7 +1639,6 @@ pub fn run_sr_builder(
                         if obj.profit_factor < min_pf { continue; }
                     }
                     if let Some(max_dd) = config.initial_max_drawdown_pct {
-                        // neg_max_drawdown = -drawdown_pct, so drawdown_pct = -neg_max_drawdown
                         if -obj.neg_max_drawdown > max_dd { continue; }
                     }
                 }
@@ -904,22 +1648,19 @@ pub fn run_sr_builder(
                 let key = format!("{fl}|{fs}|{fe}");
                 match databank_index.get(&key).copied() {
                     Some(idx) => {
-                        // Update if this version is strictly better
                         if ind.scalar_fitness() > databank[idx].scalar_fitness() {
-                            databank[idx] = ind.clone();
+                            databank[idx] = (*ind).clone();
                         }
                     }
                     None => {
                         let idx = databank.len();
                         databank_index.insert(key, idx);
-                        databank.push(ind.clone());
+                        databank.push((*ind).clone());
                     }
                 }
             }
         }
 
-        // Keep databank sorted by fitness, trimmed to limit.
-        // After sorting, rebuild the index to keep positions valid.
         databank.sort_by(|a, b| {
             b.scalar_fitness()
                 .partial_cmp(&a.scalar_fitness())
@@ -927,7 +1668,6 @@ pub fn run_sr_builder(
         });
         if databank.len() > config.databank_limit {
             databank.truncate(config.databank_limit);
-            // Rebuild index after truncation (removes evicted entries)
             databank_index.clear();
             for (i, ind) in databank.iter().enumerate() {
                 let fl = tree::format_tree(&ind.strategy.entry_long);
@@ -937,11 +1677,101 @@ pub fn run_sr_builder(
             }
         }
         let databank_count = databank.len();
-        total_evaluated += config.population_size;
         let elapsed_secs = loop_start.elapsed().as_secs_f64().max(0.001);
         let strategies_per_sec = total_evaluated as f64 / elapsed_secs;
+        let front_sharpe = population.iter()
+            .filter(|i| i.rank == 0)
+            .filter_map(|i| i.objectives.as_ref())
+            .map(|o| o.sharpe)
+            .fold(f64::NEG_INFINITY, f64::max);
 
-        let front_sharpe = best_front_sharpe(&population);
+        // ── Diversity metrics ───────────────────────────────────────────────
+        let total_depth: usize = population.iter().map(|ind| {
+            tree_depth(&ind.strategy.entry_long)
+                + tree_depth(&ind.strategy.entry_short)
+                + tree_depth(&ind.strategy.exit)
+        }).sum();
+        let avg_depth = total_depth as f64 / (population.len() as f64 * 3.0).max(1.0);
+
+        let unique_formula_count = {
+            let mut seen = std::collections::HashSet::new();
+            for ind in &population {
+                let fl = tree::format_tree(&ind.strategy.entry_long);
+                let fs = tree::format_tree(&ind.strategy.entry_short);
+                let fe = tree::format_tree(&ind.strategy.exit);
+                seen.insert(format!("{fl}|{fs}|{fe}"));
+            }
+            seen.len()
+        };
+
+        // Mean and std of scalar fitness
+        let fitnesses: Vec<f64> = population.iter()
+            .filter_map(|ind| ind.objectives.as_ref())
+            .map(|obj| obj.scalar_with_weights(scalar_weights_ref))
+            .collect();
+        let avg_fitness = if fitnesses.is_empty() {
+            0.0
+        } else {
+            fitnesses.iter().sum::<f64>() / fitnesses.len() as f64
+        };
+        let fitness_std = if fitnesses.len() < 2 {
+            0.0
+        } else {
+            let variance = fitnesses.iter()
+                .map(|x| (x - avg_fitness).powi(2))
+                .sum::<f64>() / (fitnesses.len() - 1) as f64;
+            variance.sqrt()
+        };
+
+        // Pareto front crowding diversity (mean of finite crowding distances)
+        let pareto_crowding: Vec<f64> = population.iter()
+            .filter(|i| i.rank == 0 && i.crowding.is_finite())
+            .map(|i| i.crowding)
+            .collect();
+        let pareto_diversity = if pareto_crowding.is_empty() {
+            0.0
+        } else {
+            pareto_crowding.iter().sum::<f64>() / pareto_crowding.len() as f64
+        };
+
+        // Operator usage counts: [Add, Sub, Mul, ProtectedDiv, Sqrt, Abs, Log, Neg]
+        let operator_counts = {
+            use crate::models::sr_result::{BinaryOpType, UnaryOpType};
+            let mut counts = [0usize; 8];
+            fn count_ops(node: &crate::models::sr_result::SrNode, counts: &mut [usize; 8]) {
+                match node {
+                    crate::models::sr_result::SrNode::BinaryOp { op, left, right } => {
+                        let idx = match op {
+                            BinaryOpType::Add => 0,
+                            BinaryOpType::Sub => 1,
+                            BinaryOpType::Mul => 2,
+                            BinaryOpType::ProtectedDiv => 3,
+                        };
+                        counts[idx] += 1;
+                        count_ops(left, counts);
+                        count_ops(right, counts);
+                    }
+                    crate::models::sr_result::SrNode::UnaryOp { op, child } => {
+                        let idx = match op {
+                            UnaryOpType::Sqrt => 4,
+                            UnaryOpType::Abs  => 5,
+                            UnaryOpType::Log  => 6,
+                            UnaryOpType::Neg  => 7,
+                        };
+                        counts[idx] += 1;
+                        count_ops(child, counts);
+                    }
+                    _ => {}
+                }
+            }
+            for ind in &population {
+                count_ops(&ind.strategy.entry_long, &mut counts);
+                count_ops(&ind.strategy.entry_short, &mut counts);
+                count_ops(&ind.strategy.exit, &mut counts);
+            }
+            counts
+        };
+
         emit(SrProgressEvent::Generation {
             gen,
             total: config.generations,
@@ -951,7 +1781,58 @@ pub fn run_sr_builder(
             databank_limit: config.databank_limit,
             total_evaluated,
             strategies_per_sec,
+            avg_depth,
+            unique_formula_count,
+            avg_fitness,
+            fitness_std,
+            pareto_diversity,
+            operator_counts,
         });
+
+        // Stagnation detection — smarter: detect relative improvement < 1% over window,
+        // not just identical values. On stagnation, inject 30% fresh blood.
+        let stagnation_window = config.stagnation_window;
+        if stagnation_window > 0 {
+            sharpe_history.push(front_sharpe);
+            if sharpe_history.len() > stagnation_window {
+                sharpe_history.remove(0);
+            }
+            if sharpe_history.len() == stagnation_window {
+                let max_s = sharpe_history.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                let min_s = sharpe_history.iter().cloned().fold(f64::INFINITY, f64::min);
+                let relative_improvement = (max_s - min_s) / max_s.abs().max(1.0);
+                if relative_improvement < 0.01 {
+                    emit(SrProgressEvent::Stagnation {
+                        gen,
+                        window: stagnation_window,
+                        best_sharpe_in_window: max_s,
+                    });
+                    // Aggressive fresh blood injection on stagnation (30% of each island)
+                    let n_inject = (island_size as f64 * 0.30).ceil() as usize;
+                    for island in &mut islands {
+                        let fresh = random_population(n_inject.min(island.len()), &config, &expanded_pool, &mut rng);
+                        island.sort_by(|a, b| a.scalar_fitness().partial_cmp(&b.scalar_fitness()).unwrap_or(std::cmp::Ordering::Equal));
+                        let actual_inject = n_inject.min(island.len());
+                        for (slot, new_ind) in island[0..actual_inject].iter_mut().zip(fresh) {
+                            *slot = new_ind;
+                        }
+                        {
+                            let cache_ref = &cache;
+                            let atr_ref = &*atr_arc;
+                            let candles_ref = training_candles;
+                            let instrument_ref = &instrument;
+                            let config_ref = &config;
+                            let sub_ref = &sub_bars;
+                            island[0..actual_inject].par_iter_mut().for_each(|ind| {
+                                evaluate_individual(ind, candles_ref, cache_ref, atr_ref, instrument_ref, config_ref, timeframe, sub_ref);
+                            });
+                        }
+                        total_evaluated += actual_inject;
+                    }
+                    sharpe_history.clear(); // reset history after injection
+                }
+            }
+        }
 
         // Stop when databank is full
         if databank_count >= config.databank_limit {
@@ -967,45 +1848,6 @@ pub fn run_sr_builder(
             break;
         }
 
-        // Generate offspring
-        let mut offspring = {
-            let mut rng = rand::thread_rng();
-            make_offspring(
-                &population,
-                &expanded_pool,
-                config.max_depth,
-                config.crossover_rate,
-                config.mutation_rate,
-                config.sl_atr_range.as_ref(),
-                config.tp_atr_range.as_ref(),
-                &mut rng,
-            )
-        };
-
-        // Evaluate offspring in parallel
-        {
-            let cache_ref = &cache;
-            let atr_ref = &*atr_arc;
-            let candles_ref = &candles;
-            let instrument_ref = &instrument;
-            let config_ref = &config;
-            offspring.par_iter_mut().for_each(|ind| {
-                evaluate_individual(
-                    ind,
-                    candles_ref,
-                    cache_ref,
-                    atr_ref,
-                    instrument_ref,
-                    config_ref,
-                    timeframe,
-                );
-            });
-        }
-
-        // Combine parent + offspring, select survivors
-        let mut combined = population;
-        combined.extend(offspring);
-        population = nsga2_select(combined, config.population_size);
         gen += 1;
     }
 
@@ -1013,12 +1855,19 @@ pub fn run_sr_builder(
         return Ok(vec![]);
     }
 
+    // Pre-compute OOS start index once so all build_front_item calls are consistent.
+    let oos_start_opt: Option<usize> = config.oos_pct.and_then(|pct| {
+        if pct <= 0.0 || pct >= 1.0 { return None; }
+        let start = (candles.len() as f64 * (1.0 - pct)).max(2.0) as usize;
+        if start >= candles.len().saturating_sub(1) { None } else { Some(start) }
+    });
+
     // ── Emit NSGA-II front (pre-CMA-ES) for the "builder" databank ──────────
     {
         let nsga_items: Vec<SrFrontItem> = databank
             .par_iter()
             .filter_map(|ind| {
-                build_front_item(ind, &candles, &cache, &atr_arc, &instrument, &config, timeframe)
+                build_front_item(ind, &candles, &cache, &atr_arc, &instrument, &config, timeframe, oos_start_opt, &sub_bars)
             })
             .collect();
         emit(SrProgressEvent::NsgaDone { front: nsga_items });
@@ -1045,6 +1894,7 @@ pub fn run_sr_builder(
             &config,
             timeframe,
             &cancel_flag,
+            &sub_bars,
         );
         if new_ind.scalar_fitness() > before {
             *ind = new_ind;
@@ -1066,7 +1916,7 @@ pub fn run_sr_builder(
     // Run full backtests in parallel (each gets complete BacktestMetrics).
     let all_built: Vec<Option<SrFrontItem>> = all_candidates
         .par_iter()
-        .map(|ind| build_front_item(ind, &candles, &cache, &atr_arc, &instrument, &config, timeframe))
+        .map(|ind| build_front_item(ind, &candles, &cache, &atr_arc, &instrument, &config, timeframe, oos_start_opt, &sub_bars))
         .collect();
 
     // Dedup by formula key sequentially (refined items win because they come first).
@@ -1118,6 +1968,9 @@ pub fn run_sr_builder(
 /// Build a single `SrFrontItem` from an individual.
 /// Reuses the cached `BacktestMetrics` stored in `ind.metrics` (populated by
 /// `evaluate_individual`) to avoid re-running the backtest a second time.
+///
+/// `oos_start`: when `Some(n)`, evaluates the strategy on `candles[n..]` (with the same
+/// pre-computed indicator cache — valid because the cache covers all candle indices).
 fn build_front_item(
     ind: &SrIndividual,
     candles: &[Candle],
@@ -1126,6 +1979,8 @@ fn build_front_item(
     instrument: &InstrumentConfig,
     config: &SrConfig,
     timeframe: Timeframe,
+    oos_start: Option<usize>,
+    sub_bars: &SubBarData,
 ) -> Option<SrFrontItem> {
     let obj = ind.objectives.as_ref()?;
     if !obj.is_valid() { return None; }
@@ -1148,8 +2003,29 @@ fn build_front_item(
             config.initial_capital,
             timeframe,
             config.max_trades_per_day,
+            sub_bars,
         )?
     };
+
+    // Out-of-sample evaluation: run backtest on the reserved OOS candle range.
+    // The indicator cache covers the full candle array, so the OOS slice can use the
+    // same cache by offsetting the bar index lookup by `oos_start`.
+    let oos_metrics = oos_start.and_then(|start| {
+        let oos_candles = candles.get(start..)?;
+        if oos_candles.len() < 2 { return None; }
+        sr_backtest_with_offset(
+            &ind.strategy,
+            oos_candles,
+            cache,
+            atr_series,
+            instrument,
+            config.initial_capital,
+            timeframe,
+            config.max_trades_per_day,
+            start,
+            sub_bars,
+        )
+    });
 
     Some(SrFrontItem {
         rank: ind.rank,
@@ -1160,5 +2036,6 @@ fn build_front_item(
         formula_short: fs,
         formula_exit: fe,
         strategy: ind.strategy.clone(),
+        oos_metrics,
     })
 }

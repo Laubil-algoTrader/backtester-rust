@@ -1842,6 +1842,9 @@ pub async fn run_sr_builder(
         .map_err(|e| AppError::Internal(format!("parquet collect: {e}")))?;
     let candles = executor::candles_from_dataframe(&df)?;
 
+    // Load sub-bar data for high-precision modes
+    let sub_bars = load_sr_sub_bar_data(&symbol, &config)?;
+
     let instrument = symbol.instrument_config.clone();
     let cancel_flag = state.sr_cancel_flag.clone();
     let timeframe = config.timeframe;
@@ -1858,6 +1861,7 @@ pub async fn run_sr_builder(
             move |event| {
                 let _ = app_handle.emit("sr-progress", &event);
             },
+            sub_bars,
         );
         if let Err(e) = result {
             let _ = app.emit("sr-progress", serde_json::json!({ "type": "Error", "data": e.to_string() }));
@@ -1865,6 +1869,88 @@ pub async fn run_sr_builder(
     });
 
     Ok(())
+}
+
+/// Load sub-bar data for SR builder based on the precision setting in SrConfig.
+fn load_sr_sub_bar_data(
+    symbol: &Symbol,
+    config: &SrConfig,
+) -> Result<SubBarData, AppError> {
+    use crate::models::strategy::BacktestPrecision;
+    let date_filter = loader::build_date_filter(&config.start_date, &config.end_date);
+
+    match config.precision {
+        BacktestPrecision::OpenPricesOnly | BacktestPrecision::SelectedTfOnly => Ok(SubBarData::None),
+
+        BacktestPrecision::M1TickSimulation => {
+            let m1_path = symbol
+                .timeframe_paths
+                .get("m1")
+                .ok_or_else(|| AppError::NotFound("M1 data not available for tick simulation".into()))?;
+            let mut lf = loader::scan_parquet_lazy(&PathBuf::from(m1_path))?;
+            if let Some(f) = &date_filter {
+                lf = lf.filter(f.clone());
+            }
+            let filtered_df = lf.collect()
+                .map_err(|e| AppError::Internal(format!("M1 lazy collect: {}", e)))?;
+            let candles = executor::candles_from_dataframe(&filtered_df)?;
+            info!("SR: Loaded {} M1 sub-bars for precision mode", candles.len());
+            Ok(SubBarData::Candles(candles))
+        }
+
+        BacktestPrecision::RealTickCustomSpread => {
+            let tick_path = symbol
+                .timeframe_paths
+                .get("tick")
+                .ok_or_else(|| AppError::NotFound("Tick data not available for custom spread mode".into()))?;
+            let filtered_df = loader::scan_tick_partitioned(
+                tick_path,
+                &["datetime", "close"],
+                &config.start_date,
+                &config.end_date,
+            )?;
+            let half_spread = config.trading_costs.spread_pips * symbol.instrument_config.pip_size / 2.0;
+            let ticks = executor::tick_columns_from_ohlcv_with_spread(&filtered_df, half_spread)?;
+            info!("SR: Loaded {} ticks with custom spread ({:.1} pips)", ticks.len(), config.trading_costs.spread_pips);
+            Ok(SubBarData::Ticks(ticks))
+        }
+
+        BacktestPrecision::RealTickRealSpread => {
+            let tick_raw_path = symbol
+                .timeframe_paths
+                .get("tick_raw")
+                .ok_or_else(|| AppError::NotFound("Raw tick data not available. Re-import to enable real spread mode.".into()))?;
+
+            let is_binary = std::path::Path::new(tick_raw_path.as_str()).is_dir() && {
+                std::fs::read_dir(tick_raw_path.as_str())
+                    .ok()
+                    .and_then(|mut rd| rd.next())
+                    .and_then(|e| e.ok())
+                    .map(|e| e.file_name().to_string_lossy().ends_with(".bin"))
+                    .unwrap_or(false)
+            };
+
+            let ticks = if is_binary {
+                executor::tick_columns_from_binary_dir(
+                    tick_raw_path,
+                    &config.start_date,
+                    &config.end_date,
+                )?
+            } else {
+                let filtered_df = loader::scan_tick_partitioned(
+                    tick_raw_path,
+                    &["datetime", "bid", "ask"],
+                    &config.start_date,
+                    &config.end_date,
+                )?;
+                executor::tick_columns_from_dataframe(&filtered_df)?
+            };
+
+            info!("SR: Loaded {} raw ticks with real spread ({})",
+                ticks.len(), if is_binary { "binary" } else { "parquet" });
+            Ok(SubBarData::Ticks(ticks))
+        }
+    }
 }
 
 /// Run a full backtest for a single SR strategy and return the complete results
@@ -1932,6 +2018,7 @@ pub async fn run_sr_backtest(
             initial_capital,
             timeframe,
             bt_config,
+            &SubBarData::None,
         )
     })
     .await
@@ -1984,4 +2071,142 @@ pub async fn generate_sr_code(
 ) -> Result<codegen::CodeGenerationResult, AppError> {
     info!("Generating MQL5 code for SR strategy: {}", name);
     codegen::generate_sr_mql5(&strategy, &name)
+}
+
+// ── SR Session Persistence Commands ──
+
+/// Save an SR builder session (Pareto front + config) to the database.
+///
+/// `front` is the Vec<SrFrontItem> produced by the builder.
+/// `config` is the SrConfig used for the run.
+/// `session_name` is a user-supplied label (e.g. "EURUSD H1 run 1").
+/// Returns the generated session ID.
+#[tauri::command]
+pub async fn save_sr_session(
+    state: tauri::State<'_, AppState>,
+    session_name: String,
+    config: serde_json::Value,
+    front: serde_json::Value,
+) -> Result<String, AppError> {
+    use uuid::Uuid;
+    use chrono::Utc;
+
+    let id = Uuid::new_v4().to_string();
+    let created_at = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
+    // Extract symbol_id and timeframe from config for the summary columns.
+    let symbol_id = config.get("symbol_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let timeframe = config.get("timeframe")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let session = storage::SrSession {
+        id: id.clone(),
+        name: session_name.clone(),
+        symbol_id,
+        timeframe,
+        created_at,
+        config_json: serde_json::to_string(&config)?,
+        front_json: serde_json::to_string(&front)?,
+    };
+
+    let db = state.db.lock().await;
+    storage::insert_sr_session(&db, &session)?;
+    info!("Saved SR session '{}' ({})", session_name, id);
+    Ok(id)
+}
+
+/// Load all saved SR sessions (metadata + front items) from the database.
+#[tauri::command]
+pub async fn load_sr_sessions(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<storage::SrSession>, AppError> {
+    let db = state.db.lock().await;
+    storage::get_all_sr_sessions(&db)
+}
+
+/// Delete a saved SR session by ID.
+#[tauri::command]
+pub async fn delete_sr_session(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+) -> Result<(), AppError> {
+    let db = state.db.lock().await;
+    storage::delete_sr_session_by_id(&db, &session_id)
+}
+
+/// Export SR results to a JSON file at the user-chosen path.
+///
+/// `front` is the Vec<SrFrontItem> as a JSON value.
+/// `file_path` is the absolute destination path chosen by the frontend (via dialog).
+#[tauri::command]
+pub async fn export_sr_results_json(
+    front: serde_json::Value,
+    file_path: String,
+) -> Result<(), AppError> {
+    use std::io::Write;
+
+    let path = std::path::Path::new(&file_path);
+    let pretty = serde_json::to_string_pretty(&front)
+        .map_err(|e| AppError::Serialization(format!("serialize front: {e}")))?;
+
+    let mut file = std::fs::File::create(path)
+        .map_err(|e| AppError::Internal(format!("create file '{}': {e}", file_path)))?;
+    file.write_all(pretty.as_bytes())
+        .map_err(|e| AppError::Internal(format!("write file '{}': {e}", file_path)))?;
+
+    info!("Exported {} bytes to {}", pretty.len(), file_path);
+    Ok(())
+}
+
+/// Export SR results to a CSV file at the user-chosen path.
+///
+/// Each row represents one Pareto-front item with its key metrics.
+#[tauri::command]
+pub async fn export_sr_results_csv(
+    front: Vec<crate::models::sr_result::SrFrontItem>,
+    file_path: String,
+) -> Result<(), AppError> {
+    use std::io::Write;
+
+    let path = std::path::Path::new(&file_path);
+    let mut file = std::fs::File::create(path)
+        .map_err(|e| AppError::Internal(format!("create file '{}': {e}", file_path)))?;
+
+    // Header
+    writeln!(
+        file,
+        "rank,sharpe,profit_factor,temporal_consistency,neg_max_drawdown,expectancy_ratio,\
+         total_trades,win_rate_pct,net_profit,max_drawdown_pct,formula_long,formula_short,formula_exit"
+    )
+    .map_err(|e| AppError::Internal(format!("write header: {e}")))?;
+
+    for item in &front {
+        let m = &item.metrics;
+        writeln!(
+            file,
+            "{},{:.4},{:.4},{:.4},{:.4},{:.4},{},{:.2},{:.2},{:.2},\"{}\",\"{}\",\"{}\"",
+            item.rank,
+            item.objectives.sharpe,
+            item.objectives.profit_factor,
+            item.objectives.temporal_consistency,
+            item.objectives.neg_max_drawdown,
+            item.objectives.expectancy_ratio,
+            m.total_trades,
+            m.win_rate_pct,
+            m.net_profit,
+            m.max_drawdown_pct,
+            item.formula_long.replace('"', "'"),
+            item.formula_short.replace('"', "'"),
+            item.formula_exit.replace('"', "'"),
+        )
+        .map_err(|e| AppError::Internal(format!("write row: {e}")))?;
+    }
+
+    info!("Exported {} SR items to CSV: {}", front.len(), file_path);
+    Ok(())
 }

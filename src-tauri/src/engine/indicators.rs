@@ -69,7 +69,7 @@ pub fn compute_indicator_with_slices(
     let close = &slices.close;
     let high = &slices.high;
     let low = &slices.low;
-    let _volume = &slices.volume;
+    let volume = &slices.volume;
     let open = &slices.open;
 
     match config.indicator_type {
@@ -157,7 +157,8 @@ pub fn compute_indicator_with_slices(
                 .d_period
                 .ok_or_else(|| AppError::InvalidIndicatorParams("Stochastic requires d_period".into()))?;
             check_data_len(len, k_period)?;
-            let (k, d) = stochastic(&high, &low, &close, k_period, d_period);
+            let slowing = config.params.slowing.unwrap_or(3);
+            let (k, d) = stochastic(&high, &low, &close, k_period, d_period, slowing);
             Ok(IndicatorOutput {
                 primary: k,
                 secondary: Some(d),
@@ -358,6 +359,54 @@ pub fn compute_indicator_with_slices(
             check_data_len(len, period + 1)?;
             let (vi_plus, vi_minus) = vortex(&high, &low, &close, period);
             Ok(IndicatorOutput { primary: vi_plus, secondary: Some(vi_minus), tertiary: None, extra: None })
+        }
+        IndicatorType::AvgVolume => {
+            let period = require_period(&config.params)?;
+            check_data_len(len, period)?;
+            Ok(IndicatorOutput { primary: avg_volume(&volume, period), secondary: None, tertiary: None, extra: None })
+        }
+        IndicatorType::BBWidthRatio => {
+            let period = require_period(&config.params)?;
+            let mult = config.params.std_dev.unwrap_or(2.0);
+            check_data_len(len, period)?;
+            Ok(IndicatorOutput { primary: bb_width_ratio(&close, period, mult), secondary: None, tertiary: None, extra: None })
+        }
+        IndicatorType::EfficiencyRatio => {
+            let period = require_period(&config.params)?;
+            check_data_len(len, period + 1)?;
+            Ok(IndicatorOutput { primary: efficiency_ratio(&close, period), secondary: None, tertiary: None, extra: None })
+        }
+        IndicatorType::HighestIndex => {
+            let period = require_period(&config.params)?;
+            check_data_len(len, period)?;
+            Ok(IndicatorOutput { primary: highest_index(&high, period), secondary: None, tertiary: None, extra: None })
+        }
+        IndicatorType::KAMA => {
+            let period = require_period(&config.params)?;
+            let fast = config.params.fast_period.unwrap_or(2);
+            let slow = config.params.slow_period.unwrap_or(30);
+            check_data_len(len, period + 1)?;
+            Ok(IndicatorOutput { primary: kama(&close, period, fast, slow), secondary: None, tertiary: None, extra: None })
+        }
+        IndicatorType::LowestIndex => {
+            let period = require_period(&config.params)?;
+            check_data_len(len, period)?;
+            Ok(IndicatorOutput { primary: lowest_index(&low, period), secondary: None, tertiary: None, extra: None })
+        }
+        IndicatorType::QQE => {
+            let rsi_period = require_period(&config.params)?;
+            let sf = config.params.signal_period.unwrap_or(5);
+            let wf = config.params.multiplier.unwrap_or(4.236);
+            check_data_len(len, rsi_period * 2 + sf)?;
+            let (rsi_ma, tr_level) = qqe(&close, rsi_period, sf, wf);
+            Ok(IndicatorOutput { primary: rsi_ma, secondary: Some(tr_level), tertiary: None, extra: None })
+        }
+        IndicatorType::SchaffTrendCycle => {
+            let period = require_period(&config.params)?;
+            let fast = config.params.fast_period.unwrap_or(20);
+            let slow = config.params.slow_period.unwrap_or(50);
+            check_data_len(len, slow + period)?;
+            Ok(IndicatorOutput { primary: schaff_trend_cycle(&close, period, fast, slow), secondary: None, tertiary: None, extra: None })
         }
     }
 }
@@ -619,16 +668,21 @@ pub fn atr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> 
 
 // ── Stochastic ──
 
-/// Stochastic oscillator: returns (%K, %D).
+/// Stochastic oscillator: returns (slowed_%K, %D).
+///
+/// Matches SQX/MT5 calculation: raw %K is computed per bar, then smoothed with
+/// SMA(slowing) to produce the main %K line, then %D = SMA(slowed_%K, d_period).
+/// SQX default slowing = 3. Use slowing = 1 for the "fast" (no-slowing) variant.
 pub fn stochastic(
     high: &[f64],
     low: &[f64],
     close: &[f64],
     k_period: usize,
     d_period: usize,
+    slowing: usize,
 ) -> (Vec<f64>, Vec<f64>) {
     let len = high.len();
-    let mut k = vec![f64::NAN; len];
+    let mut raw_k = vec![f64::NAN; len];
 
     for i in (k_period - 1)..len {
         let window_high = &high[i + 1 - k_period..=i];
@@ -636,15 +690,22 @@ pub fn stochastic(
         let highest = window_high.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         let lowest = window_low.iter().copied().fold(f64::INFINITY, f64::min);
         let range = highest - lowest;
-        k[i] = if range == 0.0 {
+        raw_k[i] = if range.abs() < 1e-10 {
             50.0
         } else {
             (close[i] - lowest) / range * 100.0
         };
     }
 
-    let d = sma_on_slice(&k, d_period);
-    (k, d)
+    // Slowed %K = SMA(raw_k, slowing)
+    let slowed_k = if slowing <= 1 {
+        raw_k
+    } else {
+        sma_on_slice(&raw_k, slowing)
+    };
+
+    let d = sma_on_slice(&slowed_k, d_period);
+    (slowed_k, d)
 }
 
 /// SMA computed on a slice that may contain NaN values.
@@ -712,7 +773,8 @@ pub fn adx_full(high: &[f64], low: &[f64], close: &[f64], period: usize) -> (Vec
         plus_di_result[i] = pdi;
         minus_di_result[i] = mdi;
         let di_sum = pdi + mdi;
-        dx_values[i] = if di_sum == 0.0 { 0.0 } else { 100.0 * (pdi - mdi).abs() / di_sum };
+        // SQX uses 50 when sum==0 (both DI are zero) to avoid undefined ADX
+        dx_values[i] = if di_sum == 0.0 { 50.0 } else { 100.0 * (pdi - mdi).abs() / di_sum };
     }
 
     let adx_start = period * 2 - 1;
@@ -775,6 +837,7 @@ pub fn roc(close: &[f64], period: usize) -> Vec<f64> {
 // ── Williams %R ──
 
 /// Williams %R.
+/// Matches SqWPR: when range==0, carry forward the previous value (SQX uses ExtWPRBuffer[i-1]).
 pub fn williams_r(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
     let len = high.len();
     let mut result = vec![f64::NAN; len];
@@ -785,7 +848,8 @@ pub fn williams_r(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Ve
         let lowest = window_low.iter().copied().fold(f64::INFINITY, f64::min);
         let range = highest - lowest;
         result[i] = if range == 0.0 {
-            -50.0
+            // SQX carries forward previous value; use NaN-safe fallback
+            if i > 0 && !result[i - 1].is_nan() { result[i - 1] } else { 0.0 }
         } else {
             (highest - close[i]) / range * -100.0
         };
@@ -899,19 +963,25 @@ fn wma(data: &[f64], period: usize) -> Vec<f64> {
 // ── Aroon ──
 
 /// Aroon Up/Down oscillator. Returns (aroon_up, aroon_down).
+/// Matches SqAroon: output starts at index `period-1`, window is exactly `period` bars
+/// (from `i-period+1` to `i` inclusive). Aroon Up = 100 - bars_since_highest * 100 / period.
 fn aroon(high: &[f64], low: &[f64], period: usize) -> (Vec<f64>, Vec<f64>) {
     let len = high.len();
     let mut up = vec![f64::NAN; len];
     let mut down = vec![f64::NAN; len];
-    for i in period..len {
-        let start = i - period;
+    if period == 0 || len < period {
+        return (up, down);
+    }
+    for i in (period - 1)..len {
+        // Window: exactly `period` bars ending at i
+        let start = i + 1 - period;
         let mut max_idx = start;
         let mut min_idx = start;
-        for j in start..=i {
-            if high[j] >= high[max_idx] {
+        for j in (start + 1)..=i {
+            if high[j] > high[max_idx] {
                 max_idx = j;
             }
-            if low[j] <= low[min_idx] {
+            if low[j] < low[min_idx] {
                 min_idx = j;
             }
         }
@@ -1272,16 +1342,21 @@ fn keltner_channel(
     period: usize,
     multiplier: f64,
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-    let middle = ema(close, period);
-    let atr_vals = atr(high, low, close, period);
+    // Matches SqKeltnerChannel: middle = SMA(TypicalPrice, period),
+    // offset = multiplier * SMA(high-low, period).
     let len = close.len();
+    let tp: Vec<f64> = (0..len).map(|i| (high[i] + low[i] + close[i]) / 3.0).collect();
+    let hl: Vec<f64> = (0..len).map(|i| high[i] - low[i]).collect();
+    let middle = sma(&tp, period);
+    let hl_sma = sma(&hl, period);
     let mut upper = vec![f64::NAN; len];
     let mut lower = vec![f64::NAN; len];
 
     for i in 0..len {
-        if !middle[i].is_nan() && !atr_vals[i].is_nan() {
-            upper[i] = middle[i] + multiplier * atr_vals[i];
-            lower[i] = middle[i] - multiplier * atr_vals[i];
+        if !middle[i].is_nan() && !hl_sma[i].is_nan() {
+            let offset = multiplier * hl_sma[i];
+            upper[i] = middle[i] + offset;
+            lower[i] = middle[i] - offset;
         }
     }
 
@@ -1490,9 +1565,10 @@ fn reflex(close: &[f64], period: usize) -> Vec<f64> {
     }
 
     let pi = std::f64::consts::PI;
-    let sqrt2 = std::f64::consts::SQRT_2;
-    let a1 = (-sqrt2 * pi / period as f64).exp();
-    let coeff2 = 2.0 * a1 * (sqrt2 * pi / period as f64).cos();
+    // SqReflex uses period * 0.5 as the half-period for the Super Smoother:
+    // a1 = EXP(-1.414 * PI / (period * 0.5)) = EXP(-2.828 * PI / period)
+    let a1 = (-1.414 * pi / (period as f64 * 0.5)).exp();
+    let coeff2 = 2.0 * a1 * (1.414 * pi / (period as f64 * 0.5)).cos();
     let coeff3 = -(a1 * a1);
     let coeff1 = 1.0 - coeff2 - coeff3;
 
@@ -1505,13 +1581,17 @@ fn reflex(close: &[f64], period: usize) -> Vec<f64> {
             + coeff3 * filt[i - 2];
     }
 
-    // Reflex computation
+    // Reflex computation.
+    // SQX only computes the sum when i > period (strictly), matching the MQL5 condition
+    // `if (i > inpReflexPeriod)`. For i == period, sum stays 0 → ms stays 0 → output is 0.
     let mut ms = 0.0f64;
     for i in period..len {
-        let slope = (filt[i - period] - filt[i]) / period as f64;
         let mut sum = 0.0;
-        for j in 1..=period {
-            sum += (filt[i] + j as f64 * slope) - filt[i - j];
+        if i > period {
+            let slope = (filt[i - period] - filt[i]) / period as f64;
+            for j in 1..=period {
+                sum += (filt[i] + j as f64 * slope) - filt[i - j];
+            }
         }
         sum /= period as f64;
         ms = 0.04 * sum * sum + 0.96 * ms;
@@ -1647,6 +1727,299 @@ fn vortex(high: &[f64], low: &[f64], close: &[f64], period: usize) -> (Vec<f64>,
     (vi_plus, vi_minus)
 }
 
+// ── AvgVolume ──
+
+/// Simple moving average of volume. Matches SqAvgVolume.
+pub fn avg_volume(volume: &[f64], period: usize) -> Vec<f64> {
+    sma(volume, period)
+}
+
+// ── BBWidthRatio ──
+
+/// Bollinger Bands Width Ratio = (2 * std_dev_mult * StdDev) / SMA.
+/// Matches SqBBWidthRatio. Measures relative volatility as a fraction of price.
+pub fn bb_width_ratio(close: &[f64], period: usize, std_dev_mult: f64) -> Vec<f64> {
+    let len = close.len();
+    let mut result = vec![f64::NAN; len];
+    if period == 0 || len < period {
+        return result;
+    }
+    for i in (period - 1)..len {
+        let window = &close[i + 1 - period..=i];
+        let mean = window.iter().sum::<f64>() / period as f64;
+        let variance = window.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / period as f64;
+        let sd = variance.sqrt();
+        if mean.abs() > 1e-10 {
+            result[i] = (2.0 * std_dev_mult * sd) / mean;
+        }
+    }
+    result
+}
+
+// ── EfficiencyRatio ──
+
+/// Kaufman Efficiency Ratio (0..1). Matches SqEfficiencyRatio.
+/// ER = |price[i] - price[i-period]| / sum(|price[j] - price[j-1]|)
+pub fn efficiency_ratio(close: &[f64], period: usize) -> Vec<f64> {
+    let len = close.len();
+    let mut result = vec![f64::NAN; len];
+    if period == 0 || len <= period {
+        return result;
+    }
+    for i in period..len {
+        let direction = (close[i] - close[i - period]).abs();
+        let noise: f64 = (0..period).map(|j| (close[i - j] - close[i - j - 1]).abs()).sum();
+        result[i] = if noise > 1e-10 { direction / noise } else { 0.0 };
+    }
+    result
+}
+
+// ── HighestIndex ──
+
+/// Bars since the highest high occurred over the last `period` bars.
+/// Matches SqHighestIndex (returns 0 when the highest is the current bar).
+pub fn highest_index(high: &[f64], period: usize) -> Vec<f64> {
+    let len = high.len();
+    let mut result = vec![f64::NAN; len];
+    if period == 0 || len < period {
+        return result;
+    }
+    for i in (period - 1)..len {
+        let start = i + 1 - period;
+        let mut best_idx = start;
+        let mut best_val = high[start];
+        for j in (start + 1)..=i {
+            if high[j] > best_val {
+                best_val = high[j];
+                best_idx = j;
+            }
+        }
+        result[i] = (i - best_idx) as f64;
+    }
+    result
+}
+
+// ── KAMA ──
+
+/// Kaufman's Adaptive Moving Average. Matches SqKAMA.
+/// Uses EfficiencyRatio to scale between fast and slow EMA smoothing constants.
+/// SQX seeds at index `period-1` (ExtAMABuffer[pos-1] = price[pos-1]) then applies
+/// the adaptive formula from index `period` onward.
+pub fn kama(close: &[f64], period: usize, fast_period: usize, slow_period: usize) -> Vec<f64> {
+    let len = close.len();
+    let mut result = vec![f64::NAN; len];
+    if period == 0 || len < period {
+        return result;
+    }
+    let fast_sc = 2.0 / (fast_period as f64 + 1.0);
+    let slow_sc = 2.0 / (slow_period as f64 + 1.0);
+
+    // Seed: first valid KAMA is close at index `period-1` (matches SQX: ExtAMABuffer[pos-1])
+    result[period - 1] = close[period - 1];
+    for i in period..len {
+        let direction = (close[i] - close[i - period]).abs();
+        let noise: f64 = (0..period).map(|j| (close[i - j] - close[i - j - 1]).abs()).sum();
+        let er = if noise > 1e-10 { direction / noise } else { 0.0 };
+        let ssc = (er * (fast_sc - slow_sc) + slow_sc).powi(2);
+        let prev = result[i - 1];
+        result[i] = ssc * (close[i] - prev) + prev;
+    }
+    result
+}
+
+// ── LowestIndex ──
+
+/// Bars since the lowest low occurred over the last `period` bars.
+/// Matches SqLowestIndex (returns 0 when the lowest is the current bar).
+pub fn lowest_index(low: &[f64], period: usize) -> Vec<f64> {
+    let len = low.len();
+    let mut result = vec![f64::NAN; len];
+    if period == 0 || len < period {
+        return result;
+    }
+    for i in (period - 1)..len {
+        let start = i + 1 - period;
+        let mut best_idx = start;
+        let mut best_val = low[start];
+        for j in (start + 1)..=i {
+            if low[j] < best_val {
+                best_val = low[j];
+                best_idx = j;
+            }
+        }
+        result[i] = (i - best_idx) as f64;
+    }
+    result
+}
+
+// ── QQE ──
+
+/// Qualitative Quantitative Estimation. Matches SqQQE.
+/// Smooths RSI with EMA(SF), computes ATR of that smoothed RSI,
+/// double-smooths with Wilder's period, then applies wave factor to create
+/// a trailing threshold (TrLevelSlow). Primary = smoothed RSI, secondary = trend level.
+pub fn qqe(close: &[f64], rsi_period: usize, sf: usize, wf: f64) -> (Vec<f64>, Vec<f64>) {
+    let len = close.len();
+    let empty = vec![f64::NAN; len];
+    if rsi_period < 2 || sf < 1 || len < rsi_period * 2 + sf {
+        return (empty.clone(), empty);
+    }
+
+    let rsi_vals = rsi(close, rsi_period);
+    let wilders = rsi_period * 2 - 1;
+    let sf_alpha = 2.0 / (sf as f64 + 1.0);
+    let w_alpha = 2.0 / (wilders as f64 + 1.0);
+
+    // Smooth RSI with EMA(SF)
+    let mut rsi_ma = vec![f64::NAN; len];
+    for i in 0..len {
+        if rsi_vals[i].is_nan() {
+            continue;
+        }
+        if rsi_ma[i.saturating_sub(1)].is_nan() || i == 0 {
+            rsi_ma[i] = rsi_vals[i];
+        } else {
+            rsi_ma[i] = rsi_ma[i - 1] + sf_alpha * (rsi_vals[i] - rsi_ma[i - 1]);
+        }
+    }
+
+    // ATR of smoothed RSI
+    let mut atr_rsi = vec![f64::NAN; len];
+    for i in 1..len {
+        if !rsi_ma[i].is_nan() && !rsi_ma[i - 1].is_nan() {
+            atr_rsi[i] = (rsi_ma[i] - rsi_ma[i - 1]).abs();
+        }
+    }
+
+    // Smooth ATR of RSI with EMA(wilders) — first pass
+    let mut ma_atr = vec![f64::NAN; len];
+    for i in 0..len {
+        if atr_rsi[i].is_nan() {
+            continue;
+        }
+        if ma_atr[i.saturating_sub(1)].is_nan() || i == 0 {
+            ma_atr[i] = atr_rsi[i];
+        } else {
+            ma_atr[i] = ma_atr[i - 1] + w_alpha * (atr_rsi[i] - ma_atr[i - 1]);
+        }
+    }
+
+    // Second smoothing pass (Wilder's again) → dar = result * wf
+    let mut ma_atr2 = vec![f64::NAN; len];
+    for i in 0..len {
+        if ma_atr[i].is_nan() {
+            continue;
+        }
+        if ma_atr2[i.saturating_sub(1)].is_nan() || i == 0 {
+            ma_atr2[i] = ma_atr[i];
+        } else {
+            ma_atr2[i] = ma_atr2[i - 1] + w_alpha * (ma_atr[i] - ma_atr2[i - 1]);
+        }
+    }
+
+    // Trailing threshold (TrLevelSlow)
+    let mut tr_level = vec![f64::NAN; len];
+    for i in 1..len {
+        if rsi_ma[i].is_nan() || ma_atr2[i].is_nan() {
+            continue;
+        }
+        let dar = ma_atr2[i] * wf;
+        let prev_tr = if tr_level[i - 1].is_nan() { rsi_ma[i] } else { tr_level[i - 1] };
+        let prev_ma = if rsi_ma[i - 1].is_nan() { rsi_ma[i] } else { rsi_ma[i - 1] };
+
+        tr_level[i] = if rsi_ma[i] < prev_tr {
+            let t = rsi_ma[i] + dar;
+            if prev_ma < prev_tr && t > prev_tr { prev_tr } else { t }
+        } else if rsi_ma[i] > prev_tr {
+            let t = rsi_ma[i] - dar;
+            if prev_ma > prev_tr && t < prev_tr { prev_tr } else { t }
+        } else {
+            prev_tr
+        };
+    }
+
+    (rsi_ma, tr_level)
+}
+
+// ── SchaffTrendCycle ──
+
+/// Schaff Trend Cycle. Matches SqSchaffTrendCycle.
+/// MACD → double stochastic with EMA smoothing (alpha=0.5).
+pub fn schaff_trend_cycle(close: &[f64], period: usize, fast: usize, slow: usize) -> Vec<f64> {
+    let len = close.len();
+    let mut result = vec![f64::NAN; len];
+    if len < slow + period {
+        return result;
+    }
+
+    let fast_ema = ema(close, fast);
+    let slow_ema = ema(close, slow);
+    let alpha = 0.5_f64;
+
+    // MACD line
+    let mut macd_line = vec![f64::NAN; len];
+    for i in 0..len {
+        if !fast_ema[i].is_nan() && !slow_ema[i].is_nan() {
+            macd_line[i] = fast_ema[i] - slow_ema[i];
+        }
+    }
+
+    // First stochastic of MACD
+    let mut fk1 = vec![f64::NAN; len];
+    let mut fd1 = vec![f64::NAN; len];
+    for i in 0..len {
+        if macd_line[i].is_nan() || i + 1 < period {
+            continue;
+        }
+        let start = i + 1 - period;
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for j in start..=i {
+            if !macd_line[j].is_nan() {
+                lo = lo.min(macd_line[j]);
+                hi = hi.max(macd_line[j]);
+            }
+        }
+        let range = hi - lo;
+        fk1[i] = if range > 1e-10 { 100.0 * (macd_line[i] - lo) / range } else {
+            if fd1[i.saturating_sub(1)].is_nan() { 0.0 } else { fk1[i - 1] }
+        };
+        fd1[i] = if fd1[i.saturating_sub(1)].is_nan() || i == 0 {
+            fk1[i]
+        } else {
+            fd1[i - 1] + alpha * (fk1[i] - fd1[i - 1])
+        };
+    }
+
+    // Second stochastic of FD1
+    let mut fk2 = vec![f64::NAN; len];
+    for i in 0..len {
+        if fd1[i].is_nan() || i + 1 < period {
+            continue;
+        }
+        let start = i + 1 - period;
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for j in start..=i {
+            if !fd1[j].is_nan() {
+                lo = lo.min(fd1[j]);
+                hi = hi.max(fd1[j]);
+            }
+        }
+        let range = hi - lo;
+        fk2[i] = if range > 1e-10 { 100.0 * (fd1[i] - lo) / range } else {
+            if result[i.saturating_sub(1)].is_nan() { 0.0 } else { fk2[i - 1] }
+        };
+        result[i] = if result[i.saturating_sub(1)].is_nan() || i == 0 {
+            fk2[i]
+        } else {
+            result[i - 1] + alpha * (fk2[i] - result[i - 1])
+        };
+    }
+
+    result
+}
+
 // ══════════════════════════════════════════════════════════════
 // Tests
 // ══════════════════════════════════════════════════════════════
@@ -1755,7 +2128,7 @@ mod tests {
         let high = vec![130.0, 132.0, 131.0, 133.0, 135.0, 134.0, 136.0, 138.0, 137.0, 139.0];
         let low = vec![126.0, 128.0, 127.0, 129.0, 131.0, 130.0, 132.0, 134.0, 133.0, 135.0];
         let close = vec![128.0, 131.0, 129.0, 132.0, 134.0, 132.0, 135.0, 137.0, 135.0, 138.0];
-        let (k, d) = stochastic(&high, &low, &close, 5, 3);
+        let (k, d) = stochastic(&high, &low, &close, 5, 3, 3);
         // %K should be valid from index 4 onward
         assert!(k[4].is_finite());
         assert!(k[4] >= 0.0 && k[4] <= 100.0, "%K should be 0-100");

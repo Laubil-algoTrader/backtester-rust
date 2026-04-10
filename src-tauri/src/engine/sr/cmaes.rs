@@ -12,8 +12,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use rand::Rng;
-
+use crate::engine::executor::SubBarData;
 use crate::models::candle::Candle;
 use crate::models::config::{InstrumentConfig, Timeframe};
 use crate::models::sr_result::SrConfig;
@@ -36,18 +35,24 @@ pub fn optimize_constants(
     config: &SrConfig,
     timeframe: Timeframe,
     cancel_flag: &AtomicBool,
+    sub_bars: &SubBarData,
 ) -> SrIndividual {
-    // Extract constants from all 3 trees
+    // Extract constants from all 3 trees + thresholds
     let mut strategy = ind.strategy.clone();
-    let constants = {
+    let tree_constants = {
         let mut v = tree::extract_constants(&strategy.entry_long);
         v.extend(tree::extract_constants(&strategy.entry_short));
         v.extend(tree::extract_constants(&strategy.exit));
         v
     };
+    // Append thresholds as optimizable parameters (always present)
+    let mut constants = tree_constants;
+    constants.push(strategy.long_threshold);
+    constants.push(strategy.short_threshold);
     let dim = constants.len();
+    // dim >= 2 always (at least the two thresholds), but guard against degenerate case
     if dim == 0 {
-        return ind.clone(); // no constants to optimize
+        return ind.clone();
     }
 
     // Evaluate initial fitness
@@ -59,6 +64,7 @@ pub fn optimize_constants(
         instrument,
         config,
         timeframe,
+        sub_bars,
     );
 
     // ── CMA-ES parameters ────────────────────────────────────────────────────
@@ -95,7 +101,20 @@ pub fn optimize_constants(
             }
             let x: Vec<f64> = mean
                 .iter()
-                .map(|&m| m + sigma * standard_normal(&mut rng))
+                .enumerate()
+                .map(|(i, &m)| {
+                    let raw = m + sigma * standard_normal(&mut rng);
+                    // Adaptive bounds: clamp to ±10σ from mean for tree constants,
+                    // and to [-1000, 1000] for thresholds (last 2 dimensions).
+                    if i >= dim.saturating_sub(2) {
+                        // Thresholds
+                        raw.clamp(-1000.0, 1000.0)
+                    } else {
+                        // Tree constants: soft bounds ±10σ from mean
+                        let bound = 10.0 * sigma;
+                        raw.clamp(m - bound, m + bound)
+                    }
+                })
                 .collect();
             let s = evaluate_with_constants(
                 &mut strategy,
@@ -106,6 +125,7 @@ pub fn optimize_constants(
                 instrument,
                 config,
                 timeframe,
+                sub_bars,
             );
             samples.push((x, s));
             evals += 1;
@@ -149,7 +169,11 @@ pub fn optimize_constants(
             .collect();
 
         let ps_norm = p_sigma.iter().map(|v| v * v).sum::<f64>().sqrt();
-        sigma *= ((c_sigma / d_sigma) * (ps_norm / chi_n - 1.0)).exp().min(2.0).max(0.5);
+        // Clamp the ARGUMENT of exp (not the result) to avoid asymmetric step-size adaptation.
+        // Clamping exp(x).min(2.0) was incorrect: it allowed exp(-inf)=0 but capped exp(inf)=2,
+        // creating an asymmetric adaptation that could stall convergence.
+        let sigma_exp_arg = ((c_sigma / d_sigma) * (ps_norm / chi_n - 1.0)).clamp(-2.0, 2.0);
+        sigma *= sigma_exp_arg.exp();
 
         // Clamp sigma to reasonable bounds
         let max_sigma = initial_sigma(&mean).max(0.1);
@@ -172,6 +196,7 @@ pub fn optimize_constants(
         config.initial_capital,
         timeframe,
         config.max_trades_per_day,
+        sub_bars,
     )
     .map(|m| crate::engine::sr::runner::compute_objectives_pub(&m, config.min_trades));
 
@@ -183,9 +208,15 @@ pub fn optimize_constants(
 /// Box-Muller transform: generate one standard-normal sample from two uniform samples.
 /// Used instead of uniform noise so that the path-length step-size control (chi_n,
 /// c_sigma, d_sigma) is theoretically consistent — those constants assume Gaussian sampling.
+///
+/// Uses rejection sampling for u1 to avoid `.max(1e-10)` which biases the uniform
+/// distribution and compresses the tails of the resulting normal distribution.
 #[inline]
 fn standard_normal(rng: &mut impl rand::Rng) -> f64 {
-    let u1: f64 = rng.gen::<f64>().max(1e-10); // avoid ln(0)
+    let u1: f64 = loop {
+        let v = rng.gen::<f64>();
+        if v > 1e-10 { break v; }
+    };
     let u2: f64 = rng.gen();
     (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
 }
@@ -197,11 +228,20 @@ fn initial_sigma(constants: &[f64]) -> f64 {
 }
 
 /// Apply a flat constant vector to the 3 trees of the strategy (in-order traversal).
+/// The last 2 elements are `long_threshold` and `short_threshold`.
 fn apply_constants_to_strategy(strategy: &mut crate::models::sr_result::SrStrategy, vals: &[f64]) {
     let mut idx = 0;
     tree::replace_constants(&mut strategy.entry_long, vals, &mut idx);
     tree::replace_constants(&mut strategy.entry_short, vals, &mut idx);
     tree::replace_constants(&mut strategy.exit, vals, &mut idx);
+    // Remaining 2 values are thresholds
+    if idx < vals.len() {
+        strategy.long_threshold = vals[idx];
+        idx += 1;
+    }
+    if idx < vals.len() {
+        strategy.short_threshold = vals[idx];
+    }
 }
 
 fn evaluate_with_constants(
@@ -213,9 +253,10 @@ fn evaluate_with_constants(
     instrument: &InstrumentConfig,
     config: &SrConfig,
     timeframe: Timeframe,
+    sub_bars: &SubBarData,
 ) -> f64 {
     apply_constants_to_strategy(strategy, vals);
-    evaluate_scalar(strategy, candles, cache, atr_series, instrument, config, timeframe)
+    evaluate_scalar(strategy, candles, cache, atr_series, instrument, config, timeframe, sub_bars)
 }
 
 fn evaluate_scalar(
@@ -226,18 +267,24 @@ fn evaluate_scalar(
     instrument: &InstrumentConfig,
     config: &SrConfig,
     timeframe: Timeframe,
+    sub_bars: &SubBarData,
 ) -> f64 {
     let node_count = tree::count_nodes(&strategy.entry_long)
         + tree::count_nodes(&strategy.entry_short)
         + tree::count_nodes(&strategy.exit);
 
-    // Parsimony pressure as a hard penalty (not a Pareto axis):
-    // formulas with > 20 nodes get 80% of their scalar fitness.
-    let complexity_multiplier = if node_count > 20 { 0.8 } else { 1.0 };
+    // Parsimony pressure: formulas exceeding the threshold get a configurable multiplier.
+    // Both threshold (default 20) and multiplier (default 0.8) come from SrConfig.
+    let complexity_multiplier = if node_count > config.cmaes_bloat_threshold {
+        config.cmaes_bloat_multiplier
+    } else {
+        1.0
+    };
 
-    sr_backtest(strategy, candles, cache, atr_series, instrument, config.initial_capital, timeframe, config.max_trades_per_day)
+    sr_backtest(strategy, candles, cache, atr_series, instrument, config.initial_capital, timeframe, config.max_trades_per_day, sub_bars)
         .map(|m| {
-            crate::engine::sr::runner::compute_objectives_pub(&m, config.min_trades).scalar()
+            crate::engine::sr::runner::compute_objectives_pub(&m, config.min_trades)
+                .scalar_with_weights(config.scalar_weights.as_ref())
                 * complexity_multiplier
         })
         .unwrap_or(f64::NEG_INFINITY)

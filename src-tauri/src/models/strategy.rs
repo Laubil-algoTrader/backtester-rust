@@ -47,6 +47,15 @@ pub enum IndicatorType {
     Pivots,
     UlcerIndex,
     Vortex,
+    // SQX indicators (new)
+    AvgVolume,
+    BBWidthRatio,
+    EfficiencyRatio,
+    HighestIndex,
+    KAMA,
+    LowestIndex,
+    QQE,
+    SchaffTrendCycle,
 }
 
 /// Parameters for indicator calculation. Each indicator uses the fields relevant to it.
@@ -66,6 +75,9 @@ pub struct IndicatorParams {
     pub k_period: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub d_period: Option<usize>,
+    /// Stochastic slowing period (SMA applied to raw %K before computing %D). SQX default: 3.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slowing: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub acceleration_factor: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -104,6 +116,7 @@ impl IndicatorConfig {
         self.params.signal_period.hash(&mut h);
         self.params.k_period.hash(&mut h);
         self.params.d_period.hash(&mut h);
+        self.params.slowing.hash(&mut h);
         // Float params: round to match precision used in cache_key()
         self.params.std_dev.map(|v| (v * 100.0).round() as i64).hash(&mut h);
         self.params.acceleration_factor.map(|v| (v * 10000.0).round() as i64).hash(&mut h);
@@ -137,6 +150,9 @@ impl IndicatorConfig {
         }
         if let Some(p) = self.params.d_period {
             key.push_str(&format!("_dp{}", p));
+        }
+        if let Some(s) = self.params.slowing {
+            key.push_str(&format!("_sl{}", s));
         }
         if let Some(a) = self.params.acceleration_factor {
             key.push_str(&format!("_af{:.4}", a));
@@ -393,6 +409,10 @@ pub struct TrailingStop {
     /// ATR period used when ts_type is ATR.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub atr_period: Option<usize>,
+    /// Trailing stop only starts moving after MFE exceeds this many pips.
+    /// `None` = trailing starts immediately (previous behaviour).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation_pips: Option<f64>,
 }
 
 // ── Trading Costs ──

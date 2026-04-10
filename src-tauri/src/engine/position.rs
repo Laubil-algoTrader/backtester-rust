@@ -37,6 +37,10 @@ pub struct OpenPosition {
     pub accumulated_swap: f64,
     /// True once the stop loss has been moved to breakeven (avoids double-trigger).
     pub sl_moved_to_be: bool,
+    /// Minimum MFE (in price distance) before trailing stop is allowed to move.
+    /// Computed from `TrailingStop::activation_pips * pip_size` at position open.
+    /// `None` means no activation threshold — trailing starts immediately.
+    pub trailing_activation_dist: Option<f64>,
 }
 
 /// A pending limit or stop entry order waiting to be filled.
@@ -241,6 +245,16 @@ pub fn calculate_trailing_stop_distance(
 /// Sets `trailing_stop_activated = true` the first time the stop level is moved.
 pub fn update_trailing_stop(position: &mut OpenPosition, ba: &BidAskOhlc) {
     if let Some(distance) = position.trailing_stop_distance {
+        // Activation threshold: don't move trailing stop until MFE exceeds activation distance
+        if let Some(act_dist) = position.trailing_activation_dist {
+            let mfe_price = match position.direction {
+                TradeDirection::Long | TradeDirection::Both => ba.bid_high - position.entry_price,
+                TradeDirection::Short => position.entry_price - ba.ask_low,
+            };
+            if mfe_price < act_dist {
+                return;
+            }
+        }
         match position.direction {
             TradeDirection::Long | TradeDirection::Both => {
                 // Track highest bid
@@ -283,10 +297,12 @@ pub fn update_trailing_stop(position: &mut OpenPosition, ba: &BidAskOhlc) {
 /// Handles three realistic scenarios:
 /// 1. **Gap-through SL**: If price opens beyond SL, fill is at the open (bid/ask open).
 /// 2. **TP fill**: Fills at the TP level (limit order — always fills at target).
-/// 3. **Both hit same bar**: bar direction is used to infer which extreme was reached first.
-///    Bullish bar (close >= open) → low was hit before high.
-///    Bearish bar (close < open) → high was hit before low.
-///    This is the standard OHLC simulation convention used by MT5 and most professional platforms.
+/// 3. **Both hit same bar**: SL always wins (conservative worst-case assumption).
+///    Without sub-bar data (M1/tick), it is impossible to know which extreme was
+///    reached first within the bar. Assuming SL-first eliminates the optimistic
+///    bias that the old bar-direction heuristic introduced (~18% outcome flips
+///    vs MT5 tick-level backtest). Use M1TickSimulation or RealTick precision
+///    for chronologically accurate intra-bar resolution.
 pub fn check_sl_tp_hit(
     position: &OpenPosition,
     ba: &BidAskOhlc,
@@ -298,20 +314,48 @@ pub fn check_sl_tp_hit(
         (None, None) => None,
         (Some(sl), None) => Some(sl),
         (None, Some(tp)) => Some(tp),
-        (Some((sl_fill, sl_reason)), Some((tp_fill, _))) => {
-            // Both triggered on same bar — use bar direction to infer which extreme came first.
-            // Bullish bar: low was reached first → for Long: SL first; for Short: TP first.
-            // Bearish bar: high was reached first → for Long: TP first; for Short: SL first.
-            let is_bullish = ba.bid_close >= ba.bid_open;
-            let sl_first = match position.direction {
-                TradeDirection::Long | TradeDirection::Both => is_bullish,
-                TradeDirection::Short => !is_bullish,
-            };
-            if sl_first {
-                Some((sl_fill, sl_reason))
-            } else {
-                Some((tp_fill, CloseReason::TakeProfit))
-            }
+        (Some((sl_fill, sl_reason)), Some((_tp_fill, _))) => {
+            // Both triggered on same bar — assume worst case (SL first).
+            // This is conservative but eliminates the optimistic bias of
+            // inferring order from bar direction, which is unreliable on H1+ bars.
+            Some((sl_fill, sl_reason))
+        }
+    }
+}
+
+/// Check if SL or TP was hit using the bar direction heuristic for same-bar conflicts.
+///
+/// When both SL and TP fall within the same bar's OHLC range, uses the candle's
+/// open→close direction to infer which extreme was reached first:
+/// - Long + bullish bar (open < close): price rose first → check TP first
+/// - Long + bearish bar (open > close): price fell first → check SL first
+/// - Short + bullish bar: price rose first → check SL first
+/// - Short + bearish bar: price fell first → check TP first
+///
+/// This matches MT5's "1 minute OHLC" mode behaviour and is significantly more
+/// accurate than always-SL-first on small timeframes (M1) where the bar direction
+/// is a reliable indicator of intra-bar price sequence. On larger timeframes (H1+),
+/// use `check_sl_tp_hit` (always SL-first) instead, as bar direction becomes unreliable.
+pub fn check_sl_tp_hit_bar_direction(
+    position: &OpenPosition,
+    ba: &BidAskOhlc,
+    bar_open: f64,
+    bar_close: f64,
+) -> Option<(f64, CloseReason)> {
+    let sl_result = check_stop_loss(position, ba);
+    let tp_result = check_take_profit(position, ba);
+
+    match (sl_result, tp_result) {
+        (None, None) => None,
+        (Some(sl), None) => Some(sl),
+        (None, Some(tp)) => Some(tp),
+        (Some(sl), Some(tp)) => {
+            // Both triggered on same bar — use bar direction to decide priority.
+            let is_long = matches!(position.direction, TradeDirection::Long | TradeDirection::Both);
+            let bar_bullish = bar_close > bar_open;
+            // If the bar moved in favour of the position first, TP wins; otherwise SL.
+            let tp_first = (is_long && bar_bullish) || (!is_long && !bar_bullish);
+            if tp_first { Some(tp) } else { Some(sl) }
         }
     }
 }
@@ -637,6 +681,16 @@ fn check_tick_take_profit(pos: &OpenPosition, bid: f64, ask: f64) -> Option<(f64
 #[allow(dead_code)]
 pub fn update_trailing_stop_tick(pos: &mut OpenPosition, bid: f64, ask: f64) {
     if let Some(distance) = pos.trailing_stop_distance {
+        // Activation threshold
+        if let Some(act_dist) = pos.trailing_activation_dist {
+            let mfe_price = match pos.direction {
+                TradeDirection::Long | TradeDirection::Both => bid - pos.entry_price,
+                TradeDirection::Short => pos.entry_price - ask,
+            };
+            if mfe_price < act_dist {
+                return;
+            }
+        }
         match pos.direction {
             TradeDirection::Long | TradeDirection::Both => {
                 // Track highest bid (selling price)
@@ -646,9 +700,11 @@ pub fn update_trailing_stop_tick(pos: &mut OpenPosition, bid: f64, ask: f64) {
                     if let Some(ref mut sl) = pos.stop_loss {
                         if new_sl > *sl {
                             *sl = new_sl;
+                            pos.trailing_stop_activated = true;
                         }
                     } else {
                         pos.stop_loss = Some(new_sl);
+                        pos.trailing_stop_activated = true;
                     }
                 }
             }
@@ -660,9 +716,11 @@ pub fn update_trailing_stop_tick(pos: &mut OpenPosition, bid: f64, ask: f64) {
                     if let Some(ref mut sl) = pos.stop_loss {
                         if new_sl < *sl {
                             *sl = new_sl;
+                            pos.trailing_stop_activated = true;
                         }
                     } else {
                         pos.stop_loss = Some(new_sl);
+                        pos.trailing_stop_activated = true;
                     }
                 }
             }

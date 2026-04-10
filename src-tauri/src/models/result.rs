@@ -201,6 +201,9 @@ pub struct BacktestResults {
     /// Metrics computed from short trades only. None when there are no short trades.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub short_metrics: Option<BacktestMetrics>,
+    /// Warnings about backtest configuration that may affect accuracy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 // ══════════════════════════════════════════════════════════════

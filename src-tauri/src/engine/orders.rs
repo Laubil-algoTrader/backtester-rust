@@ -65,6 +65,27 @@ pub fn apply_entry_costs<R: Rng>(
     }
 }
 
+/// Apply only slippage to the entry price (no spread).
+/// Used when tick data provides the real bid/ask price which already includes the spread.
+pub fn apply_slippage_only<R: Rng>(
+    price: f64,
+    direction: TradeDirection,
+    costs: &TradingCosts,
+    instrument: &InstrumentConfig,
+    rng: &mut R,
+) -> f64 {
+    let slippage = if costs.slippage_random {
+        costs.slippage_pips * instrument.pip_size * rng.gen::<f64>()
+    } else {
+        costs.slippage_pips * instrument.pip_size
+    };
+
+    match direction {
+        TradeDirection::Long | TradeDirection::Both => price + slippage,
+        TradeDirection::Short => price - slippage,
+    }
+}
+
 /// Apply trading costs (slippage) to the exit price.
 /// For long: sell at bid (price - slippage), for short: buy at ask (price + slippage).
 /// Note: spread is already paid on entry, only slippage affects exit.

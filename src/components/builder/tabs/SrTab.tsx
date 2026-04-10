@@ -19,7 +19,9 @@ import type {
   Timeframe,
   TradeDirection,
   BuilderSavedStrategy,
+  BacktestPrecision,
 } from "@/lib/types";
+import { PRECISION_LABELS } from "@/lib/types";
 import {
   ALL_INDICATORS,
   makeEntry,
@@ -119,7 +121,7 @@ export function SrTab() {
 
   // Destructure all config fields for convenient access
   const {
-    activeTab, symbolId, timeframe, startDate, endDate, initialCapital,
+    activeTab, symbolId, timeframe, startDate, endDate, initialCapital, precision,
     activePool, checkedTypes,
     databankLimit, maxTradesPerDay, tradeDirection,
     positionSizingType, positionSizingValue,
@@ -263,6 +265,7 @@ export function SrTab() {
       start_date: startDate,
       end_date: endDate,
       initial_capital: initialCapital,
+      precision,
       leverage: 1.0,
       position_sizing: { sizing_type: positionSizingType, value: positionSizingValue },
       stop_loss: slEnabled ? { sl_type: slType, value: slType === "ATR" ? slAtrMultMin : slValue, ...(slType === "ATR" ? { atr_period: slAtrPeriodMin } : {}) } : undefined,
@@ -471,6 +474,29 @@ export function SrTab() {
                 )}
 
                 <Num label="Capital inicial $" value={initialCapital} min={100} step={1000} onChange={(v) => u({ initialCapital: v })} />
+
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="w-36 shrink-0 text-muted-foreground">Precisión</span>
+                  <Select value={precision} onValueChange={(v) => u({ precision: v as BacktestPrecision })}>
+                    <SelectTrigger className="h-7 flex-1 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {(Object.entries(PRECISION_LABELS) as [BacktestPrecision, string][])
+                        .filter(([key]) => {
+                          if (!symbol) return true;
+                          const paths = symbol.timeframe_paths ?? {};
+                          if (key === "M1TickSimulation") return "m1" in paths;
+                          if (key === "RealTickCustomSpread") return "tick" in paths;
+                          if (key === "RealTickRealSpread") return "tick_raw" in paths;
+                          return true;
+                        })
+                        .map(([key, label]) => (
+                          <SelectItem key={key} value={key}>{label}</SelectItem>
+                        ))}
+                    </SelectContent>
+                  </Select>
+                </div>
               </div>
             </Section>
 

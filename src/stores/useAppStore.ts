@@ -49,6 +49,7 @@ export interface SrBuilderConfig {
   startDate: string;
   endDate: string;
   initialCapital: number;
+  precision: BacktestPrecision;
   activePool: PoolEntryState[];
   checkedTypes: IndicatorType[];
   databankLimit: number;
@@ -120,6 +121,7 @@ const defaultSrBuilderConfig: SrBuilderConfig = {
   startDate: "",
   endDate: "",
   initialCapital: 10000,
+  precision: "SelectedTfOnly",
   activePool: [],
   checkedTypes: [],
   databankLimit: 50,
@@ -1042,6 +1044,14 @@ export const useAppStore = create<AppState>((set, get) => ({
       return { projects };
     });
     if (updated) await saveProject(updated);
+    // Auto-open the newly created task inline (no navigation away from projects)
+    set({
+      builderConfig: taskConfig,
+      builderDatabanks: [{ id: "results", name: "Results", strategies: [] }],
+      activeProjectId: projectId,
+      activeProjectTaskId: id,
+      activeProjectTaskDirty: false,
+    });
   },
   deleteTaskFromProject: async (projectId, taskId) => {
     const s = get();
@@ -1051,7 +1061,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       reset.builderConfig = defaultBuilderConfig;
       reset.builderDatabanks = [{ id: "results", name: "Results", strategies: [] }];
       reset.activeProjectTaskDirty = false;
-      reset.activeSection = "projects";
     }
     const now = new Date().toISOString();
     let updated: Project | undefined;
@@ -1082,7 +1091,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       activeProjectId: projectId,
       activeProjectTaskId: taskId,
       activeProjectTaskDirty: false,
-      activeSection: "builder",
+      // Stay in "projects" section — builder renders inline inside ProjectView
     });
   },
   saveActiveProjectTask: async () => {
@@ -1129,7 +1138,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       builderConfig: defaultBuilderConfig,
       builderDatabanks: [{ id: "builder", name: "Builder", strategies: [] }, { id: "results", name: "Results", strategies: [] }],
       activeProjectTaskDirty: false,
-      activeSection: "projects",
+      // Stay in "projects" section — returns to the task list in ProjectView
     });
   },
 

@@ -34,11 +34,11 @@ export function Sidebar() {
   const activeProjectTaskId = useAppStore((s) => s.activeProjectTaskId);
 
   const handleNav = async (id: AppSection) => {
-    // If a project task is open and user clicks away from builder, auto-save and close
-    if (activeProjectTaskId && id !== "builder") {
+    // If a project task is open, auto-save and close it before navigating elsewhere.
+    // The builder now renders inline inside ProjectView, so any navigation away
+    // (including to the standalone "builder" section) must close the task first.
+    if (activeProjectTaskId && id !== "projects") {
       await closeProjectTask();
-      // closeProjectTask sets activeSection = "projects"
-      // If the user clicked something other than "projects", navigate there too
       if (id !== "projects") setActiveSection(id);
       return;
     }

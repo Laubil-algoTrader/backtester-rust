@@ -135,7 +135,7 @@ fn load_bar_csv(
             .and_then(|s| s.trim().parse::<f64>().ok())
             .unwrap_or(0.0);
 
-        datetimes.push(dt_us - tz_offset_us);
+        datetimes.push(dt_us + tz_offset_us);
         opens.push(open);
         highs.push(high);
         lows.push(low);
@@ -207,7 +207,7 @@ fn load_tick_csv(
             .and_then(|s| s.trim().parse::<f64>().ok())
             .unwrap_or(0.0);
 
-        datetimes.push(dt_us - tz_offset_us);
+        datetimes.push(dt_us + tz_offset_us);
         bids.push(bid);
         asks.push(ask);
         volumes.push(volume);
@@ -501,7 +501,7 @@ pub fn stream_tick_csv_to_parquet(
         let dt_us = match parse_datetime_fast(dt_str.as_bytes())
             .or_else(|| parse_datetime(dt_str, total_rows).ok())
         {
-            Some(v) => v - tz_offset_us,
+            Some(v) => v + tz_offset_us,
             None => {
                 warn!("Row {}: cannot parse datetime '{}'", total_rows + 1, dt_str);
                 continue;
@@ -944,15 +944,6 @@ fn year_from_str(s: &[u8]) -> i32 {
 /// Returns microseconds since Unix epoch, or `None` for any other format
 /// (the caller falls back to the chrono-based `parse_datetime`).
 fn parse_datetime_fast(s: &[u8]) -> Option<i64> {
-    if s.len() < 19 { return None; }
-    // Accept both "YYYY-MM-DD HH:MM:SS" (ISO) and "YYYY.MM.DD HH:MM:SS" (MT4/MT5)
-    let date_sep = s[4];
-    if (date_sep != b'-' && date_sep != b'.') || s[7] != date_sep
-        || s[10] != b' ' || s[13] != b':' || s[16] != b':'
-    {
-        return None;
-    }
-
     #[inline]
     fn d2(a: u8, b: u8) -> Option<i64> {
         let hi = a.wrapping_sub(b'0');
@@ -969,6 +960,50 @@ fn parse_datetime_fast(s: &[u8]) -> Option<i64> {
         if a > 9 || bb > 9 || c > 9 || d > 9 { return None; }
         Some(a * 1000 + bb * 100 + c * 10 + d)
     }
+    #[inline]
+    fn parse_frac(s: &[u8], dot_pos: usize) -> i64 {
+        if s.len() <= dot_pos || s[dot_pos] != b'.' { return 0; }
+        let frac_bytes = &s[dot_pos + 1..s.len().min(dot_pos + 7)]; // max 6 digits
+        let mut val = 0i64;
+        let mut digits = 0usize;
+        for &b in frac_bytes {
+            let d = b.wrapping_sub(b'0');
+            if d > 9 { break; }
+            val = val * 10 + d as i64;
+            digits += 1;
+        }
+        while digits < 6 { val *= 10; digits += 1; }
+        val
+    }
+
+    // ── "yyyyMMdd HH:mm:ss[.SSS]" — SQX/MT5 compact format, no date separators ──
+    // e.g. "20240115 12:30:45.123"
+    if s.len() >= 17
+        && s[4].is_ascii_digit() && s[5].is_ascii_digit()
+        && s[6].is_ascii_digit() && s[7].is_ascii_digit()
+        && s[8] == b' ' && s[11] == b':' && s[14] == b':'
+    {
+        let year  = d4(&s[0..4])?;
+        let month = d2(s[4], s[5])?;
+        let day   = d2(s[6], s[7])?;
+        let hour  = d2(s[9], s[10])?;
+        let min   = d2(s[12], s[13])?;
+        let sec   = d2(s[15], s[16])?;
+        if month < 1 || month > 12 || day < 1 || day > 31
+            || hour > 23 || min > 59 || sec > 60 { return None; }
+        let frac_us = parse_frac(s, 17);
+        let days = days_since_epoch(year, month, day)?;
+        return Some((days * 86400 + hour * 3600 + min * 60 + sec) * 1_000_000 + frac_us);
+    }
+
+    // ── "YYYY-MM-DD HH:MM:SS[.ffffff]" or "YYYY.MM.DD HH:MM:SS[.fff]" ──
+    if s.len() < 19 { return None; }
+    let date_sep = s[4];
+    if (date_sep != b'-' && date_sep != b'.') || s[7] != date_sep
+        || s[10] != b' ' || s[13] != b':' || s[16] != b':'
+    {
+        return None;
+    }
 
     let year  = d4(&s[0..4])?;
     let month = d2(s[5], s[6])?;
@@ -980,28 +1015,9 @@ fn parse_datetime_fast(s: &[u8]) -> Option<i64> {
     if month < 1 || month > 12 || day < 1 || day > 31
         || hour > 23 || min > 59 || sec > 60 { return None; }
 
-    // Fractional seconds (up to 6 digits = microseconds)
-    let frac_us: i64 = if s.len() > 19 && s[19] == b'.' {
-        let frac_bytes = &s[20..s.len().min(26)]; // max 6 digits
-        let mut val = 0i64;
-        let mut digits = 0usize;
-        for &b in frac_bytes {
-            let d = b.wrapping_sub(b'0');
-            if d > 9 { break; }
-            val = val * 10 + d as i64;
-            digits += 1;
-        }
-        // Normalise to microseconds
-        while digits < 6 { val *= 10; digits += 1; }
-        val
-    } else {
-        0
-    };
-
-    // Days since epoch using a branchless Gregorian formula
+    let frac_us = parse_frac(s, 19);
     let days = days_since_epoch(year, month, day)?;
-    let secs = days * 86400 + hour * 3600 + min * 60 + sec;
-    Some(secs * 1_000_000 + frac_us)
+    Some((days * 86400 + hour * 3600 + min * 60 + sec) * 1_000_000 + frac_us)
 }
 
 /// Compute days since 1970-01-01 for a given (year, month, day).
@@ -1017,8 +1033,6 @@ fn days_since_epoch(y: i64, m: i64, d: i64) -> Option<i64> {
     Some(days)
 }
 
-
-use chrono::Datelike;
 
 fn parse_datetime(s: &str, row: usize) -> Result<i64, AppError> {
     let s = s.trim().trim_matches('"');
@@ -1037,6 +1051,13 @@ fn parse_datetime(s: &str, row: usize) -> Result<i64, AppError> {
         return Ok(ndt.and_utc().timestamp_micros());
     }
     if let Ok(ndt) = chrono::NaiveDateTime::parse_from_str(s, "%Y.%m.%d %H:%M") {
+        return Ok(ndt.and_utc().timestamp_micros());
+    }
+    // SQX compact format: yyyyMMdd HH:mm:ss[.SSS] (no separators in date)
+    if let Ok(ndt) = chrono::NaiveDateTime::parse_from_str(s, "%Y%m%d %H:%M:%S%.f") {
+        return Ok(ndt.and_utc().timestamp_micros());
+    }
+    if let Ok(ndt) = chrono::NaiveDateTime::parse_from_str(s, "%Y%m%d %H:%M:%S") {
         return Ok(ndt.and_utc().timestamp_micros());
     }
     // Date only

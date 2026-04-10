@@ -1214,6 +1214,19 @@ fn indicator_lookback(config: &IndicatorConfig) -> usize {
         }
         KeltnerChannel | SuperTrend => config.params.period.unwrap_or(14) + 1,
         Reflex => config.params.period.unwrap_or(14) + 2,
+        // SQX new indicators
+        AvgVolume | BBWidthRatio | EfficiencyRatio | HighestIndex | LowestIndex =>
+            config.params.period.unwrap_or(14),
+        KAMA => config.params.period.unwrap_or(10) + 1,
+        QQE => {
+            let rsi_p = config.params.period.unwrap_or(14);
+            rsi_p * 2 + config.params.signal_period.unwrap_or(5)
+        }
+        SchaffTrendCycle => {
+            let slow = config.params.slow_period.unwrap_or(50);
+            let period = config.params.period.unwrap_or(10);
+            slow + period
+        }
     }
 }
 

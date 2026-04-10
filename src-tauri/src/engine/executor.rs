@@ -22,7 +22,7 @@ use super::orders;
 use super::position::{
     calculate_lots, calculate_stop_loss, calculate_take_profit,
     calculate_trailing_stop_distance, calculate_swap_charge, check_sl_tp_hit,
-    check_sl_tp_hit_open_only, enforce_stops_level_sl, enforce_stops_level_tp,
+    check_sl_tp_hit_bar_direction, check_sl_tp_hit_open_only, enforce_stops_level_sl, enforce_stops_level_tp,
     should_charge_swap, update_mae_mfe_ba, update_trailing_stop,
     OpenPosition, PendingOrder,
 };
@@ -245,6 +245,7 @@ fn run_backtest_inner(
                     backtest_config: config.clone(),
                     long_metrics: None,
                     short_metrics: None,
+                    warnings: vec![],
                 });
             }
         }
@@ -311,6 +312,9 @@ fn run_backtest_inner(
                         last_swap_date: candle.datetime[..10.min(candle.datetime.len())].to_string(),
                         accumulated_swap: 0.0,
                         sl_moved_to_be: false,
+                        trailing_activation_dist: strategy.trailing_stop.as_ref()
+                            .and_then(|ts| ts.activation_pips)
+                            .map(|pips| pips * instrument.pip_size),
                     });
                     daily_trade_count += 1;
                     pending_order = None;
@@ -426,11 +430,32 @@ fn run_backtest_inner(
                     let atr_for_tp = get_atr(&atr_values.for_tp);
                     let atr_for_ts = get_atr(&atr_values.for_ts);
 
-                    let raw_price = candle.open;
+                    // Use sub-bar data for more accurate entry price when available.
+                    // The H1 candle open may differ slightly from the actual first
+                    // M1/tick price due to data aggregation or rounding differences.
+                    // spread_from_ticks: when true, the raw_price already reflects the real
+                    // bid/ask spread from tick data, so apply_entry_costs should skip spread.
+                    let (raw_price, entry_dt, spread_from_ticks) = match *sub_bars {
+                        SubBarData::Candles(ref subs) if sub_start < sub_end => {
+                            (subs[sub_start].open, subs[sub_start].datetime.clone(), false)
+                        }
+                        SubBarData::Ticks(ref ticks) if sub_start < sub_end => {
+                            let tick_price = match dir {
+                                TradeDirection::Long => ticks.asks[sub_start],
+                                TradeDirection::Short | TradeDirection::Both => ticks.bids[sub_start],
+                            };
+                            (tick_price, micros_to_datetime_string(ticks.timestamps[sub_start]), true)
+                        }
+                        _ => (candle.open, candle.datetime.clone(), false),
+                    };
 
                     match strategy.entry_order {
                         OrderType::Market => {
-                            let entry_price = orders::apply_entry_costs(raw_price, dir, &strategy.trading_costs, instrument, &mut rng);
+                            let entry_price = if spread_from_ticks {
+                                orders::apply_slippage_only(raw_price, dir, &strategy.trading_costs, instrument, &mut rng)
+                            } else {
+                                orders::apply_entry_costs(raw_price, dir, &strategy.trading_costs, instrument, &mut rng)
+                            };
                             let sl_price = strategy.stop_loss.as_ref().map(|sl_cfg| {
                                 let sl = calculate_stop_loss(sl_cfg, entry_price, dir, atr_for_sl, instrument);
                                 enforce_stops_level_sl(sl, entry_price, dir, instrument)
@@ -447,7 +472,7 @@ fn run_backtest_inner(
                                 direction: dir,
                                 entry_price,
                                 entry_bar: i,
-                                entry_time: candle.datetime.clone(),
+                                entry_time: entry_dt,
                                 lots,
                                 stop_loss: sl_price,
                                 take_profit: tp_price,
@@ -460,6 +485,9 @@ fn run_backtest_inner(
                                 last_swap_date: candle.datetime[..10.min(candle.datetime.len())].to_string(),
                                 accumulated_swap: 0.0,
                                 sl_moved_to_be: false,
+                                trailing_activation_dist: strategy.trailing_stop.as_ref()
+                                    .and_then(|ts| ts.activation_pips)
+                                    .map(|pips| pips * instrument.pip_size),
                             });
                             daily_trade_count += 1;
                         }
@@ -617,12 +645,13 @@ fn run_backtest_inner(
                         }
 
                         if let Some(dir) = tick_dir {
-                            // Execute at tick's actual bid/ask price
+                            // Execute at tick's actual bid/ask price (spread already embedded)
                             let raw_price = match dir {
                                 TradeDirection::Long => tick_ask,
                                 TradeDirection::Short | TradeDirection::Both => tick_bid,
                             };
-                            let entry_price = orders::apply_entry_costs(
+                            // Tick prices already include real spread — only add slippage
+                            let entry_price = orders::apply_slippage_only(
                                 raw_price, dir, &strategy.trading_costs, instrument, &mut rng,
                             );
 
@@ -677,6 +706,9 @@ fn run_backtest_inner(
                                     .to_string(),
                                 accumulated_swap: 0.0,
                                 sl_moved_to_be: false,
+                                trailing_activation_dist: strategy.trailing_stop.as_ref()
+                                    .and_then(|ts| ts.activation_pips)
+                                    .map(|pips| pips * instrument.pip_size),
                             });
                             daily_trade_count += 1;
                             // Phase 3 must start from the tick AFTER entry
@@ -859,6 +891,19 @@ fn run_backtest_inner(
         (None, None)
     };
 
+    // Emit warnings about configuration that may affect accuracy
+    let mut warnings = Vec::new();
+    if matches!(config.precision, crate::models::strategy::BacktestPrecision::SelectedTfOnly | crate::models::strategy::BacktestPrecision::OpenPricesOnly)
+        && config.timeframe.minutes() >= 60
+    {
+        warnings.push(format!(
+            "Using {:?} precision on {} timeframe. SL/TP resolution is limited to bar-level OHLC, \
+             which can produce optimistic results. Use M1TickSimulation or RealTick precision \
+             for more accurate intra-bar SL/TP resolution.",
+            config.precision, config.timeframe.as_str()
+        ));
+    }
+
     Ok(BacktestResults {
         trades,
         equity_curve,
@@ -868,6 +913,7 @@ fn run_backtest_inner(
         backtest_config: config.clone(),
         long_metrics,
         short_metrics,
+        warnings,
     })
 }
 
@@ -879,7 +925,7 @@ fn run_backtest_inner(
 /// O(n+m) total across all candles in the backtest.
 /// For Candles: uses string datetime comparison.
 /// For Ticks: uses i64 microsecond timestamp comparison (~10x faster).
-fn find_subbar_range(
+pub(crate) fn find_subbar_range(
     sub_bars: &SubBarData,
     cursor: &mut usize,
     candle_dt: &str,
@@ -973,7 +1019,12 @@ fn resolve_exit(
 /// Process M1 sub-candles for SL/TP resolution within a TF bar.
 /// Derives bid/ask OHLC per sub-candle using the configured spread.
 /// Updates MAE/MFE and trailing stop on each sub-candle.
-fn process_subbars_candle(
+///
+/// Uses the bar-direction heuristic (`check_sl_tp_hit_bar_direction`) to resolve
+/// same-bar SL/TP conflicts on M1 candles. On M1, the bar direction (open→close)
+/// is a reliable indicator of which extreme was reached first, matching MT5's
+/// "1 minute OHLC" mode behaviour.
+pub(crate) fn process_subbars_candle(
     pos: &mut OpenPosition,
     sub_candles: &[Candle],
     start: usize,
@@ -986,8 +1037,10 @@ fn process_subbars_candle(
         let ba = orders::BidAskOhlc::from_candle(sc, spread);
         // Update MAE/MFE using bid/ask split
         update_mae_mfe_ba(pos, &ba, instrument);
-        // Check SL/TP (with current trailing stop level)
-        if let Some((exit_price, reason)) = check_sl_tp_hit(pos, &ba) {
+        // Check SL/TP using bar direction heuristic for same-bar conflicts.
+        // On M1 bars the direction (open→close) reliably indicates which extreme
+        // was reached first, unlike H1+ bars where the heuristic is unreliable.
+        if let Some((exit_price, reason)) = check_sl_tp_hit_bar_direction(pos, &ba, sc.open, sc.close) {
             return Some((exit_price, sc.datetime.clone(), reason));
         }
         // Update trailing stop for next sub-bar
@@ -1004,7 +1057,7 @@ fn process_subbars_candle(
 /// - Contiguous f64 slices for bid/ask maximize CPU cache hits
 /// - No String allocations during iteration (timestamps are i64)
 /// - Exit time string conversion only happens on the rare trade-close event
-fn process_subbars_tick_columnar(
+pub(crate) fn process_subbars_tick_columnar(
     pos: &mut OpenPosition,
     ticks: &TickColumns,
     start: usize,
@@ -1047,7 +1100,12 @@ fn process_subbars_tick_columnar(
             }
             // Trailing stop (track highest bid)
             if let Some(distance) = pos.trailing_stop_distance {
-                if bid > pos.highest_since_entry {
+                // Activation threshold: skip trailing until MFE exceeds activation distance
+                let activated = match pos.trailing_activation_dist {
+                    Some(act_dist) => (bid - pos.entry_price) >= act_dist,
+                    None => true,
+                };
+                if activated && bid > pos.highest_since_entry {
                     pos.highest_since_entry = bid;
                     let new_sl = bid - distance;
                     let moved = match pos.stop_loss {
@@ -1085,7 +1143,12 @@ fn process_subbars_tick_columnar(
             }
             // Trailing stop (track lowest ask)
             if let Some(distance) = pos.trailing_stop_distance {
-                if ask < pos.lowest_since_entry {
+                // Activation threshold: skip trailing until MFE exceeds activation distance
+                let activated = match pos.trailing_activation_dist {
+                    Some(act_dist) => (pos.entry_price - ask) >= act_dist,
+                    None => true,
+                };
+                if activated && ask < pos.lowest_since_entry {
                     pos.lowest_since_entry = ask;
                     let new_sl = ask + distance;
                     let moved = match pos.stop_loss {
@@ -1424,7 +1487,7 @@ fn parse_datetime_to_micros(s: &str) -> i64 {
 
 /// Convert microseconds since epoch back to a datetime string.
 /// Only called on trade close events (rare), so performance is not critical.
-fn micros_to_datetime_string(micros: i64) -> String {
+pub(crate) fn micros_to_datetime_string(micros: i64) -> String {
     let secs = micros / 1_000_000;
     let subsec_nanos = ((micros % 1_000_000).unsigned_abs() as u32) * 1000;
     chrono::DateTime::from_timestamp(secs, subsec_nanos)

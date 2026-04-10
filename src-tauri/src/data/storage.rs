@@ -43,7 +43,30 @@ pub fn initialize_database(db_path: &str) -> Result<Connection, AppError> {
             updated_at      TEXT NOT NULL,
             strategy_json   TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS sr_sessions (
+            id          TEXT PRIMARY KEY,
+            name        TEXT NOT NULL,
+            symbol_id   TEXT NOT NULL,
+            timeframe   TEXT NOT NULL,
+            created_at  TEXT NOT NULL,
+            config_json TEXT NOT NULL,
+            front_json  TEXT NOT NULL
+        );
         ",
+    )?;
+
+    // Migrate: add sr_sessions if upgrading from an older DB that didn't have it.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS sr_sessions (
+            id          TEXT PRIMARY KEY,
+            name        TEXT NOT NULL,
+            symbol_id   TEXT NOT NULL,
+            timeframe   TEXT NOT NULL,
+            created_at  TEXT NOT NULL,
+            config_json TEXT NOT NULL,
+            front_json  TEXT NOT NULL
+        );",
     )?;
 
     info!("Database initialized at {}", db_path);
@@ -303,4 +326,99 @@ fn row_to_symbol(row: &rusqlite::Row<'_>) -> Result<Symbol, rusqlite::Error> {
         status,
         download_params,
     })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SR Session CRUD
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A saved SR builder session stored in the database.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SrSession {
+    pub id: String,
+    pub name: String,
+    pub symbol_id: String,
+    pub timeframe: String,
+    pub created_at: String,
+    /// The SrConfig used for this run (serialized JSON).
+    pub config_json: String,
+    /// The Pareto front items (serialized JSON array of SrFrontItem).
+    pub front_json: String,
+}
+
+/// Insert a new SR session into the database.
+pub fn insert_sr_session(db: &Connection, session: &SrSession) -> Result<(), AppError> {
+    db.execute(
+        "INSERT INTO sr_sessions (id, name, symbol_id, timeframe, created_at, config_json, front_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            session.id,
+            session.name,
+            session.symbol_id,
+            session.timeframe,
+            session.created_at,
+            session.config_json,
+            session.front_json,
+        ],
+    )?;
+    info!("Saved SR session: {} ({})", session.name, session.id);
+    Ok(())
+}
+
+/// Retrieve all SR sessions ordered by most recent first.
+/// Returns lightweight metadata (no front_json) for listing.
+pub fn get_all_sr_sessions(db: &Connection) -> Result<Vec<SrSession>, AppError> {
+    let mut stmt = db.prepare(
+        "SELECT id, name, symbol_id, timeframe, created_at, config_json, front_json
+         FROM sr_sessions ORDER BY created_at DESC",
+    )?;
+
+    let sessions = stmt
+        .query_map([], |row| {
+            Ok(SrSession {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                symbol_id: row.get(2)?,
+                timeframe: row.get(3)?,
+                created_at: row.get(4)?,
+                config_json: row.get(5)?,
+                front_json: row.get(6)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(sessions)
+}
+
+/// Retrieve a single SR session by ID.
+pub fn get_sr_session_by_id(db: &Connection, id: &str) -> Result<SrSession, AppError> {
+    let mut stmt = db.prepare(
+        "SELECT id, name, symbol_id, timeframe, created_at, config_json, front_json
+         FROM sr_sessions WHERE id = ?1",
+    )?;
+
+    stmt.query_row(params![id], |row| {
+        Ok(SrSession {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            symbol_id: row.get(2)?,
+            timeframe: row.get(3)?,
+            created_at: row.get(4)?,
+            config_json: row.get(5)?,
+            front_json: row.get(6)?,
+        })
+    })
+    .map_err(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => {
+            AppError::NotFound(format!("SR session not found: {}", id))
+        }
+        other => AppError::Database(other.to_string()),
+    })
+}
+
+/// Delete an SR session by ID.
+pub fn delete_sr_session_by_id(db: &Connection, id: &str) -> Result<(), AppError> {
+    db.execute("DELETE FROM sr_sessions WHERE id = ?1", params![id])?;
+    info!("Deleted SR session: {}", id);
+    Ok(())
 }

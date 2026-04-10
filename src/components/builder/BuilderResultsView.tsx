@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { toast } from "sonner";
 import {
   ArrowLeft, BarChart2, Loader2, Play, Trash2,
-  Code2, Copy, Check, Download, FileCode2, FolderDown, RefreshCw,
+  Code2, Copy, Check, Download, FileCode2, FolderDown, RefreshCw, FileDown,
 } from "lucide-react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeTextFile, mkdir } from "@tauri-apps/plugin-fs";
@@ -10,7 +11,6 @@ import { runBacktest, runSrBacktest, generateStrategyCode, generateSrCode } from
 import { MetricsGrid } from "@/components/backtest/MetricsGrid";
 import { EquityCurve } from "@/components/backtest/EquityCurve";
 import { DrawdownChart } from "@/components/backtest/DrawdownChart";
-import { MonthlyReturns } from "@/components/backtest/MonthlyReturns";
 import { MonthlyReturnsGrid } from "@/components/backtest/MonthlyReturnsGrid";
 import { TradesList } from "@/components/backtest/TradesList";
 import { DatePicker } from "@/components/ui/DatePicker";
@@ -295,6 +295,38 @@ export function StrategyBacktestDetail({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const handleExport = async () => {
+    if (!localResults) return;
+    try {
+      const { trades, metrics } = localResults;
+      const lines: string[] = [
+        "# Backtest Report",
+        `# Strategy: ${saved.name}`,
+        `# Symbol: ${saved.symbolName} | TF: ${saved.timeframe.toUpperCase()}`,
+        `# Period: ${startDate} to ${endDate} | Capital: $${initialCapital}`,
+        "#",
+        `# Net Profit: $${metrics.net_profit.toFixed(2)} | Sharpe: ${metrics.sharpe_ratio.toFixed(2)} | PF: ${metrics.profit_factor.toFixed(2)} | Max DD: ${metrics.max_drawdown_pct.toFixed(2)}%`,
+        "#",
+        "Trade,Direction,Entry Time,Entry Price,Exit Time,Exit Price,Lots,PnL,Pips,Commission,Reason,Duration",
+        ...trades.map((t, i) =>
+          [i + 1, t.direction, t.entry_time, t.entry_price.toFixed(5), t.exit_time, t.exit_price.toFixed(5),
+            t.lots.toFixed(2), t.pnl.toFixed(2), t.pnl_pips.toFixed(1), t.commission.toFixed(2),
+            t.close_reason, t.duration_bars + "b"].join(",")
+        ),
+      ];
+      const csv = lines.join("\n");
+      const path = await save({
+        defaultPath: `${saved.name.replace(/[^a-zA-Z0-9_-]/g, "_")}_backtest.csv`,
+        filters: [{ name: "CSV", extensions: ["csv"] }],
+      });
+      if (!path) return;
+      await writeTextFile(path, csv);
+      toast.success("Reporte exportado correctamente");
+    } catch (err) {
+      toast.error(`Error al exportar: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
   const handleRun = async () => {
     const symbolId = saved.symbolId ?? builderConfig.dataConfig.symbolId ?? "";
     if (!symbolId) { setError("No hay símbolo configurado."); return; }
@@ -408,6 +440,15 @@ export function StrategyBacktestDetail({
               {loading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
               {loading ? "Ejecutando…" : "Ejecutar"}
             </button>
+            <button
+              onClick={handleExport}
+              disabled={!localResults}
+              title="Exportar reporte CSV"
+              className="flex items-center gap-1.5 rounded border border-border/30 px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground hover:border-border/60 disabled:opacity-30 transition-colors"
+            >
+              <FileDown className="w-3 h-3" />
+              Exportar
+            </button>
           </div>
         )}
       </div>
@@ -456,17 +497,14 @@ export function StrategyBacktestDetail({
                   </div>
                 </div>
 
-                <div className="rounded border border-border/30 bg-card p-4">
-                  <p className="mb-3 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/50">
-                    Rendimiento Mensual
-                  </p>
-                  <MonthlyReturns equityCurve={localResults.equity_curve} />
-                  {localResults.trades.length > 0 && (
-                    <div className="mt-4">
-                      <MonthlyReturnsGrid trades={localResults.trades} initialCapital={initialCapital} />
-                    </div>
-                  )}
-                </div>
+                {localResults.trades.length > 0 && (
+                  <div className="rounded border border-border/30 bg-card p-4">
+                    <p className="mb-3 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/50">
+                      Rendimiento Mensual
+                    </p>
+                    <MonthlyReturnsGrid trades={localResults.trades} initialCapital={initialCapital} />
+                  </div>
+                )}
 
                 <div className="rounded border border-border/30 bg-card p-4">
                   <p className="mb-3 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/50">
